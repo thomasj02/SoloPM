@@ -281,7 +281,8 @@ class GitHub:
             return False  # never feed an unvalidated name to git
         # Remote delete is independent of local worktree state; attempt it regardless.
         remote = self._run_cleanup(["git", "push", "origin", "--delete", branch], repo)
-        if remote is None or remote.returncode != 0:
+        remote_ok = self._remote_branch_gone(remote)
+        if not remote_ok:
             logger.warning("Best-effort delete of remote branch %s failed: %s", branch, _detail(remote))
         # Local delete: skip a branch that a worktree has checked out (it can't be removed,
         # and that is expected — SoloPM keeps the worktree until the human cleans it up).
@@ -291,10 +292,28 @@ class GitHub:
             )
             return False
         local = self._run_cleanup(["git", "branch", "-D", branch], repo)
-        if local is None or local.returncode != 0:
+        local_ok = local is not None and local.returncode == 0
+        if not local_ok:
             logger.warning("Best-effort delete of local branch %s failed: %s", branch, _detail(local))
+        # "Deleted" only when the branch is gone everywhere SoloPM can reach — otherwise the
+        # confirmation note would falsely claim a cleanup that left the GitHub (or local)
+        # branch behind.
+        return remote_ok and local_ok
+
+    @staticmethod
+    def _remote_branch_gone(proc: "subprocess.CompletedProcess | None") -> bool:
+        """Whether the remote branch is gone after a ``git push --delete``.
+
+        True on success, and also when the push reports the ref is already absent (e.g. the
+        repo's auto-delete-on-merge already removed it) — that is a clean state, not a
+        cleanup failure. False when the command raised (``None``) or failed for any other
+        reason (network / permission), so the caller doesn't over-claim deletion.
+        """
+        if proc is None:
             return False
-        return True
+        if proc.returncode == 0:
+            return True
+        return "remote ref does not exist" in (proc.stderr or proc.stdout or "").lower()
 
     def _run_cleanup(self, args: list[str], repo: str) -> subprocess.CompletedProcess | None:
         """Run a best-effort cleanup command, returning ``None`` instead of raising.

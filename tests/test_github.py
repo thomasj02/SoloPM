@@ -501,6 +501,7 @@ def _gh_with_branch_fake(
     worktree_branch=None,
     local_delete_rc=0,
     remote_delete_rc=0,
+    remote_delete_stderr=None,
     remote_delete_raises=False,
     local_delete_raises=False,
     record=None,
@@ -536,7 +537,10 @@ def _gh_with_branch_fake(
             if remote_delete_raises:
                 raise GitHubError("Command timed out: git push origin --delete")
             p.returncode = remote_delete_rc
-            p.stderr = "remote rejected" if remote_delete_rc else ""
+            if remote_delete_stderr is not None:
+                p.stderr = remote_delete_stderr
+            elif remote_delete_rc:
+                p.stderr = "remote rejected"
             return p
         if args[:2] == ["git", "branch"]:  # local delete
             if local_delete_raises:
@@ -633,6 +637,51 @@ def test_close_pr_branch_delete_failure_is_nonfatal(tmp_path, monkeypatch):
     )
     result = gh.close_pr("/repo", 17, branch="solo-16-x")  # must not raise
     assert result.branch_deleted is False
+
+
+def test_merge_pr_remote_delete_failure_reports_not_deleted(tmp_path, monkeypatch):
+    # [SOLO-16 gpt-review P2] If the remote delete fails (network/permission) but the local
+    # delete succeeds, the branch still exists on GitHub — branch_deleted must be False so
+    # the note does not falsely claim the branch was deleted.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    monkeypatch.setattr(
+        gh, "_run", _gh_with_branch_fake(remote_delete_rc=1, local_delete_rc=0)
+    )
+    result = gh.merge_pr("/repo", 17, branch="solo-16-x")
+    assert result.state == "merged"
+    assert result.branch_deleted is False
+
+
+def test_merge_pr_remote_already_gone_counts_as_deleted(tmp_path, monkeypatch):
+    # [SOLO-16 gpt-review P2] When the remote branch is already absent (e.g. repo-level
+    # auto-delete-on-merge removed it), `git push --delete` exits non-zero with "remote ref
+    # does not exist". That is not a failure — the branch IS gone, so report deleted.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    monkeypatch.setattr(gh, "_run", _gh_with_branch_fake(
+        remote_delete_rc=1,
+        remote_delete_stderr="error: unable to delete 'solo-16-x': remote ref does not exist",
+        local_delete_rc=0,
+    ))
+    result = gh.merge_pr("/repo", 17, branch="solo-16-x")
+    assert result.branch_deleted is True
+
+
+def test_queued_note_does_not_promise_branch_deletion(tmp_path):
+    # [SOLO-16 gpt-review P2] The gating merge no longer carries --delete-branch, so SoloPM
+    # cannot schedule deletion for a queued merge. The queued note must not promise it will
+    # "delete branch X" — that would be a promise nothing keeps.
+    gh = FakeGitHub(merge_state="queued")
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc)
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    svc.move_ticket(tid, "done", actor="human")
+    note = _comments(svc, tid)[0]
+    assert "merge queue" in note.lower()
+    assert "delete branch" not in note.lower()
 
 
 def test_merge_pr_cleanup_timeout_does_not_abort(tmp_path, monkeypatch):

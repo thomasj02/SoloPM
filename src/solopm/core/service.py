@@ -427,11 +427,18 @@ class Service:
 
     @staticmethod
     def _queued_note(number: int, url: str | None, base: str, branch: str) -> str:
-        """A record that a PR was added to GitHub's merge queue rather than merged yet."""
+        """A record that a PR was added to GitHub's merge queue rather than merged yet.
+
+        The gating merge no longer carries ``--delete-branch`` (it would abort on a branch
+        held by a worktree), and SoloPM gets no callback when the queue finally lands the
+        merge — so this note does not promise a SoloPM-driven branch deletion. Branch `{branch}`
+        is cleaned up by GitHub's auto-delete-on-merge (if enabled) or manually afterwards.
+        """
         where = f" ({url})" if url else ""
         return (
             f"PR #{number}{where} was added to the merge queue for `{base}` — it will "
-            f"squash-merge and delete branch `{branch}` once required checks pass."
+            f"squash-merge once required checks pass. Branch `{branch}` remains until then "
+            f"(removed by GitHub auto-delete if enabled, otherwise clean up manually)."
         )
 
     @staticmethod
