@@ -11,7 +11,20 @@ export type State =
 
 export type Assignee = "human" | "claude" | "codex" | "unassigned";
 
-export type ActivityKind = "created" | "comment" | "state_change" | "assignment" | "edit";
+export type ActivityKind =
+  | "created"
+  | "comment"
+  | "state_change"
+  | "assignment"
+  | "edit"
+  | "criteria"
+  | "review";
+
+export interface Criterion {
+  id: string;
+  text: string;
+  done: boolean;
+}
 
 export interface Meta {
   version: string;
@@ -71,6 +84,7 @@ export interface TicketSummary {
   branch: string | null;
   session_active: boolean;
   pr: PR | null;
+  acceptance: { done: number; total: number };
   comment_count: number;
   created_at: string;
   updated_at: string;
@@ -87,6 +101,7 @@ export interface Ticket {
   branch: string | null;
   pr: PR | null;
   session: Session | null;
+  acceptance_criteria: Criterion[];
   comments: Comment[];
   activity: Activity[];
   created_at: string;

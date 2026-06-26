@@ -109,6 +109,10 @@ def test_build_server_registers_expected_tools(service, project):
         "comment_ticket",
         "move_ticket",
         "assign_ticket",
+        "add_criterion",
+        "check_criterion",
+        "edit_criterion",
+        "remove_criterion",
     } <= names
 
 
@@ -124,3 +128,13 @@ def test_build_server_tool_invocation(service, project):
     payload = json.loads(blocks[0].text)
     assert payload["id"] == "SOLO-1"
     assert payload["activity"][0]["actor"] == "claude"  # attributed to the agent
+
+
+def test_criteria_via_mcp_tools(service, project):
+    t = tools_for(service)
+    t.create_ticket(project="SOLO", title="x")
+    cid = t.add_criterion("SOLO-1", "tests pass")["acceptance_criteria"][0]["id"]
+    assert t.check_criterion("SOLO-1", cid)["acceptance_criteria"][0]["done"] is True
+    # criteria surface in show_ticket
+    assert t.show_ticket("SOLO-1")["acceptance_criteria"][0]["id"] == cid
+    assert t.remove_criterion("SOLO-1", cid)["acceptance_criteria"] == []

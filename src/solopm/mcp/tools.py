@@ -107,7 +107,33 @@ class SoloPMTools:
         return self.svc.assign_ticket(ticket_id, assignee, actor=self.agent).to_dict()
 
     @_safe
-    def submit_review(self, ticket_id: str, verdict: str, comment: str | None = None) -> dict:
+    def submit_review(
+        self,
+        ticket_id: str,
+        verdict: str,
+        comment: str | None = None,
+        criteria_results: list[dict] | None = None,
+    ) -> dict:
         return self.svc.submit_review(
-            ticket_id, verdict, comment=comment, actor=self.agent
+            ticket_id,
+            verdict,
+            comment=comment,
+            criteria_results=criteria_results,
+            actor=self.agent,
         ).to_dict()
+
+    @_safe
+    def add_criterion(self, ticket_id: str, text: str) -> dict:
+        return self.svc.add_criterion(ticket_id, text, actor=self.agent).to_dict()
+
+    @_safe
+    def check_criterion(self, ticket_id: str, criterion_id: str, done: bool = True) -> dict:
+        return self.svc.check_criterion(ticket_id, criterion_id, done, actor=self.agent).to_dict()
+
+    @_safe
+    def edit_criterion(self, ticket_id: str, criterion_id: str, text: str) -> dict:
+        return self.svc.edit_criterion(ticket_id, criterion_id, text, actor=self.agent).to_dict()
+
+    @_safe
+    def remove_criterion(self, ticket_id: str, criterion_id: str) -> dict:
+        return self.svc.remove_criterion(ticket_id, criterion_id, actor=self.agent).to_dict()

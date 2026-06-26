@@ -27,9 +27,11 @@ app = typer.Typer(
 project_app = typer.Typer(help="Manage projects.", no_args_is_help=True)
 ticket_app = typer.Typer(help="Manage tickets.", no_args_is_help=True)
 review_app = typer.Typer(help="AI review verdicts.", no_args_is_help=True)
+criteria_app = typer.Typer(help="Manage a ticket's acceptance criteria.", no_args_is_help=True)
 app.add_typer(project_app, name="project")
 app.add_typer(ticket_app, name="ticket")
 app.add_typer(review_app, name="review")
+ticket_app.add_typer(criteria_app, name="criteria")
 
 # Reusable global flags (placed on each command so they may follow positional args,
 # matching the spec's `solopm ticket show SOLO-42 --json` usage).
@@ -438,6 +440,93 @@ def review_submit(
         output.console.print(f"[green]✓[/] {t['id']} review [bold]{verdict}[/] → [bold]{t['state']}[/]")
 
     _run(call, lambda api: api.post(f"/api/tickets/{ticket_id}/review", json=body), render)
+
+
+@criteria_app.command("add")
+def criteria_add(
+    ticket_id: Annotated[str, typer.Argument(help="Ticket ID.")],
+    text: Annotated[str, typer.Argument(help="Criterion text.")],
+    json_out: JsonOpt = False,
+    agent: AgentOpt = None,
+    url: UrlOpt = None,
+) -> None:
+    """Add an acceptance criterion to a ticket."""
+    call = Call(json_out, agent, url)
+
+    def render(t: dict) -> None:
+        crit = t["acceptance_criteria"]
+        output.console.print(
+            f"[green]✓[/] criterion [bold]{crit[-1]['id']}[/] added to {t['id']} ({len(crit)} total)"
+        )
+
+    _run(call, lambda api: api.post(f"/api/tickets/{ticket_id}/criteria", json={"text": text}), render)
+
+
+@criteria_app.command("check")
+def criteria_check(
+    ticket_id: Annotated[str, typer.Argument(help="Ticket ID.")],
+    criterion_id: Annotated[str, typer.Argument(help="Criterion ID (e.g. c1).")],
+    uncheck: Annotated[bool, typer.Option("--uncheck", help="Mark it not-done instead.")] = False,
+    json_out: JsonOpt = False,
+    agent: AgentOpt = None,
+    url: UrlOpt = None,
+) -> None:
+    """Tick (or --uncheck) an acceptance criterion."""
+    call = Call(json_out, agent, url)
+
+    def render(t: dict) -> None:
+        output.console.print(
+            f"[green]✓[/] {ticket_id} {criterion_id} {'unchecked' if uncheck else 'checked'}"
+        )
+
+    _run(
+        call,
+        lambda api: api.patch(
+            f"/api/tickets/{ticket_id}/criteria/{criterion_id}", json={"done": not uncheck}
+        ),
+        render,
+    )
+
+
+@criteria_app.command("edit")
+def criteria_edit(
+    ticket_id: Annotated[str, typer.Argument(help="Ticket ID.")],
+    criterion_id: Annotated[str, typer.Argument(help="Criterion ID (e.g. c1).")],
+    text: Annotated[str, typer.Argument(help="New criterion text.")],
+    json_out: JsonOpt = False,
+    agent: AgentOpt = None,
+    url: UrlOpt = None,
+) -> None:
+    """Edit an acceptance criterion's text."""
+    call = Call(json_out, agent, url)
+
+    def render(t: dict) -> None:
+        output.console.print(f"[green]✓[/] {ticket_id} {criterion_id} edited")
+
+    _run(
+        call,
+        lambda api: api.patch(
+            f"/api/tickets/{ticket_id}/criteria/{criterion_id}", json={"text": text}
+        ),
+        render,
+    )
+
+
+@criteria_app.command("remove")
+def criteria_remove(
+    ticket_id: Annotated[str, typer.Argument(help="Ticket ID.")],
+    criterion_id: Annotated[str, typer.Argument(help="Criterion ID (e.g. c1).")],
+    json_out: JsonOpt = False,
+    agent: AgentOpt = None,
+    url: UrlOpt = None,
+) -> None:
+    """Remove an acceptance criterion."""
+    call = Call(json_out, agent, url)
+
+    def render(t: dict) -> None:
+        output.console.print(f"[green]✓[/] {ticket_id} {criterion_id} removed")
+
+    _run(call, lambda api: api.delete(f"/api/tickets/{ticket_id}/criteria/{criterion_id}"), render)
 
 
 def run() -> None:
