@@ -105,3 +105,9 @@ class SoloPMTools:
     @_safe
     def assign_ticket(self, ticket_id: str, assignee: str) -> dict:
         return self.svc.assign_ticket(ticket_id, assignee, actor=self.agent).to_dict()
+
+    @_safe
+    def submit_review(self, ticket_id: str, verdict: str, comment: str | None = None) -> dict:
+        return self.svc.submit_review(
+            ticket_id, verdict, comment=comment, actor=self.agent
+        ).to_dict()

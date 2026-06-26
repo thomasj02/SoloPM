@@ -120,6 +120,7 @@ pass this), `--agent <name>` (attribute the action, e.g. `claude`/`codex`; absen
 | `solopm ticket move <id> <state>` | Transition state (validated). |
 | `solopm ticket assign <id> <assignee>` | Assign `human｜claude｜codex｜unassigned`. |
 | `solopm ticket reorder <id> [--after <id>]` | Reorder within a column (drag-and-drop in the web; no state change). |
+| `solopm review submit <id> --verdict pass\|fail [-c notes]` | Report an AI-review verdict: pass → in-human-review, fail → kick back to in-progress. |
 
 The full JSON contract is in [`API.md`](./API.md).
 
@@ -143,7 +144,8 @@ that's the same SQLite file the web app reads, an agent's MCP writes show up liv
 board.
 
 **Tools:** `list_projects`, `workflow_info`, `list_tickets`, `show_ticket`,
-`create_ticket`, `edit_ticket`, `comment_ticket`, `move_ticket`, `assign_ticket`.
+`create_ticket`, `edit_ticket`, `comment_ticket`, `move_ticket`, `assign_ticket`,
+`submit_review`.
 
 This repo includes a [`.mcp.json`](./.mcp.json) that registers the server, so Claude Code
 picks it up automatically in this project (approve it when prompted). To register it

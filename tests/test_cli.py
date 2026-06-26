@@ -105,6 +105,30 @@ def test_ticket_reorder_json(wired):
     assert json.loads(r.output)["error"]["code"] == "validation"
 
 
+def test_review_submit_pass_and_fail(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "x")
+    invoke("ticket", "move", "SOLO-1", "in-progress")
+    invoke("ticket", "move", "SOLO-1", "in-ai-review", "--agent", "claude")
+    # fail → kicks back to in-progress with the notes attributed to the reviewer
+    r = invoke("review", "submit", "SOLO-1", "--verdict", "fail", "-c", "add tests",
+               "--agent", "codex", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["state"] == "in-progress"
+    # re-review: back up to in-ai-review, then pass → in-human-review
+    invoke("ticket", "move", "SOLO-1", "in-ai-review", "--agent", "claude")
+    r = invoke("review", "submit", "SOLO-1", "--verdict", "pass", "--agent", "codex", "--json")
+    assert json.loads(r.output)["state"] == "in-human-review"
+
+
+def test_review_submit_wrong_state_errors(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "x")  # backlog
+    r = invoke("review", "submit", "SOLO-1", "--verdict", "pass", "--json")
+    assert r.exit_code == 1
+    assert json.loads(r.output)["error"]["code"] == "validation"
+
+
 def test_error_contract_json_on_missing_ticket(wired):
     r = invoke("ticket", "show", "SOLO-999", "--json")
     assert r.exit_code == 1

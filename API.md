@@ -164,6 +164,12 @@ Repositions a ticket **within its current column** (cosmetic — no state change
 activity logged, `updated_at` untouched). `after: null` = top; `after: "<id>"` = below
 that ticket (same column). Errors: `validation` (cross-column `after`), `not_found`.
 
+`POST /api/tickets/{id}/review` body `{ "verdict": "pass"|"fail", "comment": <string?> }` →
+returns `<ticket>`. The AI-review gate: the ticket must be in `in-ai-review`. `pass` →
+`in-human-review`; `fail` → records `comment` as a review note and returns the ticket to
+`in-progress` (kickback). `comment` (the review notes) is optional. Errors: `validation`
+(not in `in-ai-review`, or bad `verdict`), `not_found`.
+
 Ordering: within a column, tickets are ordered by an internal `position` (fractional
 indexing). `GET /api/tickets` returns tickets grouped by workflow state, then by
 position. `position` itself is not exposed in the payload.

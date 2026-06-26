@@ -403,3 +403,28 @@ class Service:
             when=_now(),
         )
         return self.get_ticket(ticket_id)
+
+    def submit_review(
+        self, ticket_id: str, verdict: str, *, comment: str | None = None, actor: str = "human"
+    ) -> Ticket:
+        """Report an AI-review verdict on a ticket that is in ``in-ai-review``.
+
+        ``pass`` advances the ticket to ``in-human-review``; ``fail`` records the review
+        notes as a comment and kicks the ticket back to ``in-progress`` for the
+        implementing agent to address. An optional ``comment`` carries the review notes.
+        """
+        _require_actor(actor)
+        if verdict not in ("pass", "fail"):
+            raise ValidationError(f"Unknown verdict {verdict!r}: expected 'pass' or 'fail'.")
+        ticket = self.get_ticket(ticket_id)
+        if ticket.state != "in-ai-review":
+            raise ValidationError(
+                f"Ticket {ticket_id} is not in AI review (state: {ticket.state})."
+            )
+        if verdict == "pass":
+            # Pass is move-only — review notes are a fail/kickback concept (per the brief).
+            return self.move_ticket(ticket_id, "in-human-review", actor=actor)
+        # Fail: record the review notes (if any), then kick back to the implementer.
+        if comment and comment.strip():
+            self.comment_ticket(ticket_id, body=comment, actor=actor)
+        return self.move_ticket(ticket_id, "in-progress", actor=actor)
