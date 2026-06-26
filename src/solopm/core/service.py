@@ -389,28 +389,41 @@ class Service:
                 number, url = found.number, found.url
                 extra = {"pr_number": found.number, "pr_url": found.url}
             if to_state == "done":
-                result = self.github.merge_pr(repo, number)
+                result = self.github.merge_pr(repo, number, branch)
                 if result.state == "queued":
                     # On a merge-queue-protected branch the PR was only enqueued, not
                     # landed — record that honestly instead of a false merge confirmation.
                     note = self._queued_note(number, url, base, branch)
                     return {**extra, "pr_state": "queued"}, note
-                note = self._merge_note(number, url, base, branch, result.sha)
+                note = self._merge_note(
+                    number, url, base, branch, result.sha, result.branch_deleted
+                )
                 return {**extra, "pr_state": "merged"}, note
-            self.github.close_pr(repo, number)
-            note = self._close_note(number, url, branch)
+            result = self.github.close_pr(repo, number, branch)
+            note = self._close_note(number, url, branch, result.branch_deleted)
             return {**extra, "pr_state": "closed"}, note
         return {}, None
 
     @staticmethod
-    def _merge_note(number: int, url: str | None, base: str, branch: str, sha: str | None) -> str:
+    def _branch_cleanup_note(branch: str, branch_deleted: bool) -> str:
+        """How the merge/close note describes the best-effort branch cleanup outcome.
+
+        Honest either way: a branch checked out in a worktree (the normal SoloPM workflow)
+        is *retained*, not deleted, so the note must not claim a deletion that didn't happen.
+        """
+        if branch_deleted:
+            return f"Branch `{branch}` deleted."
+        return f"Branch `{branch}` retained (checked out in a worktree or cleanup failed)."
+
+    @staticmethod
+    def _merge_note(
+        number: int, url: str | None, base: str, branch: str, sha: str | None, branch_deleted: bool
+    ) -> str:
         """A self-contained record of a squash-merge for the ticket's activity log."""
         where = f" ({url})" if url else ""
         commit = f"squash commit `{sha}`" if sha else "squash-merged"
-        return (
-            f"Merged PR #{number}{where} into `{base}` — {commit}. "
-            f"Branch `{branch}` deleted."
-        )
+        cleanup = Service._branch_cleanup_note(branch, branch_deleted)
+        return f"Merged PR #{number}{where} into `{base}` — {commit}. {cleanup}"
 
     @staticmethod
     def _queued_note(number: int, url: str | None, base: str, branch: str) -> str:
@@ -422,10 +435,11 @@ class Service:
         )
 
     @staticmethod
-    def _close_note(number: int, url: str | None, branch: str) -> str:
+    def _close_note(number: int, url: str | None, branch: str, branch_deleted: bool) -> str:
         """A record of a PR closed when a ticket is cancelled."""
         where = f" ({url})" if url else ""
-        return f"Closed PR #{number}{where}. Branch `{branch}` deleted."
+        cleanup = Service._branch_cleanup_note(branch, branch_deleted)
+        return f"Closed PR #{number}{where}. {cleanup}"
 
     def reorder_ticket(self, ticket_id: str, *, after: str | None = None, actor: str = "human") -> Ticket:
         """Reposition a ticket within its current column (cosmetic; no state change).

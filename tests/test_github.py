@@ -3,13 +3,18 @@
 import pytest
 
 from solopm.core.errors import NotFoundError, ValidationError
-from solopm.core.github import PR, GitHubError, MergeResult
+from solopm.core.github import CloseResult, PR, GitHubError, MergeResult
 from solopm.core.service import Service
 from solopm.core.store import Store
 
 
 class FakeGitHub:
-    """Records calls; no real git/gh. `fail_on` makes one method raise."""
+    """Records calls; no real git/gh. `fail_on` makes one method raise.
+
+    ``branch_deleted`` is what merge_pr/close_pr report for best-effort branch cleanup;
+    set it False to simulate a branch that could not be removed (e.g. checked out in a
+    worktree) — the merge/close itself still succeeds.
+    """
 
     def __init__(
         self,
@@ -17,12 +22,14 @@ class FakeGitHub:
         fail_on: str | None = None,
         merge_sha: str | None = "1a2b3c4d5e6f",
         merge_state: str = "merged",
+        branch_deleted: bool = True,
     ):
         self.calls: list[tuple] = []
         self.pr_number = pr_number
         self.fail_on = fail_on
         self.merge_sha = merge_sha
         self.merge_state = merge_state  # "merged" or "queued"
+        self.branch_deleted = branch_deleted
 
     def _maybe_fail(self, name: str) -> None:
         if self.fail_on == name:
@@ -42,16 +49,17 @@ class FakeGitHub:
         self.calls.append(("pr", branch, base, title))
         return PR(number=self.pr_number, url=f"https://github.com/thomasj02/SoloPM/pull/{self.pr_number}", state="open")
 
-    def merge_pr(self, repo, number):
+    def merge_pr(self, repo, number, branch=None):
         self._maybe_fail("merge_pr")
         self.calls.append(("merge", number))
         if self.merge_state == "queued":
             return MergeResult("queued")
-        return MergeResult("merged", self.merge_sha)
+        return MergeResult("merged", self.merge_sha, branch_deleted=self.branch_deleted)
 
-    def close_pr(self, repo, number):
+    def close_pr(self, repo, number, branch=None):
         self._maybe_fail("close_pr")
         self.calls.append(("close", number))
+        return CloseResult(branch_deleted=self.branch_deleted)
 
 
 def _svc(tmp_path, github=None, repo="/tmp/repo"):
@@ -374,7 +382,9 @@ def test_merge_pr_returns_sha_from_gh(tmp_path, monkeypatch):
         record=calls,
     ))
     assert gh.merge_pr("/repo", 17) == MergeResult("merged", "deadbeefcafe")
-    assert ["gh", "pr", "merge", "17", "--squash", "--delete-branch"] in calls
+    # The gating merge no longer bundles --delete-branch (branch cleanup is separate, best-effort).
+    assert ["gh", "pr", "merge", "17", "--squash"] in calls
+    assert not any("--delete-branch" in a for a in calls)
 
 
 def test_merge_pr_sha_readback_failure_is_nonfatal(tmp_path, monkeypatch):
@@ -430,16 +440,33 @@ def test_merge_pr_queued_via_command_output_when_readback_flakes(tmp_path, monke
     assert gh.merge_pr("/repo", 17) == MergeResult("queued", None)
 
 
-def test_merge_pr_non_open_refused_before_merge(tmp_path, monkeypatch):
-    # [SOLO-11] An already-merged/closed PR is refused at preflight (no double-merge),
-    # before `gh pr merge` is ever issued.
+def test_merge_pr_already_merged_is_idempotent(tmp_path, monkeypatch):
+    # [SOLO-16 c2] An already-merged PR is a no-op success — NOT a GitHubError. `gh pr merge`
+    # is never re-issued; the recorded squash sha (from the readback) is returned, so a retry
+    # after a partial failure can still land the ticket in done.
     from solopm.core.github import GitHub
 
     gh = GitHub()
     calls = []
     monkeypatch.setattr(gh, "_run", _merge_pr_fake(
         preflight='{"state": "MERGED"}',
-        readback='{"state": "MERGED", "mergeCommit": null}',
+        readback='{"state": "MERGED", "mergeCommit": {"oid": "feedface"}}',
+        record=calls,
+    ))
+    assert gh.merge_pr("/repo", 17) == MergeResult("merged", "feedface")
+    assert not any(a[:3] == ["gh", "pr", "merge"] for a in calls)
+
+
+def test_merge_pr_closed_unmerged_still_refused(tmp_path, monkeypatch):
+    # [SOLO-16] A PR that is CLOSED without ever merging genuinely cannot be merged — that
+    # still surfaces as a GitHubError (it is not the idempotent already-done case).
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    calls = []
+    monkeypatch.setattr(gh, "_run", _merge_pr_fake(
+        preflight='{"state": "CLOSED"}',
+        readback='{"state": "CLOSED", "mergeCommit": null}',
         record=calls,
     ))
     with pytest.raises(GitHubError):
@@ -460,4 +487,170 @@ def test_merge_pr_proceeds_when_preflight_unreadable(tmp_path, monkeypatch):
         record=calls,
     ))
     assert gh.merge_pr("/repo", 17) == MergeResult("merged", "abc123")
-    assert ["gh", "pr", "merge", "17", "--squash", "--delete-branch"] in calls
+    assert ["gh", "pr", "merge", "17", "--squash"] in calls
+    assert not any("--delete-branch" in a for a in calls)
+
+
+# --- SOLO-16: robust → done / → cancelled (branch cleanup best-effort, idempotent) ------
+
+
+def _gh_with_branch_fake(
+    *,
+    pre_state="OPEN",
+    readback='{"state": "MERGED", "mergeCommit": {"oid": "abc123"}}',
+    worktree_branch=None,
+    local_delete_rc=0,
+    remote_delete_rc=0,
+    record=None,
+):
+    """A `_run` stand-in covering merge/close PLUS the separate branch-cleanup git calls.
+
+    `worktree_branch` (if set) is reported by `git worktree list` as checked out — so the
+    real client should skip the local `git branch -D`. `local_delete_rc`/`remote_delete_rc`
+    simulate cleanup success/failure without aborting the merge.
+    """
+    from solopm.core.github import GitHub  # noqa: F401
+
+    def fake_run(args, cwd, check=True):
+        if record is not None:
+            record.append(args)
+
+        class P:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        p = P()
+        if args[:3] == ["gh", "pr", "merge"] or args[:3] == ["gh", "pr", "close"]:
+            return p
+        if args[:3] == ["gh", "pr", "view"]:
+            p.stdout = readback if "state,mergeCommit" in args else f'{{"state": "{pre_state}"}}'
+            return p
+        if args[:3] == ["git", "worktree", "list"]:
+            p.stdout = f"worktree /wt\nbranch refs/heads/{worktree_branch}\n\n" if worktree_branch else ""
+            return p
+        if args[:2] == ["git", "push"]:  # remote delete
+            p.returncode = remote_delete_rc
+            p.stderr = "remote rejected" if remote_delete_rc else ""
+            return p
+        if args[:2] == ["git", "branch"]:  # local delete
+            p.returncode = local_delete_rc
+            p.stderr = "error: used by worktree" if local_delete_rc else ""
+            return p
+        return p
+
+    return fake_run
+
+
+def test_merge_pr_branch_delete_failure_is_nonfatal(tmp_path, monkeypatch, caplog):
+    # [SOLO-16 c1/c4] The squash-merge lands; a failing local branch delete must NOT abort —
+    # report merged with branch_deleted=False, and warn (don't raise).
+    import logging
+
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    calls = []
+    monkeypatch.setattr(gh, "_run", _gh_with_branch_fake(local_delete_rc=1, record=calls))
+    with caplog.at_level(logging.WARNING):
+        result = gh.merge_pr("/repo", 17, branch="solo-16-x")
+    assert result == MergeResult("merged", "abc123", branch_deleted=False)
+    assert ["gh", "pr", "merge", "17", "--squash"] in calls
+    assert not any("--delete-branch" in a for a in calls)
+    assert any("solo-16-x" in rec.message for rec in caplog.records)  # warned
+
+
+def test_merge_pr_skips_local_delete_for_worktree_branch(tmp_path, monkeypatch):
+    # [SOLO-16 c1] A branch checked out in a worktree is left in place: no `git branch -D`
+    # is attempted, the merge still succeeds, branch_deleted is False.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    calls = []
+    monkeypatch.setattr(
+        gh, "_run", _gh_with_branch_fake(worktree_branch="solo-16-x", record=calls)
+    )
+    result = gh.merge_pr("/repo", 17, branch="solo-16-x")
+    assert result == MergeResult("merged", "abc123", branch_deleted=False)
+    assert not any(a[:2] == ["git", "branch"] for a in calls)  # local delete skipped
+
+
+def test_merge_pr_deletes_branch_when_not_in_worktree(tmp_path, monkeypatch):
+    # [SOLO-16] The happy path still cleans up: branch not checked out anywhere → deleted,
+    # branch_deleted=True.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    calls = []
+    monkeypatch.setattr(gh, "_run", _gh_with_branch_fake(record=calls))
+    result = gh.merge_pr("/repo", 17, branch="solo-16-x")
+    assert result == MergeResult("merged", "abc123", branch_deleted=True)
+    assert ["git", "branch", "-D", "solo-16-x"] in calls
+
+
+def test_close_pr_idempotent_against_already_closed(tmp_path, monkeypatch):
+    # [SOLO-16 c3] Closing an already-closed PR is a no-op success: `gh pr close` is never
+    # issued and no error is raised.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    calls = []
+    monkeypatch.setattr(
+        gh, "_run", _gh_with_branch_fake(pre_state="CLOSED", record=calls)
+    )
+    result = gh.close_pr("/repo", 17, branch="solo-16-x")
+    assert isinstance(result, CloseResult)
+    assert not any(a[:3] == ["gh", "pr", "close"] for a in calls)
+
+
+def test_close_pr_closes_open_without_delete_branch_flag(tmp_path, monkeypatch):
+    # [SOLO-16 c4] Closing an open PR issues `gh pr close` WITHOUT --delete-branch; cleanup
+    # is the separate best-effort step.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    calls = []
+    monkeypatch.setattr(gh, "_run", _gh_with_branch_fake(pre_state="OPEN", record=calls))
+    gh.close_pr("/repo", 17, branch="solo-16-x")
+    assert ["gh", "pr", "close", "17"] in calls
+    assert not any("--delete-branch" in a for a in calls)
+
+
+def test_close_pr_branch_delete_failure_is_nonfatal(tmp_path, monkeypatch):
+    # [SOLO-16 c3] A failing branch delete during close does not raise.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    monkeypatch.setattr(
+        gh, "_run", _gh_with_branch_fake(pre_state="OPEN", local_delete_rc=1)
+    )
+    result = gh.close_pr("/repo", 17, branch="solo-16-x")  # must not raise
+    assert result.branch_deleted is False
+
+
+def test_done_reaches_done_when_branch_delete_fails(tmp_path):
+    # [SOLO-16 c1] End-to-end through the service: a merge whose branch cleanup failed still
+    # lands the ticket in done with pr_state=merged — the transition is NOT aborted.
+    gh = FakeGitHub(branch_deleted=False)
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc)
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert done.state == "done"
+    assert done.pr_state == "merged"
+    # The merge note is honest about the retained branch rather than claiming deletion.
+    note = _comments(svc, tid)[0]
+    assert "retained" in note.lower()
+    assert "deleted" not in note.lower()
+
+
+def test_cancelled_reaches_cancelled_when_branch_delete_fails(tmp_path):
+    # [SOLO-16 c3] Mirror for cancelled: a close whose branch cleanup failed still lands the
+    # ticket in cancelled.
+    gh = FakeGitHub(branch_deleted=False)
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc)
+    cancelled = svc.move_ticket(tid, "cancelled", actor="claude")
+    assert cancelled.state == "cancelled"
+    assert cancelled.pr_state == "closed"
+    assert "retained" in _comments(svc, tid)[0].lower()
