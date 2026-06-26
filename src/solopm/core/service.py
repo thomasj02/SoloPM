@@ -386,8 +386,13 @@ class Service:
                 number, url = found.number, found.url
                 extra = {"pr_number": found.number, "pr_url": found.url}
             if to_state == "done":
-                sha = self.github.merge_pr(repo, number)
-                note = self._merge_note(number, url, base, branch, sha)
+                result = self.github.merge_pr(repo, number)
+                if result.state == "queued":
+                    # On a merge-queue-protected branch the PR was only enqueued, not
+                    # landed — record that honestly instead of a false merge confirmation.
+                    note = self._queued_note(number, url, base, branch)
+                    return {**extra, "pr_state": "queued"}, note
+                note = self._merge_note(number, url, base, branch, result.sha)
                 return {**extra, "pr_state": "merged"}, note
             self.github.close_pr(repo, number)
             note = self._close_note(number, url, branch)
@@ -402,6 +407,15 @@ class Service:
         return (
             f"Merged PR #{number}{where} into `{base}` — {commit}. "
             f"Branch `{branch}` deleted."
+        )
+
+    @staticmethod
+    def _queued_note(number: int, url: str | None, base: str, branch: str) -> str:
+        """A record that a PR was added to GitHub's merge queue rather than merged yet."""
+        where = f" ({url})" if url else ""
+        return (
+            f"PR #{number}{where} was added to the merge queue for `{base}` — it will "
+            f"squash-merge and delete branch `{branch}` once required checks pass."
         )
 
     @staticmethod

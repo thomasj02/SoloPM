@@ -308,6 +308,7 @@ body {
 }
 .card__pr::before { content: "⌥ "; opacity: 0.6; }
 .card__pr--merged { color: var(--st-in-ai-review); }
+.card__pr--queued { color: var(--st-in-human-review); }
 .card__pr--closed { color: var(--danger); }
 .card__comments::before { content: "💬 "; }
 
