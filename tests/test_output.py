@@ -24,3 +24,15 @@ def test_print_error_json_is_plain_and_parseable(capsys):
     out = capsys.readouterr().out
     assert "\x1b[" not in out
     assert json.loads(out) == err
+
+
+def test_fmt_age_compact_units():
+    """SOLO-13: time-in-state renders with m/h/d granularity (None/negative → dash)."""
+    assert output.fmt_age(None) == "—"
+    assert output.fmt_age(-5) == "—"
+    assert output.fmt_age(0) == "just now"
+    assert output.fmt_age(59) == "just now"
+    assert output.fmt_age(60) == "1m"
+    assert output.fmt_age(45 * 60) == "45m"
+    assert output.fmt_age(3 * 3600) == "3h"
+    assert output.fmt_age(50 * 3600) == "2d"

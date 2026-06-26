@@ -3,7 +3,7 @@
 
 import { state, on, refreshTickets } from "./store";
 import { api } from "./api";
-import { el, clearChildren } from "./util";
+import { el, clearChildren, compactDuration, relativeTime } from "./util";
 import { toastError, assigneeBadge } from "./ui";
 import { openTicket } from "./ticket";
 import type { State, TicketSummary } from "./types";
@@ -102,6 +102,21 @@ function renderColumn(stateId: State, items: TicketSummary[]): HTMLElement {
   return col;
 }
 
+// A small "time in current state" badge (SOLO-13). Terminal states (Done/Cancelled) are
+// never left, so we frame them as completion age ("done 3d ago") rather than staleness,
+// and don't render a badge that reads like aging — but still expose it for at-a-glance
+// recency. The tooltip carries the precise entry timestamp.
+function ageBadge(t: TicketSummary): HTMLElement | null {
+  const text = compactDuration(t.time_in_state_seconds);
+  if (!text) return null;
+  const label = state.meta.state_labels[t.state] || t.state;
+  const terminal = t.state === "done" || t.state === "cancelled";
+  const title = terminal
+    ? `${label} ${relativeTime(t.state_entered_at)} (since ${t.state_entered_at})`
+    : `In ${label} for ${relativeTime(t.state_entered_at).replace(/ ago$/, "")} (since ${t.state_entered_at})`;
+  return el("span", { class: "card__age", title }, text);
+}
+
 function renderCard(t: TicketSummary): HTMLElement {
   const card = el("div", {
     class: "card",
@@ -121,6 +136,7 @@ function renderCard(t: TicketSummary): HTMLElement {
       assigneeBadge(t.assignee),
       t.pr ? el("span", { class: `card__pr card__pr--${t.pr.state}`, title: `PR #${t.pr.number} · ${t.pr.state}` }, `#${t.pr.number}`) : null,
       t.comment_count ? el("span", { class: "card__comments", title: `${t.comment_count} comment(s)` }, `${t.comment_count}`) : null,
+      ageBadge(t),
     ]),
   );
 
