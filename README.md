@@ -147,9 +147,9 @@ board.
 `create_ticket`, `edit_ticket`, `comment_ticket`, `move_ticket`, `assign_ticket`,
 `submit_review`.
 
-This repo includes a [`.mcp.json`](./.mcp.json) that registers the server, so Claude Code
-picks it up automatically in this project (approve it when prompted). To register it
-elsewhere, point your MCP client at `uv run solopm mcp` (cwd = repo root).
+Register the server with your MCP client by pointing it at `uv run solopm mcp` (cwd =
+repo root) — e.g. in Claude Code, `claude mcp add solopm -- uv run solopm mcp`.
+Registering it at user scope makes SoloPM available across all your projects.
 
 ---
 
