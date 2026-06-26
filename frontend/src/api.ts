@@ -108,4 +108,11 @@ export const api = {
       `/tickets/${enc(id)}/move`,
       after === undefined ? { state } : { state, after },
     ),
+
+  addCriterion: (id: string, text: string) =>
+    request<Ticket>("POST", `/tickets/${enc(id)}/criteria`, { text }),
+  updateCriterion: (id: string, cid: string, body: { text?: string; done?: boolean }) =>
+    request<Ticket>("PATCH", `/tickets/${enc(id)}/criteria/${enc(cid)}`, body),
+  removeCriterion: (id: string, cid: string) =>
+    request<Ticket>("DELETE", `/tickets/${enc(id)}/criteria/${enc(cid)}`),
 };

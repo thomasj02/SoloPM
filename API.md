@@ -164,11 +164,29 @@ Repositions a ticket **within its current column** (cosmetic — no state change
 activity logged, `updated_at` untouched). `after: null` = top; `after: "<id>"` = below
 that ticket (same column). Errors: `validation` (cross-column `after`), `not_found`.
 
-`POST /api/tickets/{id}/review` body `{ "verdict": "pass"|"fail", "comment": <string?> }` →
+`POST /api/tickets/{id}/review` body
+`{ "verdict": "pass"|"fail", "comment": <string?>, "criteria_results": <list?> }` →
 returns `<ticket>`. The AI-review gate: the ticket must be in `in-ai-review`. `pass` →
 `in-human-review`; `fail` → records `comment` as a review note and returns the ticket to
-`in-progress` (kickback). `comment` (the review notes) is optional. Errors: `validation`
-(not in `in-ai-review`, or bad `verdict`), `not_found`.
+`in-progress` (kickback). `comment` (the review notes) is optional. The optional
+`criteria_results` is a list of `{ "criterion_id", "verdict": "pass"|"fail", "note"? }`
+recorded to the activity log (a `review` activity, in `meta.results`); the overall
+`verdict` still gates the transition. Errors: `validation` (not in `in-ai-review`, bad
+`verdict`, or a bad per-criterion verdict), `not_found`.
+
+### Acceptance criteria
+
+A ticket carries `acceptance_criteria` — an ordered list of `{ "id", "text", "done" }`
+(its `id` is stable, e.g. `c1`). The summary carries `acceptance: { done, total }`.
+
+- `POST /api/tickets/{id}/criteria` body `{ "text": <string> }` → `<ticket>` (appends a
+  criterion). `201`.
+- `PATCH /api/tickets/{id}/criteria/{cid}` body `{ "text"?, "done"? }` → `<ticket>`
+  (edit text and/or tick).
+- `DELETE /api/tickets/{id}/criteria/{cid}` → `<ticket>` (remove).
+
+Errors: `validation` (blank text / nothing to update), `not_found` (unknown ticket or
+criterion). Each change is recorded as a `criteria` activity.
 
 Ordering: within a column, tickets are ordered by an internal `position` (fractional
 indexing). `GET /api/tickets` returns tickets grouped by workflow state, then by
