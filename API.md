@@ -159,11 +159,15 @@ automation enabled (`solopm serve` / `solopm mcp`) and the ticket has a SoloPM `
 and its project has a `repo`, transitions drive the PR via `gh`/`git`:
 - → `in-ai-review`: push the branch and open (or refresh) the PR; the ticket's `pr` is
   recorded.
-- → `done`: squash-merge the PR into the project's master branch (deletes the branch).
-- → `cancelled`: close the PR (deletes the branch).
+- → `done`: squash-merge the PR into the project's master branch (deletes the branch) and
+  append a confirmation comment naming the PR, squash commit sha, base, and branch deletion.
+  On a merge-queue-protected branch the PR is only *enqueued*, not merged — the ticket then
+  records `pr.state` `queued` (not `merged`) with a "merge queued" note.
+- → `cancelled`: close the PR (deletes the branch) and append a "closed PR #N" note.
 
 These run **before** the state change, so a `gh`/`git` failure (`github` error) aborts
-the transition. Branch-less / human-worked tickets are unaffected.
+the transition. Branch-less / human-worked tickets are unaffected. `pr.state` is one of
+`open`, `merged`, `queued`, or `closed`.
 
 `POST /api/tickets/{id}/reorder` body `{ "after": <id>|null }` → returns `<ticket>`.
 Repositions a ticket **within its current column** (cosmetic — no state change, no

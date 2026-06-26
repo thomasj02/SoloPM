@@ -310,7 +310,7 @@ class Service:
         # and then fail the move.
         new_pos = self._position_in_column(ticket.project, state, after, exclude_id=ticket_id)
 
-        pr_fields = self._git_side_effects(ticket, state, branch or ticket.branch, actor)
+        pr_fields, pr_note = self._git_side_effects(ticket, state, branch or ticket.branch, actor)
 
         # The move's timestamp doubles as the new state-entry time (SOLO-13), so the
         # state-change activity and state_entered_at can't drift apart.
@@ -328,6 +328,13 @@ class Service:
             meta={"from": ticket.state, "to": state},
             when=when,
         )
+        # Record the merge/close confirmation as a comment AFTER the state change, so the
+        # activity log reads "moved … → done" then the merge note. Attributed to the actor
+        # who performed the transition (done is human-only; cancelled may be an agent).
+        if pr_note:
+            self.store.change_ticket(
+                ticket_id, {}, actor=actor, kind="comment", body=pr_note, meta={}, when=_now()
+            )
         # Learning gate: a human kicking back AI-passed work means the reviewer missed
         # something — capture a high-priority candidate to curate into the review memory.
         if ticket.state == "in-human-review" and state == "in-progress":
@@ -342,45 +349,83 @@ class Service:
 
     def _git_side_effects(
         self, ticket: Ticket, to_state: str, branch: str | None, actor: str
-    ) -> dict:
-        """Run GitHub PR side effects for a transition; return ticket fields to persist.
+    ) -> tuple[dict, str | None]:
+        """Run GitHub PR side effects for a transition.
+
+        Returns ``(fields, note)``: ``fields`` are ticket columns to persist with the
+        state change; ``note`` is an optional confirmation comment to append afterwards
+        (the merge/close record), or ``None``.
 
         A no-op unless GitHub automation is configured, the ticket has a SoloPM branch,
         and the project has a repo. Raises on a git/gh failure so the caller aborts the
         transition.
         """
         if self.github is None or not branch:
-            return {}
+            return {}, None
         project = self.get_project(ticket.project)
         if not project.repo:
-            return {}
+            return {}, None
         repo, base = project.repo, project.master_branch
         if to_state == "in-ai-review":
             # Git automation is agent-only: a human reaching in-ai-review (or supplying a
             # branch) must not push or open a PR.
             if actor == "human":
-                return {}
+                return {}, None
             self.github.push_branch(repo, branch)
             pr = self.github.open_or_refresh_pr(
                 repo, branch, base, f"{ticket.id}: {ticket.title}", ticket.description or ""
             )
-            return {"pr_number": pr.number, "pr_url": pr.url, "pr_state": pr.state}
+            return {"pr_number": pr.number, "pr_url": pr.url, "pr_state": pr.state}, None
         if to_state in ("done", "cancelled"):
             # Merge/close the recorded PR; if none was recorded, resolve it by branch
             # (SoloPM owns the branch, so any PR on it is this ticket's).
             extra: dict = {}
             number = ticket.pr_number
+            url = ticket.pr_url
             if number is None:
                 found = self.github.find_pr(repo, branch)
                 if found is None:
-                    return {}  # nothing to merge/close
-                number, extra = found.number, {"pr_number": found.number, "pr_url": found.url}
+                    return {}, None  # nothing to merge/close
+                number, url = found.number, found.url
+                extra = {"pr_number": found.number, "pr_url": found.url}
             if to_state == "done":
-                self.github.merge_pr(repo, number)
-                return {**extra, "pr_state": "merged"}
+                result = self.github.merge_pr(repo, number)
+                if result.state == "queued":
+                    # On a merge-queue-protected branch the PR was only enqueued, not
+                    # landed — record that honestly instead of a false merge confirmation.
+                    note = self._queued_note(number, url, base, branch)
+                    return {**extra, "pr_state": "queued"}, note
+                note = self._merge_note(number, url, base, branch, result.sha)
+                return {**extra, "pr_state": "merged"}, note
             self.github.close_pr(repo, number)
-            return {**extra, "pr_state": "closed"}
-        return {}
+            note = self._close_note(number, url, branch)
+            return {**extra, "pr_state": "closed"}, note
+        return {}, None
+
+    @staticmethod
+    def _merge_note(number: int, url: str | None, base: str, branch: str, sha: str | None) -> str:
+        """A self-contained record of a squash-merge for the ticket's activity log."""
+        where = f" ({url})" if url else ""
+        commit = f"squash commit `{sha}`" if sha else "squash-merged"
+        return (
+            f"Merged PR #{number}{where} into `{base}` — {commit}. "
+            f"Branch `{branch}` deleted."
+        )
+
+    @staticmethod
+    def _queued_note(number: int, url: str | None, base: str, branch: str) -> str:
+        """A record that a PR was added to GitHub's merge queue rather than merged yet."""
+        where = f" ({url})" if url else ""
+        return (
+            f"PR #{number}{where} was added to the merge queue for `{base}` — it will "
+            f"squash-merge and delete branch `{branch}` once required checks pass."
+        )
+
+    @staticmethod
+    def _close_note(number: int, url: str | None, branch: str) -> str:
+        """A record of a PR closed when a ticket is cancelled."""
+        where = f" ({url})" if url else ""
+        return f"Closed PR #{number}{where}. Branch `{branch}` deleted."
 
     def reorder_ticket(self, ticket_id: str, *, after: str | None = None, actor: str = "human") -> Ticket:
         """Reposition a ticket within its current column (cosmetic; no state change).
