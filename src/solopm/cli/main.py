@@ -134,6 +134,24 @@ def serve(
     uvicorn.run(create_app(), host=bind_host, port=bind_port, log_level="info")
 
 
+@app.command(name="mcp")
+def mcp_cmd(
+    agent: Annotated[
+        str, typer.Option("--agent", help="Attribute MCP writes to this agent name.")
+    ] = "claude",
+) -> None:
+    """Run the SoloPM MCP server (stdio) so an AI agent can drive SoloPM as MCP tools."""
+    # Imported lazily so the rest of the CLI works without the optional `mcp` dependency.
+    # NOTE: stdio is the MCP transport — nothing may be printed to stdout here.
+    from ..core.service import Service
+    from ..core.store import Store
+    from ..mcp.server import build_server
+
+    store = Store(config.db_path())
+    store.init()  # lazily create/migrate the store so the server works standalone
+    build_server(Service(store), agent=agent).run()
+
+
 # --- project ----------------------------------------------------------------
 
 

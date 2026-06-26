@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "solopm": {
+      "command": "uv",
+      "args": ["run", "solopm", "mcp"],
+      "env": {}
+    }
+  }
+}
