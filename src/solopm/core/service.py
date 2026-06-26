@@ -312,7 +312,10 @@ class Service:
 
         pr_fields = self._git_side_effects(ticket, state, branch or ticket.branch, actor)
 
-        fields: dict = {"state": state, "position": new_pos}
+        # The move's timestamp doubles as the new state-entry time (SOLO-13), so the
+        # state-change activity and state_entered_at can't drift apart.
+        when = _now()
+        fields: dict = {"state": state, "position": new_pos, "state_entered_at": when}
         if branch:
             fields["branch"] = branch
         fields.update(pr_fields)
@@ -323,7 +326,7 @@ class Service:
             kind="state_change",
             body=f"moved {ticket.state} → {state}",
             meta={"from": ticket.state, "to": state},
-            when=_now(),
+            when=when,
         )
         return self.get_ticket(ticket_id)
 

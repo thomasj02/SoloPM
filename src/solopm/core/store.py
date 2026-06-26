@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     session_active INTEGER NOT NULL DEFAULT 0,
     acceptance_criteria TEXT NOT NULL DEFAULT '[]',
     position       REAL NOT NULL DEFAULT 0,
+    state_entered_at TEXT,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
 );
@@ -81,6 +82,7 @@ _TICKET_UPDATABLE = frozenset(
         "session_active",
         "acceptance_criteria",
         "position",
+        "state_entered_at",
     }
 )
 
@@ -129,6 +131,21 @@ class Store:
             conn.execute(
                 "ALTER TABLE tickets ADD COLUMN acceptance_criteria TEXT NOT NULL DEFAULT '[]'"
             )
+        if "state_entered_at" not in cols:
+            # SOLO-13: time-in-current-state. Backfill from the most recent state-change
+            # activity (creation counts as entry into the initial state), falling back to
+            # created_at when a ticket has never been moved.
+            conn.execute("ALTER TABLE tickets ADD COLUMN state_entered_at TEXT")
+            conn.execute(
+                """
+                UPDATE tickets SET state_entered_at = COALESCE(
+                    (SELECT a.created_at FROM activity a
+                     WHERE a.ticket_id = tickets.id AND a.kind = 'state_change'
+                     ORDER BY a.id DESC LIMIT 1),
+                    created_at
+                )
+                """
+            )
 
     def exists(self) -> bool:
         return self.path.exists()
@@ -173,6 +190,7 @@ class Store:
                 for c in json.loads(row["acceptance_criteria"] or "[]")
             ],
             position=row["position"],
+            state_entered_at=row["state_entered_at"] or row["created_at"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -279,8 +297,8 @@ class Store:
                 conn.execute(
                     """INSERT INTO tickets
                        (id, project_key, seq, title, description, state, assignee,
-                        position, created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                        position, state_entered_at, created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         ticket_id,
                         project_key,
@@ -290,6 +308,7 @@ class Store:
                         state,
                         assignee,
                         float(seq),
+                        created_at,  # creation = entry into the initial state
                         created_at,
                         created_at,
                     ),
@@ -319,6 +338,7 @@ class Store:
             state=state,
             assignee=assignee,
             position=float(seq),
+            state_entered_at=created_at,
             created_at=created_at,
             updated_at=created_at,
         )

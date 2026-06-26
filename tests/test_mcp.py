@@ -58,6 +58,20 @@ def test_list_tickets_filters(service, project):
     assert len(t.list_tickets(assignee="claude")["tickets"]) == 1
 
 
+def test_state_age_present_in_list_and_show(service, project):
+    """SOLO-13: agents reason about staleness from list/show JSON."""
+    t = tools_for(service)
+    created = t.create_ticket(project="SOLO", title="a")
+
+    summary = t.list_tickets(project="SOLO")["tickets"][0]
+    assert summary["state_entered_at"] == created["created_at"]
+    assert summary["time_in_state_seconds"] >= 0
+
+    shown = t.show_ticket("SOLO-1")
+    assert shown["state_entered_at"] == created["created_at"]
+    assert shown["time_in_state_seconds"] >= 0
+
+
 def test_errors_returned_as_structured_dict(service, project):
     t = tools_for(service)
     # unknown ticket -> not_found error dict (not an exception)
