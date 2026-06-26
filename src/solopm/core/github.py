@@ -138,17 +138,49 @@ class GitHub:
             raise GitHubError("PR was created but could not be read back from gh.")
         return pr
 
+    # mergeStateStatus values where `gh pr merge` (no --auto) cannot land the PR
+    # synchronously — it would error or, under a merge queue, only *enqueue* it. We refuse
+    # BEFORE issuing the merge so the transition aborts with no external side effect (vs.
+    # discovering it afterwards, when GitHub may merge/delete the branch later out of band).
+    _NOT_MERGEABLE_NOW = frozenset({"BLOCKED", "BEHIND", "DIRTY", "DRAFT"})
+
     def merge_pr(self, repo: str, number: int) -> str | None:
+        # Preflight: only land a PR that will squash-merge right now. A blocked/behind/draft
+        # PR (or one gated by a merge queue) must not be handed to `gh pr merge`, because a
+        # queued merge returns success without landing — and recording the ticket as merged
+        # would then drift from a PR that hasn't actually merged. Best-effort: if the state
+        # can't be read, fall through and let `gh pr merge` itself be the gate.
+        try:
+            pre = self._run(
+                ["gh", "pr", "view", str(number), "--json", "state,mergeStateStatus"],
+                cwd=repo, check=False,
+            )
+        except GitHubError:
+            pre = None
+        if pre is not None and pre.returncode == 0:
+            try:
+                info = json.loads(pre.stdout)
+            except (ValueError, TypeError):
+                info = {}
+            state = str(info.get("state") or "").upper()
+            status = str(info.get("mergeStateStatus") or "").upper()
+            if state and state != "OPEN":
+                raise GitHubError(f"PR #{number} is {state}, not open — cannot merge.")
+            if status in self._NOT_MERGEABLE_NOW:
+                raise GitHubError(
+                    f"PR #{number} is not mergeable now (status={status}); resolve it or wait "
+                    "for required checks / the merge queue before moving to done."
+                )
+
         self._run(["gh", "pr", "merge", str(number), "--squash", "--delete-branch"], cwd=repo)
-        # Read back the PR so the ticket can record exactly what landed. A *failed*
-        # read-back is non-fatal: the merge command already succeeded, so return None
-        # rather than abort the transition over a missing sha. `check=False` suppresses a
-        # non-zero exit, but a timeout / missing `gh` still raises GitHubError from
-        # `_run`, so swallow that too — the merge must not be undone by a flaky lookup.
+        # Read back the squash commit so the ticket can record exactly what landed. A
+        # *failed* read-back is non-fatal: the merge already succeeded, so return None
+        # rather than abort over a missing sha. `check=False` suppresses a non-zero exit,
+        # but a timeout / missing `gh` still raises GitHubError from `_run`, so swallow
+        # that too — the merge must not be undone by a flaky lookup.
         try:
             proc = self._run(
-                ["gh", "pr", "view", str(number), "--json", "state,mergeCommit"],
-                cwd=repo, check=False,
+                ["gh", "pr", "view", str(number), "--json", "mergeCommit"], cwd=repo, check=False
             )
         except GitHubError:
             return None
@@ -158,16 +190,7 @@ class GitHub:
             data = json.loads(proc.stdout)
         except (ValueError, TypeError):
             return None
-        state = str(data.get("state") or "").upper()
         oid = (data.get("mergeCommit") or {}).get("oid")
-        # A *successful* read-back showing the PR is still open with no merge commit means
-        # `gh pr merge` only queued the merge (required checks / merge queue) rather than
-        # landing it — do NOT let the caller record a false "merged" + confirmation note.
-        if not oid and state and state != "MERGED":
-            raise GitHubError(
-                f"PR #{number} did not merge synchronously (state={state}); it may be "
-                "queued behind required checks or a merge queue. Not recording as merged."
-            )
         return str(oid) if oid else None
 
     def close_pr(self, repo: str, number: int) -> None:

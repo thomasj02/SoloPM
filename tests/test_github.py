@@ -305,26 +305,42 @@ def test_cancelled_appends_close_note(tmp_path):
     assert notes[0].actor == "claude"
 
 
-def test_merge_pr_returns_sha_from_gh(tmp_path, monkeypatch):
-    # [SOLO-11] The real adapter reads the squash commit sha back via `gh pr view`.
-    from solopm.core.github import GitHub
-
-    gh = GitHub()
-    calls = []
+def _merge_pr_fake(*, preflight, readback, record=None):
+    """Build a `_run` stand-in for merge_pr's three calls (preflight view, merge, readback
+    view). `preflight`/`readback` are JSON strings (or a GitHubError instance to raise)."""
 
     def fake_run(args, cwd, check=True):
-        calls.append(args)
+        if record is not None:
+            record.append(args)
+        is_merge = args[:3] == ["gh", "pr", "merge"]
+        # The readback view asks only for mergeCommit; the preflight view asks for state.
+        is_readback = (not is_merge) and "mergeCommit" in args and "state,mergeStateStatus" not in args
+        payload = readback if is_readback else (None if is_merge else preflight)
+        if isinstance(payload, GitHubError):
+            raise payload
 
         class P:
             returncode = 0
             stderr = ""
-            stdout = '{"mergeCommit": {"oid": "deadbeefcafe"}}'
+            stdout = payload or ""
 
         return P()
 
-    monkeypatch.setattr(gh, "_run", fake_run)
-    sha = gh.merge_pr("/repo", 17)
-    assert sha == "deadbeefcafe"
+    return fake_run
+
+
+def test_merge_pr_returns_sha_from_gh(tmp_path, monkeypatch):
+    # [SOLO-11] A clean, open PR squash-merges and the adapter reads the sha back.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    calls = []
+    monkeypatch.setattr(gh, "_run", _merge_pr_fake(
+        preflight='{"state": "OPEN", "mergeStateStatus": "CLEAN"}',
+        readback='{"mergeCommit": {"oid": "deadbeefcafe"}}',
+        record=calls,
+    ))
+    assert gh.merge_pr("/repo", 17) == "deadbeefcafe"
     assert ["gh", "pr", "merge", "17", "--squash", "--delete-branch"] in calls
 
 
@@ -334,56 +350,70 @@ def test_merge_pr_sha_readback_failure_is_nonfatal(tmp_path, monkeypatch):
     from solopm.core.github import GitHub
 
     gh = GitHub()
-
-    def fake_run(args, cwd, check=True):
-        if args[:3] == ["gh", "pr", "merge"]:
-            class P:
-                returncode = 0
-                stdout = ""
-                stderr = ""
-
-            return P()
-        raise GitHubError("Command timed out: gh pr view 17")
-
-    monkeypatch.setattr(gh, "_run", fake_run)
+    monkeypatch.setattr(gh, "_run", _merge_pr_fake(
+        preflight='{"state": "OPEN", "mergeStateStatus": "CLEAN"}',
+        readback=GitHubError("Command timed out: gh pr view 17"),
+    ))
     assert gh.merge_pr("/repo", 17) is None  # does not raise
 
 
-def test_merge_pr_queued_automerge_raises(tmp_path, monkeypatch):
-    # [SOLO-11] A successful read-back showing the PR still OPEN with no mergeCommit means
-    # `gh pr merge` only queued the merge (required checks / merge queue). merge_pr must
-    # raise so the caller does NOT record a false "merged" confirmation.
+def test_merge_pr_null_mergecommit_returns_none(tmp_path, monkeypatch):
+    # [SOLO-11] A clean preflight + a readback with no mergeCommit (eventual consistency)
+    # is non-fatal — the merge landed, we just lack the sha. Return None (sha-less note).
     from solopm.core.github import GitHub
 
     gh = GitHub()
+    monkeypatch.setattr(gh, "_run", _merge_pr_fake(
+        preflight='{"state": "OPEN", "mergeStateStatus": "CLEAN"}',
+        readback='{"mergeCommit": null}',
+    ))
+    assert gh.merge_pr("/repo", 17) is None  # does not raise
 
-    def fake_run(args, cwd, check=True):
-        class P:
-            returncode = 0
-            stderr = ""
-            stdout = "" if args[:3] == ["gh", "pr", "merge"] else '{"state": "OPEN", "mergeCommit": null}'
 
-        return P()
+def test_merge_pr_blocked_pr_refused_before_merge(tmp_path, monkeypatch):
+    # [SOLO-11] A blocked PR (required checks / merge queue) would only enqueue, not land.
+    # Preflight must refuse BEFORE issuing `gh pr merge`, so nothing is scheduled out of band.
+    from solopm.core.github import GitHub
 
-    monkeypatch.setattr(gh, "_run", fake_run)
+    gh = GitHub()
+    calls = []
+    monkeypatch.setattr(gh, "_run", _merge_pr_fake(
+        preflight='{"state": "OPEN", "mergeStateStatus": "BLOCKED"}',
+        readback='{"mergeCommit": null}',
+        record=calls,
+    ))
     with pytest.raises(GitHubError):
         gh.merge_pr("/repo", 17)
+    assert not any(a[:3] == ["gh", "pr", "merge"] for a in calls)  # merge never issued
 
 
-def test_merge_pr_merged_state_without_oid_is_nonfatal(tmp_path, monkeypatch):
-    # [SOLO-11] Eventual consistency: the PR reads back state=MERGED but the mergeCommit
-    # oid hasn't propagated yet. That is a real merge — return None (sha-less), not raise.
+def test_merge_pr_non_open_refused_before_merge(tmp_path, monkeypatch):
+    # [SOLO-11] An already-merged/closed PR is refused at preflight (no double-merge).
     from solopm.core.github import GitHub
 
     gh = GitHub()
+    calls = []
+    monkeypatch.setattr(gh, "_run", _merge_pr_fake(
+        preflight='{"state": "MERGED", "mergeStateStatus": "CLEAN"}',
+        readback='{"mergeCommit": null}',
+        record=calls,
+    ))
+    with pytest.raises(GitHubError):
+        gh.merge_pr("/repo", 17)
+    assert not any(a[:3] == ["gh", "pr", "merge"] for a in calls)
 
-    def fake_run(args, cwd, check=True):
-        class P:
-            returncode = 0
-            stderr = ""
-            stdout = "" if args[:3] == ["gh", "pr", "merge"] else '{"state": "MERGED", "mergeCommit": null}'
 
-        return P()
+def test_merge_pr_proceeds_when_preflight_unreadable(tmp_path, monkeypatch):
+    # [SOLO-11] Preflight is best-effort: if the PR state can't be read, fall through and
+    # let `gh pr merge` itself be the gate (don't block a legitimate merge on a flaky read).
+    from solopm.core.github import GitHub
 
-    monkeypatch.setattr(gh, "_run", fake_run)
-    assert gh.merge_pr("/repo", 17) is None  # does not raise
+    gh = GitHub()
+    calls = []
+    monkeypatch.setattr(gh, "_run", _merge_pr_fake(
+        preflight=GitHubError("Command timed out: gh pr view 17"),
+        readback='{"mergeCommit": {"oid": "abc123"}}',
+        record=calls,
+    ))
+    assert gh.merge_pr("/repo", 17) == "abc123"
+    assert ["gh", "pr", "merge", "17", "--squash", "--delete-branch"] in calls
