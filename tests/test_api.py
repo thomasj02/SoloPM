@@ -316,6 +316,54 @@ def test_reorder_unknown_after_404(client):
     assert r.status_code == 404
 
 
+def _into_ai_review(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "x"})
+    client.post("/api/tickets/SOLO-1/move", json={"state": "in-progress"})
+    client.post(
+        "/api/tickets/SOLO-1/move", json={"state": "in-ai-review"},
+        headers={"X-SoloPM-Actor": "claude"},
+    )
+
+
+def test_review_pass(client):
+    _into_ai_review(client)
+    r = client.post(
+        "/api/tickets/SOLO-1/review",
+        json={"verdict": "pass", "comment": "ok"},
+        headers={"X-SoloPM-Actor": "codex"},
+    )
+    assert r.status_code == 200
+    assert r.json()["state"] == "in-human-review"
+    assert r.json()["comments"] == []  # pass is move-only; no comment recorded
+
+
+def test_review_fail_kicks_back(client):
+    _into_ai_review(client)
+    r = client.post(
+        "/api/tickets/SOLO-1/review",
+        json={"verdict": "fail", "comment": "needs tests"},
+        headers={"X-SoloPM-Actor": "codex"},
+    )
+    assert r.status_code == 200
+    assert r.json()["state"] == "in-progress"
+    assert r.json()["comments"][-1]["body"] == "needs tests"
+
+
+def test_review_wrong_state_400(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "x"})  # backlog
+    r = client.post("/api/tickets/SOLO-1/review", json={"verdict": "pass"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "validation"
+
+
+def test_review_bad_verdict_400(client):
+    _into_ai_review(client)
+    r = client.post("/api/tickets/SOLO-1/review", json={"verdict": "maybe"})
+    assert r.status_code == 400
+
+
 def test_trusted_host_rejects_foreign_host(tmp_path):
     # With the default loopback allow-list, a foreign Host header (DNS-rebinding) is 400.
     store = Store(tmp_path / "solopm.db")

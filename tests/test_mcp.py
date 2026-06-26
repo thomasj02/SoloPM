@@ -78,6 +78,19 @@ def test_agent_cannot_create_in_done(service, project):
     assert out["error"]["code"] == "forbidden_transition"
 
 
+def test_submit_review_tool(service, project):
+    t = tools_for(service)
+    t.create_ticket(project="SOLO", title="x")
+    t.move_ticket("SOLO-1", "in-progress")
+    t.move_ticket("SOLO-1", "in-ai-review")
+    out = t.submit_review("SOLO-1", "pass", comment="looks good")
+    assert out["state"] == "in-human-review"
+    # wrong-state review is returned as a structured error, not raised
+    t.create_ticket(project="SOLO", title="y")  # SOLO-2, backlog
+    err = t.submit_review("SOLO-2", "pass")
+    assert err["error"]["code"] == "validation"
+
+
 # --- FastMCP registration ---------------------------------------------------
 
 

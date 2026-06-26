@@ -26,8 +26,10 @@ app = typer.Typer(
 )
 project_app = typer.Typer(help="Manage projects.", no_args_is_help=True)
 ticket_app = typer.Typer(help="Manage tickets.", no_args_is_help=True)
+review_app = typer.Typer(help="AI review verdicts.", no_args_is_help=True)
 app.add_typer(project_app, name="project")
 app.add_typer(ticket_app, name="ticket")
+app.add_typer(review_app, name="review")
 
 # Reusable global flags (placed on each command so they may follow positional args,
 # matching the spec's `solopm ticket show SOLO-42 --json` usage).
@@ -410,6 +412,32 @@ def ticket_reorder(
         lambda api: api.post(f"/api/tickets/{ticket_id}/reorder", json={"after": after}),
         render,
     )
+
+
+# --- review -----------------------------------------------------------------
+
+
+@review_app.command("submit")
+def review_submit(
+    ticket_id: Annotated[str, typer.Argument(help="Ticket ID under AI review.")],
+    verdict: Annotated[str, typer.Option("--verdict", help="pass | fail")],
+    comment: Annotated[
+        Optional[str], typer.Option("--comment", "-c", help="Review notes (recorded as a comment).")
+    ] = None,
+    json_out: JsonOpt = False,
+    agent: AgentOpt = None,
+    url: UrlOpt = None,
+) -> None:
+    """Report an AI-review verdict — pass → in-human-review, fail → kick back to in-progress."""
+    call = Call(json_out, agent, url)
+    body: dict = {"verdict": verdict}
+    if comment is not None:
+        body["comment"] = comment
+
+    def render(t: dict) -> None:
+        output.console.print(f"[green]✓[/] {t['id']} review [bold]{verdict}[/] → [bold]{t['state']}[/]")
+
+    _run(call, lambda api: api.post(f"/api/tickets/{ticket_id}/review", json=body), render)
 
 
 def run() -> None:

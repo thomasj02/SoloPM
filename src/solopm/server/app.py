@@ -34,6 +34,7 @@ from .schemas import (
     MoveRequest,
     ProjectCreate,
     ReorderRequest,
+    ReviewRequest,
     TicketCreate,
     TicketPatch,
 )
@@ -251,6 +252,17 @@ def create_app(
         actor: str = Depends(get_actor),
     ) -> dict:
         return svc.reorder_ticket(ticket_id, after=payload.after, actor=actor).to_dict()
+
+    @app.post("/api/tickets/{ticket_id}/review")
+    def submit_review(
+        ticket_id: str,
+        payload: ReviewRequest,
+        svc: Service = Depends(get_service),
+        actor: str = Depends(get_actor),
+    ) -> dict:
+        return svc.submit_review(
+            ticket_id, payload.verdict, comment=payload.comment, actor=actor
+        ).to_dict()
 
     # --- static web app (mounted last so /api wins) -------------------------
 

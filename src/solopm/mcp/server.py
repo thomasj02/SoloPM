@@ -91,4 +91,11 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
         """Assign a ticket to one of: human, claude, codex, unassigned."""
         return tools.assign_ticket(ticket_id, assignee=assignee)
 
+    @mcp.tool()
+    def submit_review(ticket_id: str, verdict: str, comment: str | None = None) -> dict:
+        """Report an AI-review verdict on a ticket in 'in-ai-review'. 'pass' advances it to
+        in-human-review; 'fail' records your notes as a comment and returns it to
+        in-progress for the implementer to address."""
+        return tools.submit_review(ticket_id, verdict, comment=comment)
+
     return mcp

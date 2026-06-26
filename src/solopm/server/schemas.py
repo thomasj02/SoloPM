@@ -43,3 +43,8 @@ class AssignRequest(BaseModel):
 
 class ReorderRequest(BaseModel):
     after: str | None = None  # place below this ticket; None = top of the column
+
+
+class ReviewRequest(BaseModel):
+    verdict: str  # "pass" | "fail"
+    comment: str | None = None
