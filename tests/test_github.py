@@ -347,3 +347,43 @@ def test_merge_pr_sha_readback_failure_is_nonfatal(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gh, "_run", fake_run)
     assert gh.merge_pr("/repo", 17) is None  # does not raise
+
+
+def test_merge_pr_queued_automerge_raises(tmp_path, monkeypatch):
+    # [SOLO-11] A successful read-back showing the PR still OPEN with no mergeCommit means
+    # `gh pr merge` only queued the merge (required checks / merge queue). merge_pr must
+    # raise so the caller does NOT record a false "merged" confirmation.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+
+    def fake_run(args, cwd, check=True):
+        class P:
+            returncode = 0
+            stderr = ""
+            stdout = "" if args[:3] == ["gh", "pr", "merge"] else '{"state": "OPEN", "mergeCommit": null}'
+
+        return P()
+
+    monkeypatch.setattr(gh, "_run", fake_run)
+    with pytest.raises(GitHubError):
+        gh.merge_pr("/repo", 17)
+
+
+def test_merge_pr_merged_state_without_oid_is_nonfatal(tmp_path, monkeypatch):
+    # [SOLO-11] Eventual consistency: the PR reads back state=MERGED but the mergeCommit
+    # oid hasn't propagated yet. That is a real merge — return None (sha-less), not raise.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+
+    def fake_run(args, cwd, check=True):
+        class P:
+            returncode = 0
+            stderr = ""
+            stdout = "" if args[:3] == ["gh", "pr", "merge"] else '{"state": "MERGED", "mergeCommit": null}'
+
+        return P()
+
+    monkeypatch.setattr(gh, "_run", fake_run)
+    assert gh.merge_pr("/repo", 17) is None  # does not raise

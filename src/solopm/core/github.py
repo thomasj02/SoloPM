@@ -140,14 +140,15 @@ class GitHub:
 
     def merge_pr(self, repo: str, number: int) -> str | None:
         self._run(["gh", "pr", "merge", str(number), "--squash", "--delete-branch"], cwd=repo)
-        # Read back the squash commit so the ticket can record exactly what landed. A
-        # failure here is non-fatal: the merge already happened, so return None rather
-        # than abort the transition over a missing sha. `check=False` suppresses a
+        # Read back the PR so the ticket can record exactly what landed. A *failed*
+        # read-back is non-fatal: the merge command already succeeded, so return None
+        # rather than abort the transition over a missing sha. `check=False` suppresses a
         # non-zero exit, but a timeout / missing `gh` still raises GitHubError from
         # `_run`, so swallow that too — the merge must not be undone by a flaky lookup.
         try:
             proc = self._run(
-                ["gh", "pr", "view", str(number), "--json", "mergeCommit"], cwd=repo, check=False
+                ["gh", "pr", "view", str(number), "--json", "state,mergeCommit"],
+                cwd=repo, check=False,
             )
         except GitHubError:
             return None
@@ -157,8 +158,16 @@ class GitHub:
             data = json.loads(proc.stdout)
         except (ValueError, TypeError):
             return None
-        commit = data.get("mergeCommit") or {}
-        oid = commit.get("oid")
+        state = str(data.get("state") or "").upper()
+        oid = (data.get("mergeCommit") or {}).get("oid")
+        # A *successful* read-back showing the PR is still open with no merge commit means
+        # `gh pr merge` only queued the merge (required checks / merge queue) rather than
+        # landing it — do NOT let the caller record a false "merged" + confirmation note.
+        if not oid and state and state != "MERGED":
+            raise GitHubError(
+                f"PR #{number} did not merge synchronously (state={state}); it may be "
+                "queued behind required checks or a merge queue. Not recording as merged."
+            )
         return str(oid) if oid else None
 
     def close_pr(self, repo: str, number: int) -> None:
