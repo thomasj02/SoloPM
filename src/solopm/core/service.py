@@ -7,6 +7,7 @@ parity, as the product brief requires.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from . import workflow
@@ -405,13 +406,23 @@ class Service:
         return self.get_ticket(ticket_id)
 
     def submit_review(
-        self, ticket_id: str, verdict: str, *, comment: str | None = None, actor: str = "human"
+        self,
+        ticket_id: str,
+        verdict: str,
+        *,
+        comment: str | None = None,
+        criteria_results: list[dict] | None = None,
+        actor: str = "human",
     ) -> Ticket:
         """Report an AI-review verdict on a ticket that is in ``in-ai-review``.
 
         ``pass`` advances the ticket to ``in-human-review``; ``fail`` records the review
         notes as a comment and kicks the ticket back to ``in-progress`` for the
         implementing agent to address. An optional ``comment`` carries the review notes.
+
+        ``criteria_results`` is an optional per-criterion result set — a list of
+        ``{criterion_id, verdict, note}`` — recorded to the activity log (it does not
+        change the overall verdict, which still gates the transition).
         """
         _require_actor(actor)
         if verdict not in ("pass", "fail"):
@@ -421,6 +432,19 @@ class Service:
             raise ValidationError(
                 f"Ticket {ticket_id} is not in AI review (state: {ticket.state})."
             )
+        results = self._validate_criteria_results(
+            criteria_results, {c.id for c in ticket.acceptance_criteria}
+        )
+        if results:
+            self.store.change_ticket(
+                ticket_id,
+                {},
+                actor=actor,
+                kind="review",
+                body=f"recorded {len(results)} per-criterion review result(s)",
+                meta={"results": results},
+                when=_now(),
+            )
         if verdict == "pass":
             # Pass is move-only — review notes are a fail/kickback concept (per the brief).
             return self.move_ticket(ticket_id, "in-human-review", actor=actor)
@@ -428,3 +452,116 @@ class Service:
         if comment and comment.strip():
             self.comment_ticket(ticket_id, body=comment, actor=actor)
         return self.move_ticket(ticket_id, "in-progress", actor=actor)
+
+    @staticmethod
+    def _validate_criteria_results(results: list[dict] | None, valid_ids: set[str]) -> list[dict]:
+        if not results:
+            return []
+        clean: list[dict] = []
+        for r in results:
+            cid = r.get("criterion_id")
+            verdict = r.get("verdict")
+            if not cid:
+                raise ValidationError("Each criteria result needs a 'criterion_id'.")
+            if cid not in valid_ids:
+                # Audit data must reference a real criterion on this ticket — a typo or
+                # stale id would otherwise be recorded silently.
+                raise ValidationError(f"Unknown criterion {cid!r} for this ticket.")
+            if verdict not in ("pass", "fail"):
+                raise ValidationError(
+                    f"Criterion {cid} result verdict must be 'pass' or 'fail', got {verdict!r}."
+                )
+            clean.append({"criterion_id": cid, "verdict": verdict, "note": r.get("note")})
+        return clean
+
+    # --- acceptance criteria ------------------------------------------------
+    #
+    # Each mutation is applied through ``store.mutate_criteria`` so the read-modify-write
+    # happens inside one write transaction — concurrent CLI/web/MCP edits to the same
+    # ticket serialize and can't lose each other's updates. Input validation (actor, text)
+    # runs here, up front; the closure does the id allocation / lookup atomically.
+
+    @staticmethod
+    def _next_criterion_id(criteria: list[dict]) -> str:
+        nums = [int(c["id"][1:]) for c in criteria if str(c["id"])[1:].isdigit()]
+        return f"c{(max(nums) + 1) if nums else 1}"
+
+    @staticmethod
+    def _criterion(criteria: list[dict], criterion_id: str, ticket_id: str) -> dict:
+        for c in criteria:
+            if c["id"] == criterion_id:
+                return c
+        raise NotFoundError(f"Criterion {criterion_id!r} not found on {ticket_id}.")
+
+    def add_criterion(self, ticket_id: str, text: str, *, actor: str = "human") -> Ticket:
+        _require_actor(actor)
+        if not text or not text.strip():
+            raise ValidationError("Criterion text is required.")
+        text = text.strip()
+
+        def mutate(criteria: list[dict]):
+            cid = self._next_criterion_id(criteria)
+            criteria.append({"id": cid, "text": text, "done": False})
+            return criteria, "criteria", f"added acceptance criterion: {text}", {"op": "add", "id": cid}
+
+        self.store.mutate_criteria(ticket_id, mutate, actor=actor, when=_now())
+        return self.get_ticket(ticket_id)
+
+    def update_criterion(
+        self,
+        ticket_id: str,
+        criterion_id: str,
+        *,
+        text: str | None = None,
+        done: bool | None = None,
+        actor: str = "human",
+    ) -> Ticket:
+        """Edit a criterion's text and/or its done flag in a single atomic mutation.
+
+        Applying both fields in one ``mutate_criteria`` keeps a combined update from
+        partially landing (text committed, then the flag failing) under concurrency.
+        """
+        _require_actor(actor)
+        if text is not None and not text.strip():
+            raise ValidationError("Criterion text cannot be blank.")
+        if text is None and done is None:
+            raise ValidationError("Provide 'text' and/or 'done' to update a criterion.")
+        text_clean = text.strip() if text is not None else None
+
+        def mutate(criteria: list[dict]):
+            crit = self._criterion(criteria, criterion_id, ticket_id)
+            if text_clean is not None:
+                crit["text"] = text_clean
+            if done is not None:
+                crit["done"] = bool(done)
+            if text_clean is not None and done is not None:
+                body = f"updated acceptance criterion {criterion_id}"
+            elif text_clean is not None:
+                body = f"edited acceptance criterion {criterion_id}"
+            else:
+                body = f"{'checked' if crit['done'] else 'unchecked'} acceptance criterion: {crit['text']}"
+            return criteria, "criteria", body, {"op": "update", "id": criterion_id, "done": crit["done"]}
+
+        self.store.mutate_criteria(ticket_id, mutate, actor=actor, when=_now())
+        return self.get_ticket(ticket_id)
+
+    def edit_criterion(
+        self, ticket_id: str, criterion_id: str, text: str, *, actor: str = "human"
+    ) -> Ticket:
+        return self.update_criterion(ticket_id, criterion_id, text=text, actor=actor)
+
+    def remove_criterion(self, ticket_id: str, criterion_id: str, *, actor: str = "human") -> Ticket:
+        _require_actor(actor)
+
+        def mutate(criteria: list[dict]):
+            removed = self._criterion(criteria, criterion_id, ticket_id)
+            kept = [c for c in criteria if c["id"] != criterion_id]
+            return kept, "criteria", f"removed acceptance criterion: {removed['text']}", {"op": "remove", "id": criterion_id}
+
+        self.store.mutate_criteria(ticket_id, mutate, actor=actor, when=_now())
+        return self.get_ticket(ticket_id)
+
+    def check_criterion(
+        self, ticket_id: str, criterion_id: str, done: bool = True, *, actor: str = "human"
+    ) -> Ticket:
+        return self.update_criterion(ticket_id, criterion_id, done=done, actor=actor)

@@ -73,6 +73,9 @@ class Api:
     def patch(self, path: str, json: dict | None = None, **kwargs) -> Any:
         return self._request("PATCH", path, json=json, **kwargs)
 
+    def delete(self, path: str, **kwargs) -> Any:
+        return self._request("DELETE", path, **kwargs)
+
     def close(self) -> None:
         # Closing transport must never surface as a command failure.
         try:

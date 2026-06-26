@@ -122,6 +122,7 @@ function renderPanel(): void {
       renderTitle(t),
       renderMetaCard(t),
       renderMoveActions(t),
+      renderCriteria(t),
       renderDescription(t),
       renderActivity(t),
     );
@@ -207,6 +208,54 @@ function renderMoveActions(t: Ticket): HTMLElement {
     el("button", { class: `btn btn--move btn--move-${s}`, onClick: () => doMove(s) }, `→ ${state.meta.state_labels[s] || s}`),
   );
   return el("div", { class: "tp__moves" }, [el("span", { class: "tp__moveslabel" }, "Move to"), ...buttons]);
+}
+
+function renderCriteria(t: Ticket): HTMLElement {
+  const crit = t.acceptance_criteria || [];
+  const doneN = crit.filter((c) => c.done).length;
+
+  const list = el("ul", { class: "tp__criteria" });
+  if (!crit.length) list.append(el("li", { class: "muted tp__critempty" }, "No acceptance criteria yet."));
+  for (const c of crit) {
+    const box = el("input", {
+      type: "checkbox",
+      class: "tp__critbox",
+      checked: c.done,
+      title: c.done ? "Mark not done" : "Mark done",
+      onChange: () => void doCheckCriterion(c.id, !c.done),
+    });
+    const text = el("span", { class: c.done ? "tp__crittext tp__crittext--done" : "tp__crittext" }, c.text);
+    const remove = el("button", {
+      class: "icon-btn tp__critdel",
+      title: "Remove criterion",
+      "aria-label": "Remove criterion",
+      onClick: () => void doRemoveCriterion(c.id),
+    }, "×");
+    list.append(el("li", { class: "tp__crit" }, [box, text, remove]));
+  }
+
+  const input = el("input", { class: "input tp__critadd", placeholder: "Add a criterion…", maxlength: 500 });
+  const add = async () => {
+    const text = input.value.trim();
+    if (!text) {
+      input.focus();
+      return;
+    }
+    await doAddCriterion(text);
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void add();
+    }
+  });
+  const addBtn = el("button", { class: "btn btn--ghost btn--sm", onClick: () => void add() }, "Add");
+
+  return el("section", { class: "tp__section" }, [
+    el("h3", { class: "tp__sectionhead" }, `Acceptance Criteria (${doneN}/${crit.length})`),
+    list,
+    el("div", { class: "tp__critaddrow" }, [input, addBtn]),
+  ]);
 }
 
 function renderDescription(t: Ticket): HTMLElement {
@@ -352,6 +401,52 @@ async function doMove(s: State): Promise<void> {
     refreshTickets({ silent: true }).catch(() => {});
   } catch (err) {
     toastError((err as Error).message || "Move failed");
+  } finally {
+    busy = false;
+  }
+}
+
+async function doAddCriterion(text: string): Promise<void> {
+  const id = currentId;
+  if (!id || busy) return;
+  busy = true;
+  try {
+    ticket = await api.addCriterion(id, text);
+    renderPanel();
+    refreshTickets({ silent: true }).catch(() => {});
+  } catch (err) {
+    toastError((err as Error).message || "Add failed");
+  } finally {
+    busy = false;
+  }
+}
+
+async function doCheckCriterion(cid: string, done: boolean): Promise<void> {
+  const id = currentId;
+  if (!id || busy) return;
+  busy = true;
+  try {
+    ticket = await api.updateCriterion(id, cid, { done });
+    renderPanel();
+    refreshTickets({ silent: true }).catch(() => {});
+  } catch (err) {
+    toastError((err as Error).message || "Update failed");
+    renderPanel(); // snap the checkbox back to the truth
+  } finally {
+    busy = false;
+  }
+}
+
+async function doRemoveCriterion(cid: string): Promise<void> {
+  const id = currentId;
+  if (!id || busy) return;
+  busy = true;
+  try {
+    ticket = await api.removeCriterion(id, cid);
+    renderPanel();
+    refreshTickets({ silent: true }).catch(() => {});
+  } catch (err) {
+    toastError((err as Error).message || "Remove failed");
   } finally {
     busy = false;
   }
