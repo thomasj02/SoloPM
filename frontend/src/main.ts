@@ -16,11 +16,12 @@ import { api, ApiError } from "./api";
 import { el, clearChildren } from "./util";
 import { openModal, closeTopModal, isOverlayOpen, toast, toastError, toastSuccess } from "./ui";
 import { initBoard, isDragging } from "./board";
-import { closeTicket, isTicketOpen, pollOpenTicket } from "./ticket";
+import { closeTicket, isTicketOpen, openTicket, pollOpenTicket } from "./ticket";
 import type { Assignee, Project, State } from "./types";
 
 const POLL_MS = 4000;
 let searchInput: HTMLInputElement | null = null;
+let radarBadge: HTMLButtonElement | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 async function main(): Promise<void> {
@@ -29,6 +30,7 @@ async function main(): Promise<void> {
   if (boardRoot) initBoard(boardRoot);
   wireShortcuts();
   on("projects", renderTopbar);
+  on("radar", updateRadarBadge); // update the overlap badge in place (no topbar rebuild)
 
   await loadMeta();
   try {
@@ -113,6 +115,17 @@ function renderTopbar(): void {
   const refreshBtn = el("button", { class: "btn btn--ghost icon-btn", title: "Refresh (r)", "aria-label": "Refresh", onClick: () => void manualRefresh() }, "⟳");
   const newTicketBtn = el("button", { class: "btn btn--primary", title: "New ticket (c)", onClick: openCreateTicket, disabled: !state.currentProject }, "+ New ticket");
 
+  radarBadge = el("button", {
+    class: "btn radar-badge",
+    "aria-label": "Overlap radar",
+    onClick: () => {
+      const first = state.radar[0];
+      const tid = first?.a.ticket || first?.b.ticket;
+      if (tid) void openTicket(tid);
+    },
+  });
+  updateRadarBadge();
+
   bar.append(
     el("div", { class: "topbar__left" }, [
       brand,
@@ -121,10 +134,27 @@ function renderTopbar(): void {
       settingsBtn,
       newProjectBtn,
     ]),
-    el("div", { class: "topbar__right" }, [searchInput, refreshBtn, newTicketBtn]),
+    el("div", { class: "topbar__right" }, [radarBadge, searchInput, refreshBtn, newTicketBtn]),
   );
 
   renderEmptyState();
+}
+
+/** Update the overlap badge from state.radar without rebuilding the whole topbar. */
+function updateRadarBadge(): void {
+  if (!radarBadge) return;
+  const overlaps = state.radar;
+  if (!overlaps.length) {
+    radarBadge.style.display = "none";
+    return;
+  }
+  radarBadge.style.display = "";
+  radarBadge.textContent = `⚠ ${overlaps.length} overlap${overlaps.length === 1 ? "" : "s"}`;
+  radarBadge.title =
+    "Active worktrees touching the same files (click to open the first):\n" +
+    overlaps
+      .map((o) => `${o.a.ticket || o.a.branch} ⇄ ${o.b.ticket || o.b.branch}: ${o.files.join(", ")}`)
+      .join("\n");
 }
 
 // Onboarding / backend-down overlay in the board area.

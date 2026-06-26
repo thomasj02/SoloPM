@@ -188,6 +188,26 @@ A ticket carries `acceptance_criteria` — an ordered list of `{ "id", "text", "
 Errors: `validation` (blank text / nothing to update), `not_found` (unknown ticket or
 criterion). Each change is recorded as a `criteria` activity.
 
+### Overlap radar
+
+`GET /api/radar[?project=<key>]` → `{ "overlaps": [ <overlap>, … ] }`. Informational only
+(it never blocks anything). Reads the project repo's live worktrees from git, computes each
+one's changed files vs. the master branch (committed diff + uncommitted `status`), and
+reports every pair whose file sets intersect:
+
+```
+<overlap> = {
+  "project": "SOLO",
+  "a": { "ticket": "SOLO-9"|null, "branch": "solo-9-foo" },
+  "b": { "ticket": null,         "branch": "solo-2-bar" },
+  "files": ["src/x.py", …]
+}
+```
+
+A branch is annotated with the active ticket (`in-progress` / `in-ai-review`) that records
+it; unmapped branches are still reported. The master worktree is excluded. Degrades to
+`{ "overlaps": [] }` when the project has no repo or GitHub automation is off (no error).
+
 Ordering: within a column, tickets are ordered by an internal `position` (fractional
 indexing). `GET /api/tickets` returns tickets grouped by workflow state, then by
 position. `position` itself is not exposed in the payload.

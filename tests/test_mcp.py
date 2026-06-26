@@ -113,6 +113,7 @@ def test_build_server_registers_expected_tools(service, project):
         "check_criterion",
         "edit_criterion",
         "remove_criterion",
+        "radar",
     } <= names
 
 
@@ -128,6 +129,10 @@ def test_build_server_tool_invocation(service, project):
     payload = json.loads(blocks[0].text)
     assert payload["id"] == "SOLO-1"
     assert payload["activity"][0]["actor"] == "claude"  # attributed to the agent
+
+
+def test_radar_tool(service, project):
+    assert tools_for(service).radar() == {"overlaps": []}  # service fixture has no github
 
 
 def test_criteria_via_mcp_tools(service, project):

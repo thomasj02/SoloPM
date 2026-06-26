@@ -2,7 +2,7 @@
 // Views subscribe to events and re-render; actions mutate `state` then emit.
 
 import { api, ApiError } from "./api";
-import type { Meta, Project, TicketSummary } from "./types";
+import type { Meta, Project, RadarOverlap, TicketSummary } from "./types";
 
 // Fallback enums so the UI stays usable even if GET /api/meta is unreachable.
 const FALLBACK_META: Meta = {
@@ -40,6 +40,7 @@ export interface AppState {
   filter: string;
   ticketsError: ApiError | null;
   backendDown: boolean;
+  radar: RadarOverlap[];
 }
 
 export const state: AppState = {
@@ -50,6 +51,7 @@ export const state: AppState = {
   filter: "",
   ticketsError: null,
   backendDown: false,
+  radar: [],
 };
 
 // --- tiny event bus -------------------------------------------------------
@@ -106,8 +108,10 @@ export function setProject(key: string): void {
   if (key === state.currentProject) return;
   state.currentProject = key;
   state.tickets = [];
+  state.radar = []; // drop the old project's overlaps so the badge can't show/open stale data
   persistProject();
   emit("projects");
+  emit("radar");
   void refreshTickets().catch(() => {});
 }
 
@@ -119,7 +123,9 @@ function persistProject(): void {
 export async function refreshTickets({ silent = false }: { silent?: boolean } = {}): Promise<void> {
   if (!state.currentProject) {
     state.tickets = [];
+    state.radar = [];
     emit("tickets");
+    emit("radar");
     return;
   }
   try {
@@ -127,6 +133,7 @@ export async function refreshTickets({ silent = false }: { silent?: boolean } = 
     state.tickets = data?.tickets ?? [];
     state.ticketsError = null;
     emit("tickets");
+    void refreshRadar(); // best-effort, non-blocking — keeps the overlap badge fresh
   } catch (err) {
     // A failed *background* poll must not blank an already-populated board — keep the
     // last-known cards on screen. Only initial/explicit loads show the error/Retry view.
@@ -135,6 +142,21 @@ export async function refreshTickets({ silent = false }: { silent?: boolean } = 
     emit("tickets");
     throw err; // let callers (polling/manual) decide how loud to be
   }
+}
+
+export async function refreshRadar(): Promise<void> {
+  if (!state.currentProject) {
+    state.radar = [];
+    emit("radar");
+    return;
+  }
+  try {
+    const data = await api.radar(state.currentProject);
+    state.radar = data?.overlaps ?? [];
+  } catch {
+    // Radar is informational and best-effort; keep the last-known on error.
+  }
+  emit("radar");
 }
 
 export function setFilter(value: string): void {
