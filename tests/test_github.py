@@ -501,13 +501,16 @@ def _gh_with_branch_fake(
     worktree_branch=None,
     local_delete_rc=0,
     remote_delete_rc=0,
+    remote_delete_raises=False,
+    local_delete_raises=False,
     record=None,
 ):
     """A `_run` stand-in covering merge/close PLUS the separate branch-cleanup git calls.
 
     `worktree_branch` (if set) is reported by `git worktree list` as checked out — so the
     real client should skip the local `git branch -D`. `local_delete_rc`/`remote_delete_rc`
-    simulate cleanup success/failure without aborting the merge.
+    simulate cleanup non-zero exits; `*_delete_raises` simulate a `_run` that *raises*
+    `GitHubError` (a timeout or missing command) — both must be tolerated without aborting.
     """
     from solopm.core.github import GitHub  # noqa: F401
 
@@ -530,10 +533,14 @@ def _gh_with_branch_fake(
             p.stdout = f"worktree /wt\nbranch refs/heads/{worktree_branch}\n\n" if worktree_branch else ""
             return p
         if args[:2] == ["git", "push"]:  # remote delete
+            if remote_delete_raises:
+                raise GitHubError("Command timed out: git push origin --delete")
             p.returncode = remote_delete_rc
             p.stderr = "remote rejected" if remote_delete_rc else ""
             return p
         if args[:2] == ["git", "branch"]:  # local delete
+            if local_delete_raises:
+                raise GitHubError("Command timed out: git branch -D")
             p.returncode = local_delete_rc
             p.stderr = "error: used by worktree" if local_delete_rc else ""
             return p
@@ -626,6 +633,64 @@ def test_close_pr_branch_delete_failure_is_nonfatal(tmp_path, monkeypatch):
     )
     result = gh.close_pr("/repo", 17, branch="solo-16-x")  # must not raise
     assert result.branch_deleted is False
+
+
+def test_merge_pr_cleanup_timeout_does_not_abort(tmp_path, monkeypatch):
+    # [SOLO-16 gpt-review P2] `check=False` stops non-zero exits from raising, but `_run`
+    # still raises GitHubError on a *timeout* / missing command. A cleanup git call that
+    # times out AFTER the merge already landed must NOT propagate and abort the transition.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    monkeypatch.setattr(
+        gh, "_run", _gh_with_branch_fake(remote_delete_raises=True, local_delete_raises=True)
+    )
+    result = gh.merge_pr("/repo", 17, branch="solo-16-x")  # must not raise
+    assert result.state == "merged"
+    assert result.branch_deleted is False  # cleanup couldn't complete, but merge stands
+
+
+def test_close_pr_cleanup_timeout_does_not_abort(tmp_path, monkeypatch):
+    # [SOLO-16 gpt-review P2] Same guarantee for the close path's branch cleanup.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    monkeypatch.setattr(
+        gh, "_run", _gh_with_branch_fake(pre_state="OPEN", remote_delete_raises=True)
+    )
+    result = gh.close_pr("/repo", 17, branch="solo-16-x")  # must not raise
+    assert isinstance(result, CloseResult)
+
+
+def test_close_pr_does_not_treat_merged_as_closed(tmp_path, monkeypatch):
+    # [SOLO-16 gpt-review P2] A PR already MERGED on GitHub must NOT be silently recorded as
+    # a successful cancellation. Only CLOSED is the idempotent no-op; a merged PR surfaces
+    # (gh pr close errors) rather than misreporting landed work as abandoned.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    calls = []
+
+    def fake_run(args, cwd, check=True):
+        calls.append(args)
+
+        class P:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        p = P()
+        if args[:3] == ["gh", "pr", "view"]:
+            p.stdout = '{"state": "MERGED"}'
+            return p
+        if args[:3] == ["gh", "pr", "close"]:
+            raise GitHubError("Pull request #17 is already merged")
+        return p
+
+    monkeypatch.setattr(gh, "_run", fake_run)
+    with pytest.raises(GitHubError):
+        gh.close_pr("/repo", 17, branch="solo-16-x")
+    assert any(a[:3] == ["gh", "pr", "close"] for a in calls)  # close was attempted, not skipped
 
 
 def test_done_reaches_done_when_branch_delete_fails(tmp_path):

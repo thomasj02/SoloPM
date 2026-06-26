@@ -19,6 +19,13 @@ from .errors import SoloPMError, ValidationError
 logger = logging.getLogger(__name__)
 
 
+def _detail(proc: "subprocess.CompletedProcess | None") -> str:
+    """Human-readable failure detail for a cleanup command (``None`` ⇒ it raised/timed out)."""
+    if proc is None:
+        return "command timed out or could not be run"
+    return (proc.stderr or proc.stdout or "").strip()
+
+
 class GitHubError(SoloPMError):
     code = "github"
     status = 502
@@ -258,10 +265,13 @@ class GitHub:
         """Delete a merged/closed branch locally and on the remote, swallowing failures.
 
         Returns True only if the **local** branch was actually removed. Branch cleanup must
-        never gate the merge/close, so every git call here uses ``check=False`` and a
-        failure is logged, not raised. A branch checked out in a worktree (the normal
-        SoloPM workflow) can't be deleted locally — that case is detected and skipped rather
-        than producing a noisy expected error.
+        never gate the merge/close: each git call is run with ``check=False`` *and* wrapped
+        so that even a timeout or missing command (which :meth:`_run` raises as
+        ``GitHubError`` regardless of ``check``) is logged, not propagated — otherwise a
+        cleanup hang after a successful ``gh pr merge``/``gh pr close`` would abort the
+        transition and leave SoloPM out of sync with GitHub. A branch checked out in a
+        worktree (the normal SoloPM workflow) can't be deleted locally — that case is
+        detected and skipped rather than producing a noisy expected error.
         """
         if not branch:
             return False
@@ -270,12 +280,9 @@ class GitHub:
         except ValidationError:
             return False  # never feed an unvalidated name to git
         # Remote delete is independent of local worktree state; attempt it regardless.
-        remote = self._run(["git", "push", "origin", "--delete", branch], cwd=repo, check=False)
-        if remote.returncode != 0:
-            logger.warning(
-                "Best-effort delete of remote branch %s failed: %s",
-                branch, (remote.stderr or remote.stdout or "").strip(),
-            )
+        remote = self._run_cleanup(["git", "push", "origin", "--delete", branch], repo)
+        if remote is None or remote.returncode != 0:
+            logger.warning("Best-effort delete of remote branch %s failed: %s", branch, _detail(remote))
         # Local delete: skip a branch that a worktree has checked out (it can't be removed,
         # and that is expected — SoloPM keeps the worktree until the human cleans it up).
         if self._branch_in_worktree(repo, branch):
@@ -283,14 +290,23 @@ class GitHub:
                 "Local branch %s is checked out in a worktree; leaving it in place.", branch
             )
             return False
-        local = self._run(["git", "branch", "-D", branch], cwd=repo, check=False)
-        if local.returncode != 0:
-            logger.warning(
-                "Best-effort delete of local branch %s failed: %s",
-                branch, (local.stderr or local.stdout or "").strip(),
-            )
+        local = self._run_cleanup(["git", "branch", "-D", branch], repo)
+        if local is None or local.returncode != 0:
+            logger.warning("Best-effort delete of local branch %s failed: %s", branch, _detail(local))
             return False
         return True
+
+    def _run_cleanup(self, args: list[str], repo: str) -> subprocess.CompletedProcess | None:
+        """Run a best-effort cleanup command, returning ``None`` instead of raising.
+
+        Cleanup must never abort a transition, so this swallows the ``GitHubError`` that
+        :meth:`_run` raises on a timeout / missing command in addition to ``check=False``
+        already absorbing non-zero exits.
+        """
+        try:
+            return self._run(args, cwd=repo, check=False)
+        except GitHubError:
+            return None
 
     def _branch_in_worktree(self, repo: str, branch: str) -> bool:
         try:
@@ -303,10 +319,12 @@ class GitHub:
 
         Mirrors :meth:`merge_pr`: the close is the gating step, branch deletion is a
         separate best-effort step (no ``--delete-branch``). A PR that is already ``CLOSED``
-        (or ``MERGED``) is a no-op success rather than an error, so a retry after a partial
-        failure still cancels the ticket.
+        is a no-op success rather than an error, so a retry after a partial failure still
+        cancels the ticket. A ``MERGED`` PR is *not* idempotently closed — that work landed,
+        so ``gh pr close`` is still attempted and its error surfaces rather than letting the
+        ticket silently record merged work as abandoned.
         """
-        if self._pr_state(repo, number) not in ("CLOSED", "MERGED"):
+        if self._pr_state(repo, number) != "CLOSED":
             self._run(["gh", "pr", "close", str(number)], cwd=repo)
         return CloseResult(branch_deleted=self._delete_branch_best_effort(repo, branch))
 
