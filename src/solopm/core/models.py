@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 # --- Enumerations -----------------------------------------------------------
 
@@ -161,6 +162,10 @@ class Ticket:
     session_active: bool = False
     acceptance_criteria: list[Criterion] = field(default_factory=list)
     position: float = 0.0  # within-column ordering; internal, not serialized to the API
+    # When the ticket entered its CURRENT state. Set at creation and refreshed on every
+    # transition (SOLO-13); a denormalized copy of the latest state-change timestamp so
+    # board/list reads don't scan the activity log. Reorder/edit/comment/assign leave it.
+    state_entered_at: str = ""
     created_at: str = ""
     updated_at: str = ""
     # Populated by the service/store on read.
@@ -183,6 +188,27 @@ class Ticket:
             "total": len(self.acceptance_criteria),
         }
 
+    def time_in_state_seconds(self) -> int | None:
+        """Whole seconds since the ticket entered its current state, or ``None``.
+
+        Computed fresh from :attr:`state_entered_at` (falling back to ``created_at``) at
+        serialization time, so a card/agent always sees the live age without any stored
+        duration to keep in sync. Terminal states (Done/Cancelled) are never left, so this
+        keeps growing — the web surface frames that as completion age ("done 2d ago")
+        rather than staleness, and does not tint it.
+        """
+        anchor = self.state_entered_at or self.created_at
+        if not anchor:
+            return None
+        try:
+            entered = datetime.strptime(anchor, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            return None
+        elapsed = (datetime.now(timezone.utc) - entered).total_seconds()
+        return max(0, int(elapsed))
+
     def to_summary(self) -> dict:
         return {
             "id": self.id,
@@ -195,6 +221,8 @@ class Ticket:
             "pr": self.pr_dict(),
             "acceptance": self.acceptance_progress(),
             "comment_count": self.comment_count,
+            "state_entered_at": self.state_entered_at,
+            "time_in_state_seconds": self.time_in_state_seconds(),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -219,6 +247,8 @@ class Ticket:
             "acceptance_criteria": [c.to_dict() for c in self.acceptance_criteria],
             "comments": comments,
             "activity": [a.to_dict() for a in self.activity],
+            "state_entered_at": self.state_entered_at,
+            "time_in_state_seconds": self.time_in_state_seconds(),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }

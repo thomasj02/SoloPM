@@ -113,6 +113,9 @@ export interface TicketSummary {
   pr: PR | null;
   acceptance: { done: number; total: number };
   comment_count: number;
+  // SOLO-13: when the ticket entered its current state, plus the live elapsed seconds.
+  state_entered_at: string;
+  time_in_state_seconds: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -131,6 +134,8 @@ export interface Ticket {
   acceptance_criteria: Criterion[];
   comments: Comment[];
   activity: Activity[];
+  state_entered_at: string;
+  time_in_state_seconds: number | null;
   created_at: string;
   updated_at: string;
 }

@@ -47,6 +47,24 @@ def print_error_json(err: dict) -> None:
     print(json.dumps(err))
 
 
+def fmt_age(seconds: int | None) -> str:
+    """Compact, human-friendly time-in-state, e.g. ``3d`` / ``5h`` / ``12m`` (SOLO-13).
+
+    Mirrors the web board badge's m/h/d granularity. ``None``/negative → ``"—"``.
+    """
+    if seconds is None or seconds < 0:
+        return "—"
+    if seconds < 60:
+        return "just now"
+    mins = seconds // 60
+    if mins < 60:
+        return f"{mins}m"
+    hours = mins // 60
+    if hours < 24:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
 def _state_label(state: str) -> str:
     label = STATE_LABELS.get(state, state)
     return f"[{STATE_STYLE.get(state, 'white')}]{label}[/]"
@@ -97,6 +115,7 @@ def render_tickets(tickets: list[dict]) -> None:
     table.add_column("ID", style="bold")
     table.add_column("Title")
     table.add_column("State")
+    table.add_column("Age", style="grey62")
     table.add_column("Assignee")
     table.add_column("💬", justify="right")
     for t in tickets:
@@ -106,6 +125,7 @@ def render_tickets(tickets: list[dict]) -> None:
             t["id"] + active,
             t["title"],
             _state_label(t["state"]),
+            fmt_age(t.get("time_in_state_seconds")),
             _assignee_label(t["assignee"]),
             str(count) if count else "",
         )
@@ -113,8 +133,9 @@ def render_tickets(tickets: list[dict]) -> None:
 
 
 def render_ticket(t: dict) -> None:
+    age = fmt_age(t.get("time_in_state_seconds"))
     header = (
-        f"[bold]{t['id']}[/]  {_state_label(t['state'])}  "
+        f"[bold]{t['id']}[/]  {_state_label(t['state'])} [grey62]({age})[/]  "
         f"assignee: {_assignee_label(t['assignee'])}"
     )
     body = [header, "", f"[bold]{t['title']}[/]"]
