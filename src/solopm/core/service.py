@@ -20,7 +20,6 @@ from .models import (
     DEFAULT_REVIEW_PROMPT,
     STATES,
     Activity,
-    Criterion,
     Project,
     Ticket,
     normalize_project_key,
@@ -476,44 +475,37 @@ class Service:
         return clean
 
     # --- acceptance criteria ------------------------------------------------
+    #
+    # Each mutation is applied through ``store.mutate_criteria`` so the read-modify-write
+    # happens inside one write transaction — concurrent CLI/web/MCP edits to the same
+    # ticket serialize and can't lose each other's updates. Input validation (actor, text)
+    # runs here, up front; the closure does the id allocation / lookup atomically.
 
     @staticmethod
-    def _next_criterion_id(criteria: list[Criterion]) -> str:
-        nums = [int(c.id[1:]) for c in criteria if c.id[1:].isdigit()]
+    def _next_criterion_id(criteria: list[dict]) -> str:
+        nums = [int(c["id"][1:]) for c in criteria if str(c["id"])[1:].isdigit()]
         return f"c{(max(nums) + 1) if nums else 1}"
 
     @staticmethod
-    def _find_criterion(criteria: list[Criterion], criterion_id: str, ticket_id: str) -> Criterion:
+    def _criterion(criteria: list[dict], criterion_id: str, ticket_id: str) -> dict:
         for c in criteria:
-            if c.id == criterion_id:
+            if c["id"] == criterion_id:
                 return c
         raise NotFoundError(f"Criterion {criterion_id!r} not found on {ticket_id}.")
-
-    def _write_criteria(
-        self, ticket_id: str, criteria: list[Criterion], *, actor: str, body: str, meta: dict
-    ) -> Ticket:
-        self.store.change_ticket(
-            ticket_id,
-            {"acceptance_criteria": json.dumps([c.to_dict() for c in criteria])},
-            actor=actor,
-            kind="criteria",
-            body=body,
-            meta=meta,
-            when=_now(),
-        )
-        return self.get_ticket(ticket_id)
 
     def add_criterion(self, ticket_id: str, text: str, *, actor: str = "human") -> Ticket:
         _require_actor(actor)
         if not text or not text.strip():
             raise ValidationError("Criterion text is required.")
-        criteria = list(self.get_ticket(ticket_id).acceptance_criteria)
-        new = Criterion(id=self._next_criterion_id(criteria), text=text.strip())
-        criteria.append(new)
-        return self._write_criteria(
-            ticket_id, criteria, actor=actor,
-            body=f"added acceptance criterion: {new.text}", meta={"op": "add", "id": new.id},
-        )
+        text = text.strip()
+
+        def mutate(criteria: list[dict]):
+            cid = self._next_criterion_id(criteria)
+            criteria.append({"id": cid, "text": text, "done": False})
+            return criteria, "criteria", f"added acceptance criterion: {text}", {"op": "add", "id": cid}
+
+        self.store.mutate_criteria(ticket_id, mutate, actor=actor, when=_now())
+        return self.get_ticket(ticket_id)
 
     def edit_criterion(
         self, ticket_id: str, criterion_id: str, text: str, *, actor: str = "human"
@@ -521,33 +513,36 @@ class Service:
         _require_actor(actor)
         if not text or not text.strip():
             raise ValidationError("Criterion text is required.")
-        criteria = list(self.get_ticket(ticket_id).acceptance_criteria)
-        self._find_criterion(criteria, criterion_id, ticket_id).text = text.strip()
-        return self._write_criteria(
-            ticket_id, criteria, actor=actor,
-            body=f"edited acceptance criterion {criterion_id}", meta={"op": "edit", "id": criterion_id},
-        )
+        text = text.strip()
+
+        def mutate(criteria: list[dict]):
+            self._criterion(criteria, criterion_id, ticket_id)["text"] = text
+            return criteria, "criteria", f"edited acceptance criterion {criterion_id}", {"op": "edit", "id": criterion_id}
+
+        self.store.mutate_criteria(ticket_id, mutate, actor=actor, when=_now())
+        return self.get_ticket(ticket_id)
 
     def remove_criterion(self, ticket_id: str, criterion_id: str, *, actor: str = "human") -> Ticket:
         _require_actor(actor)
-        criteria = list(self.get_ticket(ticket_id).acceptance_criteria)
-        removed = self._find_criterion(criteria, criterion_id, ticket_id)
-        criteria = [c for c in criteria if c.id != criterion_id]
-        return self._write_criteria(
-            ticket_id, criteria, actor=actor,
-            body=f"removed acceptance criterion: {removed.text}", meta={"op": "remove", "id": criterion_id},
-        )
+
+        def mutate(criteria: list[dict]):
+            removed = self._criterion(criteria, criterion_id, ticket_id)
+            kept = [c for c in criteria if c["id"] != criterion_id]
+            return kept, "criteria", f"removed acceptance criterion: {removed['text']}", {"op": "remove", "id": criterion_id}
+
+        self.store.mutate_criteria(ticket_id, mutate, actor=actor, when=_now())
+        return self.get_ticket(ticket_id)
 
     def check_criterion(
         self, ticket_id: str, criterion_id: str, done: bool = True, *, actor: str = "human"
     ) -> Ticket:
         _require_actor(actor)
-        criteria = list(self.get_ticket(ticket_id).acceptance_criteria)
-        crit = self._find_criterion(criteria, criterion_id, ticket_id)
-        crit.done = bool(done)
-        verb = "checked" if crit.done else "unchecked"
-        return self._write_criteria(
-            ticket_id, criteria, actor=actor,
-            body=f"{verb} acceptance criterion: {crit.text}",
-            meta={"op": "check", "id": criterion_id, "done": crit.done},
-        )
+
+        def mutate(criteria: list[dict]):
+            crit = self._criterion(criteria, criterion_id, ticket_id)
+            crit["done"] = bool(done)
+            verb = "checked" if crit["done"] else "unchecked"
+            return criteria, "criteria", f"{verb} acceptance criterion: {crit['text']}", {"op": "check", "id": criterion_id, "done": crit["done"]}
+
+        self.store.mutate_criteria(ticket_id, mutate, actor=actor, when=_now())
+        return self.get_ticket(ticket_id)

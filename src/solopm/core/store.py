@@ -12,8 +12,9 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from typing import Callable
 
-from .errors import DuplicateError
+from .errors import DuplicateError, NotFoundError
 from .models import Activity, Criterion, Project, Ticket
 
 SCHEMA = """
@@ -371,6 +372,49 @@ class Store:
             body=body,
             meta=meta or {},
             created_at=when,
+        )
+
+    def mutate_criteria(
+        self,
+        ticket_id: str,
+        mutate: Callable[[list[dict]], tuple[list[dict], str, str, dict]],
+        *,
+        actor: str,
+        when: str,
+    ) -> Activity:
+        """Atomically read-modify-write a ticket's acceptance criteria + log one activity.
+
+        ``mutate(criteria) -> (new_criteria, kind, body, meta)`` runs INSIDE the write
+        transaction (``BEGIN IMMEDIATE``), so concurrent mutations on the same ticket
+        serialize and can't drop each other's updates (no lost-update race). The callback
+        may raise (e.g. ``NotFoundError`` for an unknown criterion) to abort the change.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT acceptance_criteria FROM tickets WHERE id = ?", (ticket_id,)
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError(f"Ticket {ticket_id!r} not found.")
+                new_criteria, kind, body, meta = mutate(json.loads(row["acceptance_criteria"] or "[]"))
+                conn.execute(
+                    "UPDATE tickets SET acceptance_criteria = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(new_criteria), when, ticket_id),
+                )
+                cur = conn.execute(
+                    """INSERT INTO activity (ticket_id, actor, kind, body, meta, created_at)
+                       VALUES (?,?,?,?,?,?)""",
+                    (ticket_id, actor, kind, body, json.dumps(meta or {}), when),
+                )
+                new_id = cur.lastrowid
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return Activity(
+            id=new_id, ticket_id=ticket_id, actor=actor, kind=kind, body=body,
+            meta=meta or {}, created_at=when,
         )
 
     def get_ticket(self, ticket_id: str) -> Ticket | None:

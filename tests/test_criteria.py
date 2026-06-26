@@ -55,6 +55,33 @@ def test_remove_criterion(service, project):
     assert [c["text"] for c in _crit(out)] == ["b"]
 
 
+def test_concurrent_adds_do_not_lose_updates(service, project):
+    # Atomic read-modify-write in the store: parallel adds to one ticket must all land
+    # (this fails on a plain read-then-write-blob implementation — lost updates).
+    import threading
+
+    t = service.create_ticket(project="SOLO", title="x")
+    n = 25
+    errors: list[Exception] = []
+
+    def add(i: int) -> None:
+        try:
+            service.add_criterion(t.id, f"crit {i}", actor="claude")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=add, args=(i,)) for i in range(n)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    assert not errors, errors
+    crit = service.get_ticket(t.id).acceptance_criteria
+    assert len(crit) == n  # none dropped
+    assert len({c.id for c in crit}) == n  # ids stayed unique
+
+
 def test_criteria_changes_are_logged_and_attributed(service, project):
     t = service.create_ticket(project="SOLO", title="x")
     service.add_criterion(t.id, "x", actor="claude")
