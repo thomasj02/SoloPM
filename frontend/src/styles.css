@@ -157,6 +157,16 @@ body {
 .topbar__left, .topbar__right { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .topbar__sep { width: 1px; height: 22px; background: var(--border); }
 
+/* Overlap radar badge (shown only when active worktrees collide). */
+.radar-badge {
+  color: var(--warning);
+  border-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.radar-badge:hover { background: color-mix(in srgb, var(--warning) 22%, transparent); }
+
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 650; letter-spacing: 0.2px; }
 .brand__logo { color: var(--accent-hover); font-size: 17px; }
 .brand__name { font-size: 15px; }

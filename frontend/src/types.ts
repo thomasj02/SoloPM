@@ -26,6 +26,22 @@ export interface Criterion {
   done: boolean;
 }
 
+export interface RadarParty {
+  ticket: string | null;
+  branch: string;
+}
+
+export interface RadarOverlap {
+  project: string;
+  a: RadarParty;
+  b: RadarParty;
+  files: string[];
+}
+
+export interface RadarReport {
+  overlaps: RadarOverlap[];
+}
+
 export interface Meta {
   version: string;
   states: State[];
