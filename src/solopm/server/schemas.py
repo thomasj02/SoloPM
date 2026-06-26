@@ -33,6 +33,8 @@ class MoveRequest(BaseModel):
     state: str
     # Optional position hint: omit → bottom of target column; null → top; id → below it.
     after: str | None = None
+    # SoloPM branch to record (when an agent self-transitions to in-ai-review).
+    branch: str | None = None
 
 
 class AssignRequest(BaseModel):
