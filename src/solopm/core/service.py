@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 from . import workflow
 from .errors import ForbiddenTransitionError, NotFoundError, ValidationError
-from .github import GitHubClient, validate_branch_name
+from .github import GitHubClient, GitHubError, validate_branch_name
 from .models import (
     ASSIGNEES,
     ACTORS,
@@ -590,14 +590,19 @@ class Service:
                 if t.branch and t.state in self._RADAR_ACTIVE_STATES
             }
             entries: list[dict] = []
-            for wt in self.github.list_worktrees(proj.repo):
-                if not wt.branch or wt.branch == proj.master_branch:
-                    continue
-                files = self.github.worktree_changed_files(wt.path, proj.master_branch)
-                if files:
-                    entries.append(
-                        {"branch": wt.branch, "ticket": by_branch.get(wt.branch), "files": files}
-                    )
+            try:
+                for wt in self.github.list_worktrees(proj.repo):
+                    if not wt.branch or wt.branch == proj.master_branch:
+                        continue
+                    files = self.github.worktree_changed_files(wt.path, proj.master_branch)
+                    if files:
+                        entries.append(
+                            {"branch": wt.branch, "ticket": by_branch.get(wt.branch), "files": files}
+                        )
+            except GitHubError:
+                # Best-effort: a stale/non-git repo path skips this project rather than
+                # failing the whole radar (which can scan every project).
+                continue
             for i in range(len(entries)):
                 for j in range(i + 1, len(entries)):
                     shared = sorted(entries[i]["files"] & entries[j]["files"])

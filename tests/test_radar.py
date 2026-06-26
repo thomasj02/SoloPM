@@ -107,6 +107,20 @@ def test_real_adapter_parses_worktrees_and_changed_files(monkeypatch):
     assert gh.worktree_changed_files("/wt/a", "main") == {"src/a.py", "src/b.py", "src/c.py", "new.py"}
 
 
+def test_broken_repo_degrades_gracefully(tmp_path):
+    # A stale / non-git repo path must not fail the radar — it skips that project.
+    from solopm.core.github import GitHubError
+
+    class BrokenGit:
+        def list_worktrees(self, repo):
+            raise GitHubError("not a git repository")
+
+        def worktree_changed_files(self, path, base):
+            return set()
+
+    assert _svc(tmp_path, BrokenGit()).compute_radar("SOLO") == {"overlaps": []}
+
+
 def test_no_github_is_empty(tmp_path):
     assert _svc(tmp_path, None).compute_radar("SOLO") == {"overlaps": []}
 
