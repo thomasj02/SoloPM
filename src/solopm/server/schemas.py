@@ -64,3 +64,14 @@ class CriterionCreate(BaseModel):
 class CriterionPatch(BaseModel):
     text: str | None = None
     done: bool | None = None
+
+
+class ReviewMemoryCreate(BaseModel):
+    text: str
+    source: str = "manual"
+    status: str = "active"
+
+
+class ReviewMemoryPatch(BaseModel):
+    text: str | None = None
+    status: str | None = None
