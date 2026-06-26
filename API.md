@@ -208,6 +208,23 @@ A branch is annotated with the active ticket (`in-progress` / `in-ai-review`) th
 it; unmapped branches are still reported. The master worktree is excluded. Degrades to
 `{ "overlaps": [] }` when the project has no repo or GitHub automation is off (no error).
 
+### Review memory (the learning review gate)
+
+A project carries `review_memory` — a list of `{ id, text, source, status, hits, ticket,
+created_at }`. `source` ∈ `ai_fail | human_miss | manual`; `status` ∈
+`candidate | active | retired`. **Candidates** are auto-captured: an AI-review `fail` with
+notes (→ `ai_fail`) and a human kickback of AI-passed work (in-human-review → in-progress,
+→ `human_miss`). You curate them; only **active** items feed the review prompt.
+
+- `GET /api/projects/{key}/review-memory[?status=…]` → `{ "items": [ … ] }`.
+- `POST /api/projects/{key}/review-memory` body `{ "text", "source"?, "status"? }` → the new
+  item (`201`; defaults `source=manual`, `status=active`).
+- `PATCH /api/projects/{key}/review-memory/{id}` body `{ "text"?, "status"? }` → the item
+  (promote `candidate`→`active`, retire, or edit). Errors: `validation`, `not_found`.
+- `GET /api/projects/{key}/review-prompt[?record_hit=true]` → `{ "prompt": "…" }` — the base
+  `review_prompt` plus the **active** review-memory checklist, for a reviewer to fetch.
+  `record_hit=true` bumps each active item's `hits`.
+
 Ordering: within a column, tickets are ordered by an internal `position` (fractional
 indexing). `GET /api/tickets` returns tickets grouped by workflow state, then by
 position. `position` itself is not exposed in the payload.

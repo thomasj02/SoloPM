@@ -375,6 +375,19 @@ def test_trusted_host_rejects_foreign_host(tmp_path):
     assert c.get("/api/health", headers={"host": "localhost:8787"}).status_code == 200
 
 
+def test_review_memory_crud_via_api(client):
+    _make_project(client)
+    r = client.post("/api/projects/SOLO/review-memory", json={"text": "check X"})
+    assert r.status_code == 201
+    mid = r.json()["id"]
+    assert r.json()["status"] == "active"
+    assert any(i["id"] == mid for i in client.get("/api/projects/SOLO/review-memory").json()["items"])
+    assert "check X" in client.get("/api/projects/SOLO/review-prompt").json()["prompt"]
+    r = client.patch(f"/api/projects/SOLO/review-memory/{mid}", json={"status": "retired"})
+    assert r.json()["status"] == "retired"
+    assert "check X" not in client.get("/api/projects/SOLO/review-prompt").json()["prompt"]
+
+
 def test_radar_endpoint(client):
     _make_project(client)
     r = client.get("/api/radar?project=SOLO")

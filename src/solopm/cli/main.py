@@ -28,10 +28,12 @@ project_app = typer.Typer(help="Manage projects.", no_args_is_help=True)
 ticket_app = typer.Typer(help="Manage tickets.", no_args_is_help=True)
 review_app = typer.Typer(help="AI review verdicts.", no_args_is_help=True)
 criteria_app = typer.Typer(help="Manage a ticket's acceptance criteria.", no_args_is_help=True)
+memory_app = typer.Typer(help="Per-project review memory (the learning review gate).", no_args_is_help=True)
 app.add_typer(project_app, name="project")
 app.add_typer(ticket_app, name="ticket")
 app.add_typer(review_app, name="review")
 ticket_app.add_typer(criteria_app, name="criteria")
+review_app.add_typer(memory_app, name="memory")
 
 # Reusable global flags (placed on each command so they may follow positional args,
 # matching the spec's `solopm ticket show SOLO-42 --json` usage).
@@ -553,6 +555,98 @@ def criteria_remove(
         output.console.print(f"[green]✓[/] {ticket_id} {criterion_id} removed")
 
     _run(call, lambda api: api.delete(f"/api/tickets/{ticket_id}/criteria/{criterion_id}"), render)
+
+
+@review_app.command("prompt")
+def review_prompt(
+    project: Annotated[str, typer.Argument(help="Project key.")],
+    record: Annotated[bool, typer.Option("--record", help="Count this as a review (bump item hits).")] = False,
+    json_out: JsonOpt = False,
+    url: UrlOpt = None,
+) -> None:
+    """Print the assembled review prompt (base prompt + active review memory)."""
+    call = Call(json_out, None, url)
+    path = f"/api/projects/{project}/review-prompt" + ("?record_hit=true" if record else "")
+
+    def render(d: dict) -> None:
+        output.console.print(d.get("prompt") or "[dim](empty review prompt)[/]")
+
+    _run(call, lambda api: api.get(path), render)
+
+
+@memory_app.command("list")
+def memory_list(
+    project: Annotated[str, typer.Argument(help="Project key.")],
+    status: Annotated[
+        Optional[str], typer.Option("--status", help="candidate | active | retired")
+    ] = None,
+    json_out: JsonOpt = False,
+    url: UrlOpt = None,
+) -> None:
+    """List a project's review-memory items."""
+    call = Call(json_out, None, url)
+    path = f"/api/projects/{project}/review-memory" + (f"?status={status}" if status else "")
+
+    def render(data: dict) -> None:
+        items = data.get("items", [])
+        if not items:
+            output.console.print("[dim]No review-memory items.[/]")
+            return
+        for i in items:
+            output.console.print(
+                f"  [bold]{i['id']}[/] [{i['status']}/{i['source']}] hits={i['hits']}: {i['text']}"
+            )
+
+    _run(call, lambda api: api.get(path), render)
+
+
+@memory_app.command("add")
+def memory_add(
+    project: Annotated[str, typer.Argument(help="Project key.")],
+    text: Annotated[str, typer.Argument(help="Checklist item text.")],
+    json_out: JsonOpt = False,
+    url: UrlOpt = None,
+) -> None:
+    """Add an active review-memory item."""
+    call = Call(json_out, None, url)
+
+    def render(i: dict) -> None:
+        output.console.print(f"[green]✓[/] added [bold]{i['id']}[/] ({i['status']})")
+
+    _run(
+        call,
+        lambda api: api.post(f"/api/projects/{project}/review-memory", json={"text": text}),
+        render,
+    )
+
+
+@memory_app.command("set")
+def memory_set(
+    project: Annotated[str, typer.Argument(help="Project key.")],
+    item_id: Annotated[str, typer.Argument(help="Item id (e.g. m1).")],
+    text: Annotated[Optional[str], typer.Option("--text", help="New text.")] = None,
+    status: Annotated[
+        Optional[str], typer.Option("--status", help="candidate | active | retired.")
+    ] = None,
+    json_out: JsonOpt = False,
+    url: UrlOpt = None,
+) -> None:
+    """Update a review-memory item's text and/or status (promote, retire, edit)."""
+    call = Call(json_out, None, url)
+    body: dict = {}
+    if text is not None:
+        body["text"] = text
+    if status is not None:
+        body["status"] = status
+
+    def render(i: dict) -> None:
+        output.console.print(f"[green]✓[/] {i['id']} → [bold]{i['status']}[/]")
+
+    _run(
+        call,
+        lambda api: api.patch(f"/api/projects/{project}/review-memory/{item_id}", json=body),
+        render,
+    )
 
 
 def run() -> None:

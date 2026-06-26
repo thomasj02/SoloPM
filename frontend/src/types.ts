@@ -51,6 +51,16 @@ export interface Meta {
   transitions: Record<string, State[]>;
 }
 
+export interface ReviewMemoryItem {
+  id: string;
+  text: string;
+  source: string; // ai_fail | human_miss | manual
+  status: "candidate" | "active" | "retired";
+  hits: number;
+  ticket: string | null;
+  created_at: string;
+}
+
 export interface Project {
   key: string;
   name: string;
@@ -60,6 +70,7 @@ export interface Project {
   default_implementer: string;
   default_reviewer: string;
   review_prompt: string;
+  review_memory: ReviewMemoryItem[];
   ticket_count: number;
   created_at: string;
   updated_at: string;

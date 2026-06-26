@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from .errors import DuplicateError, NotFoundError
-from .models import Activity, Criterion, Project, Ticket
+from .models import Activity, Criterion, Project, ReviewMemoryItem, Ticket
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS projects (
     default_implementer TEXT NOT NULL DEFAULT 'claude',
     default_reviewer    TEXT NOT NULL DEFAULT 'codex',
     review_prompt       TEXT NOT NULL DEFAULT '',
+    review_memory       TEXT NOT NULL DEFAULT '[]',
     seq_counter         INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL
@@ -129,6 +130,12 @@ class Store:
             conn.execute(
                 "ALTER TABLE tickets ADD COLUMN acceptance_criteria TEXT NOT NULL DEFAULT '[]'"
             )
+        pcols = {r["name"] for r in conn.execute("PRAGMA table_info(projects)")}
+        if "review_memory" not in pcols:
+            # SOLO-7: per-project review memory (the learning review gate).
+            conn.execute(
+                "ALTER TABLE projects ADD COLUMN review_memory TEXT NOT NULL DEFAULT '[]'"
+            )
 
     def exists(self) -> bool:
         return self.path.exists()
@@ -146,6 +153,10 @@ class Store:
             default_implementer=row["default_implementer"],
             default_reviewer=row["default_reviewer"],
             review_prompt=row["review_prompt"],
+            review_memory=[
+                ReviewMemoryItem(**item)
+                for item in json.loads(row["review_memory"] or "[]")
+            ],
             seq_counter=row["seq_counter"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -416,6 +427,33 @@ class Store:
             id=new_id, ticket_id=ticket_id, actor=actor, kind=kind, body=body,
             meta=meta or {}, created_at=when,
         )
+
+    def mutate_review_memory(
+        self, project_key: str, mutate: Callable[[list[dict]], list[dict]], *, when: str
+    ) -> None:
+        """Atomically read-modify-write a project's review_memory JSON.
+
+        Projects have no activity log, so this just serializes the list update inside one
+        ``BEGIN IMMEDIATE`` transaction — concurrent candidate-captures and curation can't
+        drop each other's edits. ``mutate(items) -> new_items`` may raise to abort.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT review_memory FROM projects WHERE key = ?", (project_key,)
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError(f"Project {project_key!r} not found.")
+                new_items = mutate(json.loads(row["review_memory"] or "[]"))
+                conn.execute(
+                    "UPDATE projects SET review_memory = ?, updated_at = ? WHERE key = ?",
+                    (json.dumps(new_items), when, project_key),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
     def get_ticket(self, ticket_id: str) -> Ticket | None:
         with self._connect() as conn:

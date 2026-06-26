@@ -54,6 +54,30 @@ DEFAULT_BRANCH_CONVENTION = "{key}-{seq}-{slug}"
 
 
 @dataclass
+class ReviewMemoryItem:
+    """One per-project review-memory checklist item (the learning review gate)."""
+
+    id: str
+    text: str
+    source: str = "manual"  # ai_fail | human_miss | manual
+    status: str = "candidate"  # candidate | active | retired
+    hits: int = 0
+    ticket: str | None = None  # the ticket whose review produced this candidate
+    created_at: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "text": self.text,
+            "source": self.source,
+            "status": self.status,
+            "hits": self.hits,
+            "ticket": self.ticket,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass
 class Project:
     key: str
     name: str
@@ -63,6 +87,7 @@ class Project:
     default_implementer: str = "claude"
     default_reviewer: str = "codex"
     review_prompt: str = DEFAULT_REVIEW_PROMPT
+    review_memory: list[ReviewMemoryItem] = field(default_factory=list)
     seq_counter: int = 0
     created_at: str = ""
     updated_at: str = ""
@@ -79,6 +104,7 @@ class Project:
             "default_implementer": self.default_implementer,
             "default_reviewer": self.default_reviewer,
             "review_prompt": self.review_prompt,
+            "review_memory": [i.to_dict() for i in self.review_memory],
             "ticket_count": self.ticket_count,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
