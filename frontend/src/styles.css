@@ -487,6 +487,19 @@ body {
 .tp__critaddrow { display: flex; gap: 8px; }
 .tp__critadd { flex: 1; }
 
+/* Review-memory curation panel (project settings) */
+.rm { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
+.rm__empty { font-size: 13px; padding: 4px 0; }
+.rm__item { border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; display: flex; flex-direction: column; gap: 4px; }
+.rm__item--retired { opacity: 0.55; }
+.rm__item--active { border-color: color-mix(in srgb, var(--accent, #4a90e2) 45%, var(--border)); }
+.rm__text { font-size: 13px; line-height: 1.35; }
+.rm__row { display: flex; align-items: center; gap: 6px; }
+.rm__meta { font-size: 11px; text-transform: capitalize; }
+.rm__spacer { flex: 1; }
+.rm__addrow { display: flex; gap: 8px; margin-top: 2px; }
+.rm__add { flex: 1; }
+
 .tp__editform { display: flex; flex-direction: column; gap: 14px; }
 .tp__descedit { min-height: 200px; font-family: var(--mono); font-size: 13px; }
 .tp__editactions { display: flex; justify-content: flex-end; gap: 8px; }

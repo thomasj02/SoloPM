@@ -127,6 +127,24 @@ class SoloPMTools:
         return self.svc.compute_radar(project)
 
     @_safe
+    def list_review_memory(self, project: str, status: str | None = None) -> dict:
+        return {"items": self.svc.list_review_memory(project, status=status)}
+
+    @_safe
+    def add_review_memory(self, project: str, text: str, status: str = "active") -> dict:
+        return self.svc.add_review_memory(project, text, status=status)
+
+    @_safe
+    def update_review_memory(
+        self, project: str, item_id: str, text: str | None = None, status: str | None = None
+    ) -> dict:
+        return self.svc.update_review_memory(project, item_id, text=text, status=status)
+
+    @_safe
+    def review_prompt(self, project: str, record_hit: bool = False) -> dict:
+        return {"prompt": self.svc.assembled_review_prompt(project, record_hit=record_hit)}
+
+    @_safe
     def add_criterion(self, ticket_id: str, text: str) -> dict:
         return self.svc.add_criterion(ticket_id, text, actor=self.agent).to_dict()
 
