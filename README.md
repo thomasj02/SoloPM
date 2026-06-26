@@ -159,6 +159,32 @@ Register the server with your MCP client by pointing it at `uv run solopm mcp` (
 repo root) — e.g. in Claude Code, `claude mcp add solopm -- uv run solopm mcp`.
 Registering it at user scope makes SoloPM available across all your projects.
 
+### Channel mode (proactive notifications)
+
+`solopm mcp --channel` runs the MCP server as a Claude Code **channel** (a
+[research-preview](https://code.claude.com/docs/en/channels-reference) feature, Claude Code
+≥ 2.1.80): instead of only answering tool calls, it **pushes** events into the live session —
+ticket transitions, review kickbacks, new comments/assignments, and overlap-radar hits made
+by the web app, the CLI, or another agent. Events arrive wrapped in a
+`<channel source="solopm" …>` tag, scoped (`--scope mine|all`) so the session isn't spammed
+with unrelated activity.
+
+Because custom channels aren't on the research-preview allowlist, register it and load it
+with the development flag:
+
+```jsonc
+// .mcp.json (in the repo)
+{ "mcpServers": { "solopm": { "command": "uv", "args": ["run", "solopm", "mcp", "--channel"] } } }
+```
+```bash
+claude --dangerously-load-development-channels server:solopm
+```
+
+Then a change from outside the session — e.g. `solopm ticket move SOLO-1 in-progress --agent codex`
+in another terminal, or a move on the web board — appears live as
+`<channel source="solopm" ticket_id="SOLO-1" kind="state_change" …>…</channel>`. One-way for
+now (notifications only; no reply tool).
+
 ---
 
 ## Architecture

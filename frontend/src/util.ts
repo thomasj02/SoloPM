@@ -87,3 +87,17 @@ export function relativeTime(iso: string | null | undefined): string {
   if (months < 12) return unit(months, "month");
   return unit(Math.round(months / 12), "year");
 }
+
+/**
+ * Compact, badge-sized duration from whole seconds, e.g. "now" / "12m" / "5h" / "3d"
+ * (SOLO-13 time-in-state). Truncates to the largest whole unit; null/negative → "".
+ */
+export function compactDuration(seconds: number | null | undefined): string {
+  if (seconds == null || seconds < 0) return "";
+  if (seconds < 60) return "now";
+  const mins = Math.floor(seconds / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}

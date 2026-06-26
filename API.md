@@ -118,9 +118,15 @@ All filters optional. Ordered by project then sequence.
   "id": "SOLO-42", "project": "SOLO", "title": "…", "state": "in-progress",
   "assignee": "claude", "branch": "solo-42-…", "session_active": false,
   "pr": { "number": 17, "url": "…", "state": "open" },
-  "comment_count": 3, "created_at": "…", "updated_at": "…"
+  "comment_count": 3,
+  "state_entered_at": "…", "time_in_state_seconds": 18240,
+  "created_at": "…", "updated_at": "…"
 }
 ```
+- `state_entered_at` is when the ticket entered its **current** state (set at creation,
+  refreshed on every move; reorder/edit/comment/assign leave it). `time_in_state_seconds`
+  is the live elapsed seconds, computed per request. Both also appear on the full
+  `<ticket>` from `GET /api/tickets/{id}`.
 
 `POST /api/tickets` body:
 ```json
@@ -255,6 +261,8 @@ position. `position` itself is not exposed in the payload.
     { "id": 1, "actor": "human", "kind": "created", "body": "created ticket", "meta": {}, "at": "…" },
     { "id": 2, "actor": "claude", "kind": "comment", "body": "Pushed first pass.", "meta": {}, "at": "…" }
   ],
+  "state_entered_at": "2026-05-31T18:02:00Z",
+  "time_in_state_seconds": 18240,
   "created_at": "2026-05-31T17:50:02Z",
   "updated_at": "2026-05-31T18:04:11Z"
 }
