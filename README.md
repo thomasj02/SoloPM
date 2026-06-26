@@ -108,6 +108,7 @@ pass this), `--agent <name>` (attribute the action, e.g. `claude`/`codex`; absen
 |---|---|
 | `solopm init` | Create the local store. |
 | `solopm serve [--host --port]` | Run the backend + web app. |
+| `solopm radar [--project]` | Overlap radar — warn when active worktrees touch the same files. |
 | `solopm project add --key --name [--repo --master]` | Register a project. |
 | `solopm project list` | List projects. |
 | `solopm project show <key>` | Show a project's config. |
@@ -149,7 +150,7 @@ board.
 **Tools:** `list_projects`, `workflow_info`, `list_tickets`, `show_ticket`,
 `create_ticket`, `edit_ticket`, `comment_ticket`, `move_ticket`, `assign_ticket`,
 `submit_review`, `add_criterion`, `check_criterion`, `edit_criterion`,
-`remove_criterion`.
+`remove_criterion`, `radar`.
 
 Register the server with your MCP client by pointing it at `uv run solopm mcp` (cwd =
 repo root) — e.g. in Claude Code, `claude mcp add solopm -- uv run solopm mcp`.

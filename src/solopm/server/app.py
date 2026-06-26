@@ -125,6 +125,11 @@ def create_app(
     def health() -> dict:
         return {"ok": True, "version": __version__}
 
+    @app.get("/api/radar")
+    def radar(project: str | None = None, svc: Service = Depends(get_service)) -> dict:
+        # Overlap/conflict radar across active worktrees (informational; never blocks).
+        return svc.compute_radar(project)
+
     # --- projects -----------------------------------------------------------
 
     @app.get("/api/projects")

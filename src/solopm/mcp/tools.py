@@ -123,6 +123,10 @@ class SoloPMTools:
         ).to_dict()
 
     @_safe
+    def radar(self, project: str | None = None) -> dict:
+        return self.svc.compute_radar(project)
+
+    @_safe
     def add_criterion(self, ticket_id: str, text: str) -> dict:
         return self.svc.add_criterion(ticket_id, text, actor=self.agent).to_dict()
 

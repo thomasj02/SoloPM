@@ -120,6 +120,32 @@ def init(json_out: JsonOpt = False) -> None:
 
 
 @app.command()
+def radar(
+    project: Annotated[
+        Optional[str], typer.Option("--project", help="Limit to one project key.")
+    ] = None,
+    json_out: JsonOpt = False,
+    url: UrlOpt = None,
+) -> None:
+    """Overlap radar — warn when active worktrees touch the same files (informational)."""
+    call = Call(json_out, None, url)
+    path = f"/api/radar?project={project}" if project else "/api/radar"
+
+    def render(data: dict) -> None:
+        overlaps = data.get("overlaps", [])
+        if not overlaps:
+            output.console.print("[green]✓[/] No overlaps among active worktrees.")
+            return
+        output.console.print(f"[yellow]⚠ {len(overlaps)} overlap(s):[/]")
+        for ov in overlaps:
+            a = ov["a"]["ticket"] or ov["a"]["branch"]
+            b = ov["b"]["ticket"] or ov["b"]["branch"]
+            output.console.print(f"  [bold]{a}[/] ⇄ [bold]{b}[/] — {', '.join(ov['files'])}")
+
+    _run(call, lambda api: api.get(path), render)
+
+
+@app.command()
 def serve(
     host: Annotated[Optional[str], typer.Option(help="Host to bind.")] = None,
     port: Annotated[Optional[int], typer.Option(help="Port to bind.")] = None,

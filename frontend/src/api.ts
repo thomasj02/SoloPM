@@ -7,6 +7,7 @@ import type {
   Project,
   ProjectCreate,
   ProjectPatch,
+  RadarReport,
   State,
   Ticket,
   TicketCreate,
@@ -115,4 +116,7 @@ export const api = {
     request<Ticket>("PATCH", `/tickets/${enc(id)}/criteria/${enc(cid)}`, body),
   removeCriterion: (id: string, cid: string) =>
     request<Ticket>("DELETE", `/tickets/${enc(id)}/criteria/${enc(cid)}`),
+
+  radar: (project?: string) =>
+    request<RadarReport>("GET", `/radar${project ? "?project=" + enc(project) : ""}`),
 };

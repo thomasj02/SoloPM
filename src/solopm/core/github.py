@@ -51,6 +51,12 @@ class PR:
     state: str  # open | merged | closed
 
 
+@dataclass
+class Worktree:
+    path: str
+    branch: str | None  # short name, or None for a detached HEAD
+
+
 class GitHubClient(Protocol):
     """The surface the service needs; implemented by :class:`GitHub` and test fakes."""
 
@@ -65,6 +71,10 @@ class GitHubClient(Protocol):
     def merge_pr(self, repo: str, number: int) -> None: ...
 
     def close_pr(self, repo: str, number: int) -> None: ...
+
+    def list_worktrees(self, repo: str) -> list[Worktree]: ...
+
+    def worktree_changed_files(self, worktree_path: str, base: str) -> set[str]: ...
 
 
 class GitHub:
@@ -133,3 +143,39 @@ class GitHub:
 
     def close_pr(self, repo: str, number: int) -> None:
         self._run(["gh", "pr", "close", str(number), "--delete-branch"], cwd=repo)
+
+    def list_worktrees(self, repo: str) -> list[Worktree]:
+        out = self._run(["git", "worktree", "list", "--porcelain"], cwd=repo).stdout
+        worktrees: list[Worktree] = []
+        path: str | None = None
+        branch: str | None = None
+        for line in out.splitlines() + [""]:
+            if line.startswith("worktree "):
+                path = line[len("worktree ") :].strip()
+                branch = None
+            elif line.startswith("branch "):
+                # e.g. "branch refs/heads/solo-9-foo" -> "solo-9-foo"
+                branch = line[len("branch ") :].strip().removeprefix("refs/heads/")
+            elif line == "" and path is not None:
+                worktrees.append(Worktree(path=path, branch=branch))
+                path = None
+        return worktrees
+
+    def worktree_changed_files(self, worktree_path: str, base: str) -> set[str]:
+        files: set[str] = set()
+        # Committed changes this branch introduced vs. the base (merge-base diff).
+        committed = self._run(
+            ["git", "diff", "--name-only", f"{base}...HEAD"], cwd=worktree_path, check=False
+        )
+        if committed.returncode == 0:
+            files.update(p for p in committed.stdout.splitlines() if p.strip())
+        # Uncommitted edits in the worktree (porcelain: 2 status cols, space, path).
+        status = self._run(["git", "status", "--porcelain"], cwd=worktree_path, check=False)
+        if status.returncode == 0:
+            for line in status.stdout.splitlines():
+                entry = line[3:].strip()
+                if not entry:
+                    continue
+                # Renames/copies show "old -> new"; record the new path.
+                files.add(entry.split(" -> ")[-1].strip().strip('"'))
+        return files
