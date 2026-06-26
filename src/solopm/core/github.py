@@ -8,16 +8,38 @@ Protocol, so the transition side-effect logic is testable with a fake; the real
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from typing import Protocol
 
-from .errors import SoloPMError
+from .errors import SoloPMError, ValidationError
 
 
 class GitHubError(SoloPMError):
     code = "github"
     status = 502
+
+
+# A conservative all-list for branch names. Crucially this rejects anything git could
+# misread as an option (leading '-') or a refspec (':') — closing argument/refspec
+# injection on `git push` — while allowing normal SoloPM branches like
+# `solo-2-github-pr-side-effects` or `feature/x`.
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+
+def validate_branch_name(branch: str) -> str:
+    """Return ``branch`` if it is a safe git branch name, else raise ``ValidationError``."""
+    if (
+        not branch
+        or len(branch) > 200
+        or not _BRANCH_RE.match(branch)
+        or ".." in branch
+        or branch.endswith("/")
+        or branch.endswith(".lock")
+    ):
+        raise ValidationError(f"Invalid branch name: {branch!r}.")
+    return branch
 
 
 @dataclass
@@ -67,7 +89,11 @@ class GitHub:
     _NO_PR_MARKERS = ("no pull requests found", "no open pull requests", "no pull request found")
 
     def push_branch(self, repo: str, branch: str) -> None:
-        self._run(["git", "push", "-u", "origin", branch], cwd=repo)
+        # Explicit src:dst refspec (and a pre-validated name) so the branch can never be
+        # reinterpreted as a different ref or a git option.
+        validate_branch_name(branch)
+        refspec = f"refs/heads/{branch}:refs/heads/{branch}"
+        self._run(["git", "push", "-u", "origin", refspec], cwd=repo)
 
     def find_pr(self, repo: str, branch: str) -> PR | None:
         proc = self._run(

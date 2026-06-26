@@ -2,6 +2,7 @@
 
 import pytest
 
+from solopm.core.errors import NotFoundError, ValidationError
 from solopm.core.github import PR, GitHubError
 from solopm.core.service import Service
 from solopm.core.store import Store
@@ -170,6 +171,32 @@ def test_find_pr_distinguishes_no_pr_from_real_error(tmp_path, monkeypatch):
     monkeypatch.setattr(gh, "_run", lambda *a, **k: fake_run(1, "HTTP 401: Bad credentials"))
     with pytest.raises(GitHubError):
         gh.find_pr("/repo", "b")
+
+
+def test_malicious_branch_name_is_rejected_before_any_git_op(tmp_path):
+    # [P1] git refspec/argument injection: a hostile branch never reaches git.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    t = svc.create_ticket(project="SOLO", title="x")
+    svc.move_ticket(t.id, "in-progress")
+    for bad in ("HEAD:refs/heads/main", "--delete", "a b", "../evil", "x:y", "-x"):
+        with pytest.raises(ValidationError):
+            svc.move_ticket(t.id, "in-ai-review", branch=bad, actor="claude")
+    assert gh.calls == []  # nothing pushed/opened for any rejected branch
+    assert svc.get_ticket(t.id).state == "in-progress"
+
+
+def test_local_validation_runs_before_side_effects(tmp_path):
+    # [P1] an invalid `after` must abort BEFORE any push/merge/close.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc)  # PR #17 recorded
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    gh.calls.clear()
+    with pytest.raises(NotFoundError):
+        svc.move_ticket(tid, "done", after="SOLO-999", actor="human")
+    assert gh.calls == []  # no merge happened
+    assert svc.get_ticket(tid).state == "in-human-review"
 
 
 def test_git_failure_aborts_the_move(tmp_path):

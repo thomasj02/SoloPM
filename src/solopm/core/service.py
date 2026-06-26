@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from . import workflow
 from .errors import ForbiddenTransitionError, NotFoundError, ValidationError
-from .github import GitHubClient
+from .github import GitHubClient, validate_branch_name
 from .models import (
     ASSIGNEES,
     ACTORS,
@@ -302,10 +302,15 @@ class Service:
         if workflow.is_noop(ticket.state, state):
             return ticket
         workflow.validate_transition(ticket.state, state, actor=actor)
+        if branch:
+            validate_branch_name(branch)
+        # All local validation (transition, branch, position/after) runs BEFORE any
+        # external GitHub side effect, so a bad request can never push/merge/close a PR
+        # and then fail the move.
+        new_pos = self._position_in_column(ticket.project, state, after, exclude_id=ticket_id)
 
         pr_fields = self._git_side_effects(ticket, state, branch or ticket.branch, actor)
 
-        new_pos = self._position_in_column(ticket.project, state, after, exclude_id=ticket_id)
         fields: dict = {"state": state, "position": new_pos}
         if branch:
             fields["branch"] = branch
