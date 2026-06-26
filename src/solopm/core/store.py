@@ -218,6 +218,20 @@ class Store:
             created_at=row["created_at"],
         )
 
+    def max_activity_id(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM activity").fetchone()
+            return int(row["m"])
+
+    def activities_since(self, after_id: int, limit: int = 200) -> list[Activity]:
+        """The global activity feed past ``after_id`` (ordered) — a change-feed across all
+        tickets/writers, used by the MCP channel watcher."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM activity WHERE id > ? ORDER BY id LIMIT ?", (after_id, limit)
+            ).fetchall()
+            return [self._activity(row) for row in rows]
+
     # --- projects -----------------------------------------------------------
 
     def insert_project(self, project: Project) -> None:

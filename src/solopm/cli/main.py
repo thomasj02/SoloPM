@@ -171,6 +171,20 @@ def mcp_cmd(
     agent: Annotated[
         str, typer.Option("--agent", help="Attribute MCP writes to this agent name.")
     ] = "claude",
+    channel: Annotated[
+        bool,
+        typer.Option(
+            "--channel",
+            help="Run as a Claude Code channel: push ticket/review/overlap events into the "
+            "session (load with `claude --dangerously-load-development-channels server:solopm`).",
+        ),
+    ] = False,
+    scope: Annotated[
+        str, typer.Option("--scope", help="Channel event scope: 'mine' (this agent's tickets) or 'all'.")
+    ] = "mine",
+    poll: Annotated[
+        float, typer.Option("--poll", help="Channel poll interval, seconds.")
+    ] = 3.0,
 ) -> None:
     """Run the SoloPM MCP server (stdio) so an AI agent can drive SoloPM as MCP tools."""
     # Imported lazily so the rest of the CLI works without the optional `mcp` dependency.
@@ -178,11 +192,18 @@ def mcp_cmd(
     from ..core.github import GitHub
     from ..core.service import Service
     from ..core.store import Store
-    from ..mcp.server import build_server
 
     store = Store(config.db_path())
     store.init()  # lazily create/migrate the store so the server works standalone
-    build_server(Service(store, github=GitHub()), agent=agent).run()
+    service = Service(store, github=GitHub())
+    if channel:
+        from ..mcp.channel import run_channel_server
+
+        run_channel_server(service, agent=agent, scope=scope, poll_interval=poll)
+    else:
+        from ..mcp.server import build_server
+
+        build_server(service, agent=agent).run()
 
 
 # --- project ----------------------------------------------------------------
