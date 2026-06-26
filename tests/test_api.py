@@ -138,9 +138,13 @@ def test_list_and_filter_tickets(client):
     assert len(r.json()["tickets"]) == 2
     r = client.get("/api/tickets?project=SOLO&assignee=claude")
     assert len(r.json()["tickets"]) == 1
-    # summary shape
+    # summary shape (incl. SOLO-13 time-in-state fields)
     t = r.json()["tickets"][0]
-    assert set(["id", "title", "state", "assignee", "comment_count"]).issubset(t.keys())
+    assert set(
+        ["id", "title", "state", "assignee", "comment_count", "state_entered_at", "time_in_state_seconds"]
+    ).issubset(t.keys())
+    assert t["state_entered_at"] == t["created_at"]
+    assert t["time_in_state_seconds"] >= 0
 
 
 def test_edit_ticket(client):

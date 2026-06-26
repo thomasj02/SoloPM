@@ -310,6 +310,14 @@ body {
 .card__pr--merged { color: var(--st-in-ai-review); }
 .card__pr--closed { color: var(--danger); }
 .card__comments::before { content: "💬 "; }
+.card__age {
+  margin-left: auto; /* push the age badge to the trailing edge of the meta row */
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.card__age::before { content: "🕘 "; opacity: 0.7; }
 
 /* ----------------------------------------------------------------- badges */
 .badge {
