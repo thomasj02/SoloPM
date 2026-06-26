@@ -639,6 +639,22 @@ def test_close_pr_branch_delete_failure_is_nonfatal(tmp_path, monkeypatch):
     assert result.branch_deleted is False
 
 
+def test_remote_branch_delete_is_fully_qualified(tmp_path, monkeypatch):
+    # [SOLO-16 gpt-review P1] A bare `git push origin --delete <name>` resolves to a same-
+    # named TAG when the branch is already gone, deleting an unrelated tag (data loss). The
+    # delete must target refs/heads/<branch> so it can only ever remove the branch.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    calls = []
+    monkeypatch.setattr(gh, "_run", _gh_with_branch_fake(record=calls))
+    gh.merge_pr("/repo", 17, branch="solo-16-x")
+    push_deletes = [a for a in calls if a[:2] == ["git", "push"]]
+    assert push_deletes, "expected a remote branch delete"
+    for a in push_deletes:
+        assert a[-1] == "refs/heads/solo-16-x"  # qualified ref, never the bare tag-ambiguous name
+
+
 def test_merge_pr_remote_delete_failure_reports_not_deleted(tmp_path, monkeypatch):
     # [SOLO-16 gpt-review P2] If the remote delete fails (network/permission) but the local
     # delete succeeds, the branch still exists on GitHub — branch_deleted must be False so

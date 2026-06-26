@@ -280,7 +280,11 @@ class GitHub:
         except ValidationError:
             return False  # never feed an unvalidated name to git
         # Remote delete is independent of local worktree state; attempt it regardless.
-        remote = self._run_cleanup(["git", "push", "origin", "--delete", branch], repo)
+        # Fully-qualify the ref: a bare `--delete <name>` resolves to a same-named *tag*
+        # when the branch is already gone, which would silently delete an unrelated tag.
+        remote = self._run_cleanup(
+            ["git", "push", "origin", "--delete", f"refs/heads/{branch}"], repo
+        )
         remote_ok = self._remote_branch_gone(remote)
         if not remote_ok:
             logger.warning("Best-effort delete of remote branch %s failed: %s", branch, _detail(remote))
