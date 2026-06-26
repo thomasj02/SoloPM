@@ -1,0 +1,132 @@
+"""Tests for the CLI, driven against an in-process backend (no live server)."""
+
+import json
+
+import pytest
+from fastapi.testclient import TestClient
+from typer.testing import CliRunner
+
+from solopm.cli import main as cli_main
+from solopm.cli.client import Api
+from solopm.core.service import Service
+from solopm.core.store import Store
+from solopm.server.app import create_app
+
+runner = CliRunner()
+
+
+@pytest.fixture
+def wired(tmp_path, monkeypatch):
+    """Point the CLI's Api at an in-process backend (TestClient) on a temp store."""
+    store = Store(tmp_path / "solopm.db")
+    store.init()
+    app = create_app(Service(store), allowed_hosts=["*"])
+
+    def fake_make_api(call: cli_main.Call) -> Api:
+        client = TestClient(app)
+        return Api("http://test", agent=call.agent, client=client)
+
+    monkeypatch.setattr(cli_main, "make_api", fake_make_api)
+    return app
+
+
+def invoke(*args):
+    return runner.invoke(cli_main.app, list(args))
+
+
+def test_project_add_and_list_json(wired):
+    r = invoke("project", "add", "--key", "SOLO", "--name", "SoloPM", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["key"] == "SOLO"
+
+    r = invoke("project", "list", "--json")
+    assert r.exit_code == 0
+    assert json.loads(r.output)["projects"][0]["key"] == "SOLO"
+
+
+def test_ticket_lifecycle_json(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    r = invoke("ticket", "create", "--project", "SOLO", "--title", "Build it", "--json")
+    assert r.exit_code == 0, r.output
+    tid = json.loads(r.output)["id"]
+    assert tid == "SOLO-1"
+
+    # assign + move with agent attribution
+    r = invoke("ticket", "assign", tid, "claude", "--json")
+    assert json.loads(r.output)["assignee"] == "claude"
+
+    r = invoke("ticket", "move", tid, "todo", "--json")
+    assert json.loads(r.output)["state"] == "todo"
+    r = invoke("ticket", "move", tid, "in-progress", "--agent", "claude", "--json")
+    assert json.loads(r.output)["state"] == "in-progress"
+
+    # comment as agent
+    r = invoke("ticket", "comment", tid, "-b", "working on it", "--agent", "claude", "--json")
+    assert r.exit_code == 0
+    assert json.loads(r.output)["actor"] == "claude"
+
+    # show reflects the comment
+    r = invoke("ticket", "show", tid, "--json")
+    body = json.loads(r.output)
+    assert body["comments"][0]["body"] == "working on it"
+    assert body["comments"][0]["author"] == "claude"
+
+
+def test_agent_cannot_close_via_cli(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "x")
+    invoke("ticket", "move", "SOLO-1", "in-progress")
+    invoke("ticket", "move", "SOLO-1", "in-ai-review", "--agent", "claude")
+    invoke("ticket", "move", "SOLO-1", "in-human-review", "--agent", "codex")
+    r = invoke("ticket", "move", "SOLO-1", "done", "--agent", "claude", "--json")
+    assert r.exit_code == 1
+    assert json.loads(r.output)["error"]["code"] == "forbidden_transition"
+
+    r = invoke("ticket", "move", "SOLO-1", "done", "--json")
+    assert r.exit_code == 0
+    assert json.loads(r.output)["state"] == "done"
+
+
+def test_ticket_reorder_json(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    for t in ("a", "b", "c"):
+        invoke("ticket", "create", "--project", "SOLO", "--title", t)
+    # move SOLO-1 to the top is a no-op; move it below SOLO-3 instead
+    r = invoke("ticket", "reorder", "SOLO-1", "--after", "SOLO-3", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["id"] == "SOLO-1"
+    # reorder to top
+    r = invoke("ticket", "reorder", "SOLO-3", "--json")
+    assert r.exit_code == 0
+    # cross-column reorder is rejected
+    invoke("ticket", "move", "SOLO-2", "todo")
+    r = invoke("ticket", "reorder", "SOLO-1", "--after", "SOLO-2", "--json")
+    assert r.exit_code == 1
+    assert json.loads(r.output)["error"]["code"] == "validation"
+
+
+def test_error_contract_json_on_missing_ticket(wired):
+    r = invoke("ticket", "show", "SOLO-999", "--json")
+    assert r.exit_code == 1
+    assert json.loads(r.output)["error"]["code"] == "not_found"
+
+
+def test_human_output_does_not_crash(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "Readable")
+    r = invoke("ticket", "list", "--project", "SOLO")
+    assert r.exit_code == 0
+    assert "Readable" in r.output
+
+
+def test_create_ticket_without_project_errors(wired, monkeypatch):
+    monkeypatch.delenv("SOLOPM_PROJECT", raising=False)
+    r = invoke("ticket", "create", "--title", "orphan", "--json")
+    assert r.exit_code == 1
+    assert json.loads(r.output)["error"]["code"] == "validation"
+
+
+def test_version():
+    r = runner.invoke(cli_main.app, ["--version"])
+    assert r.exit_code == 0
+    assert r.output.strip()

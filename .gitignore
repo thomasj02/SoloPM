@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environment (managed by uv; uv.lock is committed for reproducibility)
+.venv/
+
+# Local SoloPM store, if ever placed inside the repo (default lives in ~/.solopm)
+.solopm/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
