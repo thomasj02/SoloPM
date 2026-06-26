@@ -303,7 +303,7 @@ class Service:
             return ticket
         workflow.validate_transition(ticket.state, state, actor=actor)
 
-        pr_fields = self._git_side_effects(ticket, state, branch or ticket.branch)
+        pr_fields = self._git_side_effects(ticket, state, branch or ticket.branch, actor)
 
         new_pos = self._position_in_column(ticket.project, state, after, exclude_id=ticket_id)
         fields: dict = {"state": state, "position": new_pos}
@@ -321,12 +321,14 @@ class Service:
         )
         return self.get_ticket(ticket_id)
 
-    def _git_side_effects(self, ticket: Ticket, to_state: str, branch: str | None) -> dict:
+    def _git_side_effects(
+        self, ticket: Ticket, to_state: str, branch: str | None, actor: str
+    ) -> dict:
         """Run GitHub PR side effects for a transition; return ticket fields to persist.
 
-        Agent-only: a no-op unless GitHub automation is configured, the ticket has a
-        SoloPM branch, and the project has a repo. Raises on a git/gh failure so the
-        caller aborts the transition.
+        A no-op unless GitHub automation is configured, the ticket has a SoloPM branch,
+        and the project has a repo. Raises on a git/gh failure so the caller aborts the
+        transition.
         """
         if self.github is None or not branch:
             return {}
@@ -335,17 +337,30 @@ class Service:
             return {}
         repo, base = project.repo, project.master_branch
         if to_state == "in-ai-review":
+            # Git automation is agent-only: a human reaching in-ai-review (or supplying a
+            # branch) must not push or open a PR.
+            if actor == "human":
+                return {}
             self.github.push_branch(repo, branch)
             pr = self.github.open_or_refresh_pr(
                 repo, branch, base, f"{ticket.id}: {ticket.title}", ticket.description or ""
             )
             return {"pr_number": pr.number, "pr_url": pr.url, "pr_state": pr.state}
-        if to_state == "done" and ticket.pr_number:
-            self.github.merge_pr(repo, ticket.pr_number)
-            return {"pr_state": "merged"}
-        if to_state == "cancelled" and ticket.pr_number:
-            self.github.close_pr(repo, ticket.pr_number)
-            return {"pr_state": "closed"}
+        if to_state in ("done", "cancelled"):
+            # Merge/close the recorded PR; if none was recorded, resolve it by branch
+            # (SoloPM owns the branch, so any PR on it is this ticket's).
+            extra: dict = {}
+            number = ticket.pr_number
+            if number is None:
+                found = self.github.find_pr(repo, branch)
+                if found is None:
+                    return {}  # nothing to merge/close
+                number, extra = found.number, {"pr_number": found.number, "pr_url": found.url}
+            if to_state == "done":
+                self.github.merge_pr(repo, number)
+                return {**extra, "pr_state": "merged"}
+            self.github.close_pr(repo, number)
+            return {**extra, "pr_state": "closed"}
         return {}
 
     def reorder_ticket(self, ticket_id: str, *, after: str | None = None, actor: str = "human") -> Ticket:

@@ -23,6 +23,11 @@ class FakeGitHub:
         self._maybe_fail("push_branch")
         self.calls.append(("push", branch))
 
+    def find_pr(self, repo, branch):
+        self._maybe_fail("find_pr")
+        self.calls.append(("find", branch))
+        return PR(number=self.pr_number, url=f"https://github.com/thomasj02/SoloPM/pull/{self.pr_number}", state="open")
+
     def open_or_refresh_pr(self, repo, branch, base, title, body):
         self._maybe_fail("open_or_refresh_pr")
         self.calls.append(("pr", branch, base, title))
@@ -116,6 +121,55 @@ def test_no_repo_configured_skips_side_effects(tmp_path):
     svc.move_ticket(t.id, "in-progress")
     svc.move_ticket(t.id, "in-ai-review", branch="b", actor="claude")
     assert gh.calls == []
+
+
+def test_human_move_to_ai_review_does_not_push(tmp_path):
+    # [P1] Git automation is agent-only: a human supplying a branch must not push/open a PR.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    t = svc.create_ticket(project="SOLO", title="x")
+    svc.move_ticket(t.id, "in-progress")
+    moved = svc.move_ticket(t.id, "in-ai-review", branch="b", actor="human")
+    assert gh.calls == []  # no push/PR for a human
+    assert moved.branch == "b"  # branch is still recorded
+    assert moved.pr_dict() is None
+
+
+def test_done_resolves_pr_by_branch_when_unrecorded(tmp_path):
+    # [P2b] A branch-backed ticket with no recorded PR still gets merged on done — the PR
+    # is resolved by branch (SoloPM owns the branch).
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    t = svc.create_ticket(project="SOLO", title="x")
+    svc.move_ticket(t.id, "in-progress")
+    svc.move_ticket(t.id, "in-ai-review", branch="b", actor="human")  # records branch, no PR
+    svc.move_ticket(t.id, "in-human-review", actor="codex")
+    assert svc.get_ticket(t.id).pr_number is None
+    done = svc.move_ticket(t.id, "done", actor="human")
+    assert ("find", "b") in gh.calls
+    assert ("merge", 17) in gh.calls
+    assert done.pr_state == "merged"
+
+
+def test_find_pr_distinguishes_no_pr_from_real_error(tmp_path, monkeypatch):
+    # [P2a] gh "no PR" → None; any other gh failure must surface, not look like "no PR".
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+
+    def fake_run(returncode, stderr):
+        class P:
+            pass
+        p = P()
+        p.returncode, p.stdout, p.stderr = returncode, "", stderr
+        return p
+
+    monkeypatch.setattr(gh, "_run", lambda *a, **k: fake_run(1, "no pull requests found for branch 'b'"))
+    assert gh.find_pr("/repo", "b") is None
+
+    monkeypatch.setattr(gh, "_run", lambda *a, **k: fake_run(1, "HTTP 401: Bad credentials"))
+    with pytest.raises(GitHubError):
+        gh.find_pr("/repo", "b")
 
 
 def test_git_failure_aborts_the_move(tmp_path):

@@ -32,6 +32,8 @@ class GitHubClient(Protocol):
 
     def push_branch(self, repo: str, branch: str) -> None: ...
 
+    def find_pr(self, repo: str, branch: str) -> PR | None: ...
+
     def open_or_refresh_pr(
         self, repo: str, branch: str, base: str, title: str, body: str
     ) -> PR: ...
@@ -61,20 +63,30 @@ class GitHub:
             raise GitHubError(f"`{' '.join(args)}` failed: {detail}")
         return proc
 
+    # gh prints one of these to stderr when a branch simply has no PR (vs. a real error).
+    _NO_PR_MARKERS = ("no pull requests found", "no open pull requests", "no pull request found")
+
     def push_branch(self, repo: str, branch: str) -> None:
         self._run(["git", "push", "-u", "origin", branch], cwd=repo)
 
-    def _pr_for_branch(self, repo: str, branch: str) -> PR | None:
+    def find_pr(self, repo: str, branch: str) -> PR | None:
         proc = self._run(
             ["gh", "pr", "view", branch, "--json", "number,url,state"], cwd=repo, check=False
         )
         if proc.returncode != 0:
-            return None  # no open PR for this branch
+            stderr = (proc.stderr or "").lower()
+            if any(marker in stderr for marker in self._NO_PR_MARKERS):
+                return None  # genuinely no PR for this branch
+            # An auth/network/other failure must NOT masquerade as "no PR" — else we'd
+            # try to create a duplicate. Surface it.
+            raise GitHubError(
+                f"`gh pr view {branch}` failed: {(proc.stderr or proc.stdout or '').strip()}"
+            )
         data = json.loads(proc.stdout)
         return PR(number=int(data["number"]), url=data["url"], state=str(data["state"]).lower())
 
     def open_or_refresh_pr(self, repo: str, branch: str, base: str, title: str, body: str) -> PR:
-        existing = self._pr_for_branch(repo, branch)
+        existing = self.find_pr(repo, branch)
         if existing is not None:
             # The branch push above already refreshed the PR; just return it.
             return existing
@@ -83,7 +95,7 @@ class GitHub:
              "--body", body or ""],
             cwd=repo,
         )
-        pr = self._pr_for_branch(repo, branch)
+        pr = self.find_pr(repo, branch)
         if pr is None:
             raise GitHubError("PR was created but could not be read back from gh.")
         return pr
