@@ -156,11 +156,14 @@ class GitHub:
 
         On a merge-queue-protected branch, ``gh pr merge`` exits 0 after merely *adding*
         a green PR to the queue rather than merging it — so success from the command is
-        not proof the PR landed. The post-merge readback is the source of truth: a PR
-        that reads back ``MERGED`` (or yields a merge commit) is reported ``merged``; one
-        still ``OPEN`` was enqueued and is reported ``queued``. A genuinely un-mergeable
-        PR (conflicts, draft, blocked without a queue) makes ``gh pr merge`` exit non-zero,
-        which raises and aborts the transition before any state is recorded.
+        not proof the PR landed. Two signals separate the two: ``gh`` announces "added to
+        the merge queue" in its own output, and a post-merge readback shows whether the PR
+        is ``MERGED`` or still ``OPEN``. The readback (when it succeeds) is authoritative
+        and also yields the squash sha; if it flakes, the command output is the fallback —
+        so a queued PR is never silently reported as merged just because the readback
+        timed out. A genuinely un-mergeable PR (conflicts, draft, blocked without a queue)
+        makes ``gh pr merge`` exit non-zero, which raises and aborts before any state is
+        recorded.
         """
         # Light preflight: don't even attempt to merge a PR that is already merged/closed.
         # Best-effort — if the state can't be read, fall through and let the merge be the gate.
@@ -178,33 +181,37 @@ class GitHub:
             if pre_state and pre_state != "OPEN":
                 raise GitHubError(f"PR #{number} is {pre_state}, not open — cannot merge.")
 
-        self._run(["gh", "pr", "merge", str(number), "--squash", "--delete-branch"], cwd=repo)
+        merge = self._run(["gh", "pr", "merge", str(number), "--squash", "--delete-branch"], cwd=repo)
+        # `gh` prints e.g. "Pull request #N will be added to the merge queue …" when it only
+        # enqueues rather than merges. Captured here as the fallback queued signal.
+        enqueued = "merge queue" in f"{merge.stdout or ''} {merge.stderr or ''}".lower()
 
-        # Read back to distinguish a real merge from a queued one (and to grab the sha). A
-        # *failed* read-back is non-fatal: the merge command already succeeded, so assume it
-        # landed (sha unknown) rather than abort over a flaky lookup. `check=False` suppresses
-        # a non-zero exit; a timeout / missing `gh` still raises GitHubError, so swallow that.
+        # Read back to confirm the merge and capture the squash sha. Best-effort: a flaky
+        # read (timeout / non-zero / bad json) leaves state/oid empty and we fall back to the
+        # command's own signal above — never papering a queued merge over as a real one.
+        state, oid = "", None
         try:
             proc = self._run(
                 ["gh", "pr", "view", str(number), "--json", "state,mergeCommit"],
                 cwd=repo, check=False,
             )
         except GitHubError:
-            return MergeResult("merged")
-        if proc.returncode != 0:
-            return MergeResult("merged")
-        try:
-            data = json.loads(proc.stdout)
-        except (ValueError, TypeError):
-            return MergeResult("merged")
-        state = str(data.get("state") or "").upper()
-        oid = (data.get("mergeCommit") or {}).get("oid")
+            proc = None
+        if proc is not None and proc.returncode == 0:
+            try:
+                data = json.loads(proc.stdout)
+                state = str(data.get("state") or "").upper()
+                oid = (data.get("mergeCommit") or {}).get("oid")
+            except (ValueError, TypeError):
+                pass
+
+        # A readback that positively shows the PR merged is the strongest signal.
         if oid or state == "MERGED":
             return MergeResult("merged", str(oid) if oid else None)
-        if state == "OPEN":
-            # gh succeeded but the PR is still open → it was enqueued in a merge queue.
+        # Otherwise trust an explicit "queued" signal — from gh's output or a still-open readback.
+        if enqueued or state == "OPEN":
             return MergeResult("queued")
-        # Unknown state after a successful merge command: treat as merged, sha unknown.
+        # Readback inconclusive and gh didn't mention a queue → assume the squash-merge landed.
         return MergeResult("merged")
 
     def close_pr(self, repo: str, number: int) -> None:

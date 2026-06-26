@@ -332,10 +332,11 @@ def test_cancelled_appends_close_note(tmp_path):
     assert notes[0].actor == "claude"
 
 
-def _merge_pr_fake(*, preflight, readback, record=None):
+def _merge_pr_fake(*, preflight, readback, merge_output="", record=None):
     """Build a `_run` stand-in for merge_pr's three calls: preflight view (`--json state`),
-    the merge, and the readback view (`--json state,mergeCommit`). `preflight`/`readback`
-    are JSON strings, or a GitHubError instance to raise for that call."""
+    the merge (whose stderr is `merge_output` — e.g. a "merge queue" notice), and the
+    readback view (`--json state,mergeCommit`). `preflight`/`readback` are JSON strings, or
+    a GitHubError instance to raise for that call."""
 
     def fake_run(args, cwd, check=True):
         if record is not None:
@@ -343,17 +344,17 @@ def _merge_pr_fake(*, preflight, readback, record=None):
         is_merge = args[:3] == ["gh", "pr", "merge"]
         is_readback = "state,mergeCommit" in args  # the readback view's --json value
         if is_merge:
-            payload = None
+            payload, err = "", merge_output
         elif is_readback:
-            payload = readback
+            payload, err = readback, ""
         else:
-            payload = preflight
+            payload, err = preflight, ""
         if isinstance(payload, GitHubError):
             raise payload
 
         class P:
             returncode = 0
-            stderr = ""
+            stderr = err
             stdout = payload or ""
 
         return P()
@@ -411,6 +412,20 @@ def test_merge_pr_open_after_merge_is_queued(tmp_path, monkeypatch):
     monkeypatch.setattr(gh, "_run", _merge_pr_fake(
         preflight='{"state": "OPEN"}',
         readback='{"state": "OPEN", "mergeCommit": null}',
+    ))
+    assert gh.merge_pr("/repo", 17) == MergeResult("queued", None)
+
+
+def test_merge_pr_queued_via_command_output_when_readback_flakes(tmp_path, monkeypatch):
+    # [SOLO-11 c5] If the readback fails, the merge command's own "added to the merge queue"
+    # notice must still classify the PR as queued — never silently downgraded to merged.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    monkeypatch.setattr(gh, "_run", _merge_pr_fake(
+        preflight='{"state": "OPEN"}',
+        merge_output="! Pull request #17 will be added to the merge queue when ready",
+        readback=GitHubError("Command timed out: gh pr view 17"),
     ))
     assert gh.merge_pr("/repo", 17) == MergeResult("queued", None)
 
