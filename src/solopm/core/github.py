@@ -35,7 +35,9 @@ def validate_branch_name(branch: str) -> str:
         or len(branch) > 200
         or not _BRANCH_RE.match(branch)
         or ".." in branch
+        or "@{" in branch
         or branch.endswith("/")
+        or branch.endswith(".")
         or branch.endswith(".lock")
     ):
         raise ValidationError(f"Invalid branch name: {branch!r}.")

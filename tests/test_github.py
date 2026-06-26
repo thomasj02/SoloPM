@@ -179,7 +179,7 @@ def test_malicious_branch_name_is_rejected_before_any_git_op(tmp_path):
     svc = _svc(tmp_path, github=gh)
     t = svc.create_ticket(project="SOLO", title="x")
     svc.move_ticket(t.id, "in-progress")
-    for bad in ("HEAD:refs/heads/main", "--delete", "a b", "../evil", "x:y", "-x"):
+    for bad in ("HEAD:refs/heads/main", "--delete", "a b", "../evil", "x:y", "-x", "foo.", "x@{0}"):
         with pytest.raises(ValidationError):
             svc.move_ticket(t.id, "in-ai-review", branch=bad, actor="claude")
     assert gh.calls == []  # nothing pushed/opened for any rejected branch
