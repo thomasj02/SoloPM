@@ -125,6 +125,8 @@ pass this), `--agent <name>` (attribute the action, e.g. `claude`/`codex`; absen
 | `solopm ticket criteria add <id> "…"` | Add an acceptance criterion (definition-of-done checklist item). |
 | `solopm ticket criteria check <id> <cid> [--uncheck]` | Tick (or untick) a criterion. |
 | `solopm ticket criteria edit\|remove <id> <cid> […]` | Edit a criterion's text / remove it. |
+| `solopm review memory list\|add\|set <project> […]` | Curate the per-project review memory (the learning review gate). |
+| `solopm review prompt <project>` | Print the assembled review prompt (base + active review memory). |
 
 The full JSON contract is in [`API.md`](./API.md).
 
@@ -150,7 +152,8 @@ board.
 **Tools:** `list_projects`, `workflow_info`, `list_tickets`, `show_ticket`,
 `create_ticket`, `edit_ticket`, `comment_ticket`, `move_ticket`, `assign_ticket`,
 `submit_review`, `add_criterion`, `check_criterion`, `edit_criterion`,
-`remove_criterion`, `radar`.
+`remove_criterion`, `radar`, `list_review_memory`, `add_review_memory`,
+`update_review_memory`, `review_prompt`.
 
 Register the server with your MCP client by pointing it at `uv run solopm mcp` (cwd =
 repo root) — e.g. in Claude Code, `claude mcp add solopm -- uv run solopm mcp`.

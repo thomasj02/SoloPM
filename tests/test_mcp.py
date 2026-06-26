@@ -128,6 +128,10 @@ def test_build_server_registers_expected_tools(service, project):
         "edit_criterion",
         "remove_criterion",
         "radar",
+        "list_review_memory",
+        "add_review_memory",
+        "update_review_memory",
+        "review_prompt",
     } <= names
 
 
@@ -143,6 +147,15 @@ def test_build_server_tool_invocation(service, project):
     payload = json.loads(blocks[0].text)
     assert payload["id"] == "SOLO-1"
     assert payload["activity"][0]["actor"] == "claude"  # attributed to the agent
+
+
+def test_review_memory_via_mcp(service, project):
+    t = tools_for(service)
+    item = t.add_review_memory("SOLO", "check Y")
+    assert item["status"] == "active"
+    assert "check Y" in t.review_prompt("SOLO")["prompt"]
+    assert any(i["id"] == item["id"] for i in t.list_review_memory("SOLO")["items"])
+    assert t.update_review_memory("SOLO", item["id"], status="retired")["status"] == "retired"
 
 
 def test_radar_tool(service, project):
