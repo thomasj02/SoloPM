@@ -1,9 +1,9 @@
-// util.js — small DOM + formatting helpers shared across modules.
+// util.ts — small DOM + formatting helpers shared across modules.
 // Zero dependencies; safe-by-default (all user text goes through escapeHtml or
 // text nodes, never raw innerHTML except the explicit `html` escape hatch).
 
 /** Escape a string for safe insertion into HTML text/attribute context. */
-export function escapeHtml(value) {
+export function escapeHtml(value: unknown): string {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -11,6 +11,9 @@ export function escapeHtml(value) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
 }
+
+export type ElChild = Node | string | number | false | null | undefined;
+export type ElProps = Record<string, unknown>;
 
 /**
  * Terse hyperscript-style element factory.
@@ -26,43 +29,52 @@ export function escapeHtml(value) {
  *   - a known property   -> assigned directly, else setAttribute
  * Children may be a node, a string, an array, or nullish (skipped).
  */
-export function el(tag, props = {}, children = []) {
+export function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  props: ElProps = {},
+  children: ElChild | ElChild[] = [],
+): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
   for (const [key, val] of Object.entries(props)) {
     if (val == null || val === false) continue;
-    if (key === "class") node.className = val;
-    else if (key === "style") node.setAttribute("style", val);
-    else if (key === "dataset") Object.assign(node.dataset, val);
-    else if (key === "html") node.innerHTML = val; // sanitized markdown only
-    else if (key.startsWith("on") && typeof val === "function") {
-      node.addEventListener(key.slice(2).toLowerCase(), val);
+    if (key === "class") {
+      node.className = String(val);
+    } else if (key === "style") {
+      node.setAttribute("style", String(val));
+    } else if (key === "dataset") {
+      Object.assign(node.dataset, val as Record<string, string>);
+    } else if (key === "html") {
+      node.innerHTML = String(val); // sanitized markdown only
+    } else if (key.startsWith("on") && typeof val === "function") {
+      node.addEventListener(key.slice(2).toLowerCase(), val as EventListener);
     } else if (key in node && key !== "list") {
-      node[key] = val;
+      (node as Record<string, unknown>)[key] = val;
     } else {
-      node.setAttribute(key, val);
+      node.setAttribute(key, String(val));
     }
   }
-  for (const child of [].concat(children)) {
+  const list: ElChild[] = Array.isArray(children) ? children : [children];
+  for (const child of list) {
     if (child == null || child === false) continue;
-    node.append(child.nodeType ? child : document.createTextNode(String(child)));
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }
   return node;
 }
 
 /** Remove all children from a node. */
-export function clearChildren(node) {
+export function clearChildren(node: Node): void {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
 /** Human-friendly relative time, e.g. "3 minutes ago". */
-export function relativeTime(iso) {
+export function relativeTime(iso: string | null | undefined): string {
   if (!iso) return "";
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "";
   const secs = Math.round((Date.now() - then) / 1000);
   const abs = Math.abs(secs);
   const suffix = secs >= 0 ? "ago" : "from now";
-  const unit = (n, name) => `${n} ${name}${n === 1 ? "" : "s"} ${suffix}`;
+  const unit = (n: number, name: string) => `${n} ${name}${n === 1 ? "" : "s"} ${suffix}`;
   if (abs < 45) return "just now";
   const mins = Math.round(abs / 60);
   if (abs < 90) return unit(1, "minute");

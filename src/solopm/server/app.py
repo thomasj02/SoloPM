@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import Body, Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -37,7 +37,9 @@ from .schemas import (
     TicketPatch,
 )
 
-WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+# The web app is the built output of the Vite + TypeScript project in ../../frontend.
+# Run `npm --prefix frontend run build` to (re)generate it.
+WEB_DIR = Path(__file__).resolve().parent.parent / "web" / "dist"
 
 
 def get_service(request: Request) -> Service:
@@ -249,5 +251,19 @@ def create_app(
 
     if WEB_DIR.is_dir() and (WEB_DIR / "index.html").exists():
         app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
+    else:
+
+        @app.get("/", response_class=HTMLResponse)
+        def _web_not_built() -> str:
+            return (
+                "<!doctype html><meta charset=utf-8><title>SoloPM</title>"
+                "<body style='font-family:system-ui;max-width:42rem;margin:4rem auto;"
+                "color:#e6e6e9;background:#0d0d11'>"
+                "<h1>SoloPM</h1><p>The web app hasn't been built yet. From the repo root run:</p>"
+                "<pre style='background:#17171c;padding:1rem;border-radius:8px'>"
+                "npm --prefix frontend install\nnpm --prefix frontend run build</pre>"
+                "<p>then reload this page. The API is already running at "
+                "<code>/api</code>.</p></body>"
+            )
 
     return app

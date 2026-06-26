@@ -15,6 +15,11 @@ htmlcov/
 # Virtual environment (managed by uv; uv.lock is committed for reproducibility)
 .venv/
 
+# Node / frontend build (package-lock.json IS committed for reproducibility)
+frontend/node_modules/
+# Vite build output, served by the backend; rebuild with `npm --prefix frontend run build`
+src/solopm/web/dist/
+
 # Local SoloPM store, if ever placed inside the repo (default lives in ~/.solopm)
 .solopm/
 

@@ -1,22 +1,32 @@
-// app.js — bootstrap + orchestration: builds the shell and top bar, wires the
+// main.ts — bootstrap + orchestration: builds the shell and top bar, wires the
 // project/ticket creation modals, keyboard shortcuts, polling, and onboarding.
 
+import "./styles.css";
+
 import {
-  state, on, loadMeta, loadProjects, setProject, refreshTickets, setFilter,
-} from "./store.js";
-import { api } from "./api.js";
-import { el, clearChildren } from "./util.js";
-import { openModal, closeTopModal, isOverlayOpen, toast, toastError, toastSuccess } from "./ui.js";
-import { initBoard, isDragging } from "./board.js";
-import { closeTicket, isTicketOpen, pollOpenTicket } from "./ticket.js";
+  state,
+  on,
+  loadMeta,
+  loadProjects,
+  setProject,
+  refreshTickets,
+  setFilter,
+} from "./store";
+import { api, ApiError } from "./api";
+import { el, clearChildren } from "./util";
+import { openModal, closeTopModal, isOverlayOpen, toast, toastError, toastSuccess } from "./ui";
+import { initBoard, isDragging } from "./board";
+import { closeTicket, isTicketOpen, pollOpenTicket } from "./ticket";
+import type { Assignee, Project, State } from "./types";
 
 const POLL_MS = 4000;
-let searchInput = null;
-let pollTimer = null;
+let searchInput: HTMLInputElement | null = null;
+let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-async function main() {
+async function main(): Promise<void> {
   buildShell();
-  initBoard(document.getElementById("board-root"));
+  const boardRoot = document.getElementById("board-root");
+  if (boardRoot) initBoard(boardRoot);
   wireShortcuts();
   on("projects", renderTopbar);
 
@@ -25,7 +35,7 @@ async function main() {
     await loadProjects();
   } catch (err) {
     state.backendDown = true;
-    showBackendDown(err);
+    showBackendDown(err as Error);
   }
   renderTopbar();
 
@@ -33,22 +43,24 @@ async function main() {
     try {
       await refreshTickets();
     } catch (err) {
-      toastError(err.message || "Couldn't load tickets.");
+      toastError((err as Error).message || "Couldn't load tickets.");
     }
   }
   startPolling();
 }
 
 // --- shell ----------------------------------------------------------------
-function buildShell() {
+function buildShell(): void {
   const app = document.getElementById("app");
+  if (!app) return;
   const topbar = el("header", { class: "topbar", id: "topbar" });
   const board = el("div", { id: "board-root", class: "board-root" });
   app.append(topbar, el("main", { class: "main" }, board));
 }
 
-function renderTopbar() {
+function renderTopbar(): void {
   const bar = document.getElementById("topbar");
+  if (!bar) return;
   clearChildren(bar);
 
   const brand = el("div", { class: "brand" }, [
@@ -60,13 +72,14 @@ function renderTopbar() {
   const select = el("select", {
     class: "select project-select",
     title: "Project",
-    onChange: (e) => {
-      if (e.target.value === "__new__") {
-        e.target.value = state.currentProject || "";
+    onChange: (e: Event) => {
+      const value = (e.target as HTMLSelectElement).value;
+      if (value === "__new__") {
+        (e.target as HTMLSelectElement).value = state.currentProject || "";
         openNewProject();
         return;
       }
-      setProject(e.target.value);
+      setProject(value);
     },
   });
   if (!state.projects.length) {
@@ -84,7 +97,7 @@ function renderTopbar() {
     class: "btn btn--ghost icon-btn",
     title: "Project settings",
     "aria-label": "Project settings",
-    onClick: openProjectSettings,
+    onClick: () => void openProjectSettings(),
     disabled: !state.currentProject,
   }, "⚙");
 
@@ -94,10 +107,10 @@ function renderTopbar() {
     placeholder: "Filter cards…  ( / )",
     value: state.filter,
     "aria-label": "Filter cards",
-    onInput: (e) => setFilter(e.target.value),
+    onInput: (e: Event) => setFilter((e.target as HTMLInputElement).value),
   });
 
-  const refreshBtn = el("button", { class: "btn btn--ghost icon-btn", title: "Refresh (r)", "aria-label": "Refresh", onClick: manualRefresh }, "⟳");
+  const refreshBtn = el("button", { class: "btn btn--ghost icon-btn", title: "Refresh (r)", "aria-label": "Refresh", onClick: () => void manualRefresh() }, "⟳");
   const newTicketBtn = el("button", { class: "btn btn--primary", title: "New ticket (c)", onClick: openCreateTicket, disabled: !state.currentProject }, "+ New ticket");
 
   bar.append(
@@ -115,12 +128,12 @@ function renderTopbar() {
 }
 
 // Onboarding / backend-down overlay in the board area.
-function renderEmptyState() {
+function renderEmptyState(): void {
   const root = document.getElementById("board-root");
   document.getElementById("empty-state")?.remove();
   const board = document.getElementById("board");
 
-  let card = null;
+  let card: HTMLElement | null = null;
   if (state.backendDown) {
     card = centerCard(
       "Can't reach the backend",
@@ -132,7 +145,7 @@ function renderEmptyState() {
           renderTopbar();
           if (state.currentProject) await refreshTickets();
         } catch (err) {
-          toastError(err.message || "Still can't reach backend.");
+          toastError((err as Error).message || "Still can't reach backend.");
         }
       },
       "solopm serve",
@@ -147,12 +160,18 @@ function renderEmptyState() {
   }
 
   if (board) board.style.display = card ? "none" : "";
-  if (card) {
+  if (card && root) {
     root.append(el("div", { id: "empty-state", class: "empty-state" }, card));
   }
 }
 
-function centerCard(title, text, actionLabel, actionFn, mono) {
+function centerCard(
+  title: string,
+  text: string,
+  actionLabel: string,
+  actionFn: () => void,
+  mono?: string,
+): HTMLElement {
   return el("div", { class: "empty-card surface" }, [
     el("div", { class: "empty-card__glyph", "aria-hidden": "true" }, "◧"),
     el("h2", { class: "empty-card__title" }, title),
@@ -163,7 +182,7 @@ function centerCard(title, text, actionLabel, actionFn, mono) {
 }
 
 // --- modals ---------------------------------------------------------------
-function field(label, input, hint) {
+function field(label: string, input: HTMLElement, hint?: string): HTMLElement {
   return el("label", { class: "field" }, [
     el("span", { class: "field__label" }, label),
     input,
@@ -171,12 +190,12 @@ function field(label, input, hint) {
   ]);
 }
 
-function setFormError(node, msg) {
+function setFormError(node: HTMLElement, msg: string): void {
   node.textContent = msg;
   node.hidden = false;
 }
 
-function openNewProject() {
+function openNewProject(): void {
   const keyInput = el("input", { class: "input mono", placeholder: "SOLO", autocomplete: "off", maxlength: 16, "aria-label": "Project key" });
   // Enforce the [A-Z][A-Z0-9]* shape as the user types.
   keyInput.addEventListener("input", () => {
@@ -210,12 +229,13 @@ function openNewProject() {
       toastSuccess(`Project ${project.key} created`);
     } catch (err) {
       submitBtn.disabled = false;
-      setFormError(errBox, err.code === "duplicate" ? `Project key "${key}" already exists.` : err.message || "Failed to create project.");
+      const e = err as ApiError;
+      setFormError(errBox, e.code === "duplicate" ? `Project key "${key}" already exists.` : e.message || "Failed to create project.");
     }
   };
-  submitBtn.addEventListener("click", submit);
+  submitBtn.addEventListener("click", () => void submit());
 
-  const body = el("form", { class: "form", onSubmit: (e) => { e.preventDefault(); submit(); } }, [
+  const body = el("form", { class: "form", onSubmit: (e: Event) => { e.preventDefault(); void submit(); } }, [
     field("Key", keyInput, "Uppercase ticket prefix. Letters & digits, starts with a letter."),
     field("Name", nameInput),
     field("Repository path", repoInput, "Optional — local path to the git repo."),
@@ -230,11 +250,12 @@ function openNewProject() {
   });
 }
 
-function openCreateTicket() {
+function openCreateTicket(): void {
   if (!state.currentProject) {
     toastError("Create or select a project first.");
     return;
   }
+  const project = state.currentProject;
 
   const titleInput = el("input", { class: "input", placeholder: "What needs doing?", maxlength: 200, "aria-label": "Title" });
   const descInput = el("textarea", { class: "textarea", rows: 6, placeholder: "Description (markdown, optional)…", "aria-label": "Description" });
@@ -258,48 +279,48 @@ function openCreateTicket() {
     submitBtn.disabled = true;
     try {
       const ticket = await api.createTicket({
-        project: state.currentProject,
+        project,
         title,
         description: descInput.value,
-        state: stateSelect.value,
-        assignee: assignSelect.value,
+        state: stateSelect.value as State,
+        assignee: assignSelect.value as Assignee,
       });
       modal.close();
       await refreshTickets();
       toastSuccess(`${ticket.id} created`);
     } catch (err) {
       submitBtn.disabled = false;
-      setFormError(errBox, err.message || "Failed to create ticket.");
+      setFormError(errBox, (err as ApiError).message || "Failed to create ticket.");
     }
   };
-  submitBtn.addEventListener("click", submit);
+  submitBtn.addEventListener("click", () => void submit());
 
-  const body = el("form", { class: "form", onSubmit: (e) => { e.preventDefault(); submit(); } }, [
+  const body = el("form", { class: "form", onSubmit: (e: Event) => { e.preventDefault(); void submit(); } }, [
     field("Title", titleInput),
     field("Description", descInput),
     el("div", { class: "form__row" }, [field("State", stateSelect), field("Assignee", assignSelect)]),
     errBox,
   ]);
   const modal = openModal({
-    title: `New ticket in ${state.currentProject}`,
+    title: `New ticket in ${project}`,
     body,
     footer: [el("button", { class: "btn btn--ghost", onClick: () => modal.close() }, "Cancel"), submitBtn],
     width: "560px",
   });
 }
 
-async function openProjectSettings() {
+async function openProjectSettings(): Promise<void> {
   const key = state.currentProject;
   if (!key) {
     toastError("Select or create a project first.");
     return;
   }
 
-  let project;
+  let project: Project;
   try {
     project = await api.project(key);
   } catch (err) {
-    toastError(err.message || "Couldn't load project settings.");
+    toastError((err as Error).message || "Couldn't load project settings.");
     return;
   }
 
@@ -341,12 +362,12 @@ async function openProjectSettings() {
       toastSuccess(`Saved ${key} settings`);
     } catch (err) {
       submitBtn.disabled = false;
-      setFormError(errBox, err.message || "Failed to save settings.");
+      setFormError(errBox, (err as ApiError).message || "Failed to save settings.");
     }
   };
-  submitBtn.addEventListener("click", submit);
+  submitBtn.addEventListener("click", () => void submit());
 
-  const body = el("form", { class: "form", onSubmit: (e) => { e.preventDefault(); submit(); } }, [
+  const body = el("form", { class: "form", onSubmit: (e: Event) => { e.preventDefault(); void submit(); } }, [
     field("Name", nameInput),
     field("Repository path", repoInput, "Local path to the git repo (project ↔ repo is 1:1)."),
     el("div", { class: "form__row" }, [field("Master branch", masterInput), field("Branch convention", conventionInput)]),
@@ -363,13 +384,13 @@ async function openProjectSettings() {
 }
 
 // --- keyboard -------------------------------------------------------------
-function wireShortcuts() {
-  document.addEventListener("keydown", (e) => {
+function wireShortcuts(): void {
+  document.addEventListener("keydown", (e: KeyboardEvent) => {
     // Esc always works — close the topmost overlay, then the panel, then search.
     if (e.key === "Escape") {
       if (closeTopModal()) return;
       if (isTicketOpen()) return closeTicket();
-      if (document.activeElement === searchInput) searchInput.blur();
+      if (document.activeElement === searchInput) searchInput?.blur();
       return;
     }
 
@@ -390,7 +411,7 @@ function wireShortcuts() {
         break;
       case "r":
         e.preventDefault();
-        manualRefresh();
+        void manualRefresh();
         break;
       default:
         break;
@@ -398,13 +419,14 @@ function wireShortcuts() {
   });
 }
 
-function isTypingTarget(t) {
-  if (!t) return false;
-  return t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable;
+function isTypingTarget(t: EventTarget | null): boolean {
+  const node = t as HTMLElement | null;
+  if (!node) return false;
+  return node.tagName === "INPUT" || node.tagName === "TEXTAREA" || node.tagName === "SELECT" || node.isContentEditable;
 }
 
 // --- polling --------------------------------------------------------------
-function startPolling() {
+function startPolling(): void {
   stopPolling();
   pollTimer = setInterval(async () => {
     // Skip when hidden, mid-drag, or a modal is open, to avoid clobbering.
@@ -420,24 +442,24 @@ function startPolling() {
   }, POLL_MS);
 }
 
-function stopPolling() {
+function stopPolling(): void {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
 }
 
-async function manualRefresh() {
+async function manualRefresh(): Promise<void> {
   if (!state.currentProject) return;
   try {
     await refreshTickets();
     if (isTicketOpen()) await pollOpenTicket();
     toast("Refreshed", "info", 1200);
   } catch (err) {
-    toastError(err.message || "Refresh failed");
+    toastError((err as Error).message || "Refresh failed");
   }
 }
 
-function showBackendDown(err) {
+function showBackendDown(err: Error): void {
   toastError(err.message || "Can't reach backend.");
 }
 
-main();
+void main();

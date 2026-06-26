@@ -1,17 +1,23 @@
-// board.js — the Kanban board: one column per state, cards, and drag-and-drop.
+// board.ts — the Kanban board: one column per state, cards, and drag-and-drop.
 // Moves are optimistic; on a 4xx the card snaps back and a toast shows the error.
 
-import { state, on, refreshTickets } from "./store.js";
-import { api } from "./api.js";
-import { el, clearChildren } from "./util.js";
-import { toastError, assigneeBadge } from "./ui.js";
-import { openTicket } from "./ticket.js";
+import { state, on, refreshTickets } from "./store";
+import { api } from "./api";
+import { el, clearChildren } from "./util";
+import { toastError, assigneeBadge } from "./ui";
+import { openTicket } from "./ticket";
+import type { State, TicketSummary } from "./types";
 
-let boardEl = null;
-let dragging = null; // { id, from } while a card is being dragged
+interface Dragging {
+  id: string;
+  from: State;
+}
+
+let boardEl: HTMLElement | null = null;
+let dragging: Dragging | null = null;
 let movePending = false; // true while an optimistic move POST is in flight
 
-export function initBoard(root) {
+export function initBoard(root: HTMLElement): void {
   boardEl = el("div", { class: "board", id: "board" });
   root.append(boardEl);
   // Re-render on any data/enum/filter change.
@@ -22,17 +28,17 @@ export function initBoard(root) {
 }
 
 /** True while a card is mid-drag OR an optimistic move is in flight (pauses polling). */
-export function isDragging() {
+export function isDragging(): boolean {
   return !!dragging || movePending;
 }
 
-function matchesFilter(t, q) {
+function matchesFilter(t: TicketSummary, q: string): boolean {
   if (!q) return true;
   const needle = q.toLowerCase();
   return t.id.toLowerCase().includes(needle) || (t.title || "").toLowerCase().includes(needle);
 }
 
-function render() {
+function render(): void {
   if (!boardEl) return;
   clearChildren(boardEl);
   if (!state.currentProject) return; // onboarding overlay handles the empty case
@@ -48,18 +54,22 @@ function render() {
   }
 
   // Bucket tickets by state.
-  const buckets = new Map(state.meta.states.map((s) => [s, []]));
+  const buckets = new Map<string, TicketSummary[]>(state.meta.states.map((s) => [s, []]));
   for (const t of state.tickets) {
-    if (!buckets.has(t.state)) buckets.set(t.state, []);
-    buckets.get(t.state).push(t);
+    let bucket = buckets.get(t.state);
+    if (!bucket) {
+      bucket = [];
+      buckets.set(t.state, bucket);
+    }
+    bucket.push(t);
   }
 
   for (const s of state.meta.states) {
-    boardEl.append(renderColumn(s, buckets.get(s) || []));
+    boardEl.append(renderColumn(s, buckets.get(s) ?? []));
   }
 }
 
-function renderColumn(stateId, items) {
+function renderColumn(stateId: State, items: TicketSummary[]): HTMLElement {
   const label = state.meta.state_labels[stateId] || stateId;
   const terminal = stateId === "done" || stateId === "cancelled";
   const visible = items.filter((t) => matchesFilter(t, state.filter));
@@ -88,11 +98,11 @@ function renderColumn(stateId, items) {
   // Drop wiring lives on the whole column so the entire area is a target.
   col.addEventListener("dragover", (e) => onDragOver(e, stateId, col));
   col.addEventListener("dragleave", (e) => onDragLeave(e, col));
-  col.addEventListener("drop", (e) => onDrop(e, stateId, col));
+  col.addEventListener("drop", (e) => void onDrop(e, stateId, col));
   return col;
 }
 
-function renderCard(t) {
+function renderCard(t: TicketSummary): HTMLElement {
   const card = el("div", {
     class: "card",
     draggable: true,
@@ -127,27 +137,29 @@ function renderCard(t) {
 }
 
 // --- drag and drop --------------------------------------------------------
-function onDragStart(e, t, card) {
+function onDragStart(e: DragEvent, t: TicketSummary, card: HTMLElement): void {
   dragging = { id: t.id, from: t.state };
   card.classList.add("card--dragging");
-  e.dataTransfer.effectAllowed = "move";
-  e.dataTransfer.setData("text/plain", t.id);
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", t.id);
+  }
 
   // Light up legal targets, dim illegal ones, mark the source.
   const legal = new Set(state.meta.transitions[t.state] || []);
-  boardEl.classList.add("board--dragging");
-  boardEl.querySelectorAll(".col").forEach((col) => {
+  boardEl?.classList.add("board--dragging");
+  boardEl?.querySelectorAll<HTMLElement>(".col").forEach((col) => {
     const s = col.dataset.state;
     if (s === t.state) col.classList.add("col--source");
-    else col.classList.add(legal.has(s) ? "col--legal" : "col--illegal");
+    else col.classList.add(s && legal.has(s as State) ? "col--legal" : "col--illegal");
   });
 }
 
-function onDragEnd(card) {
+function onDragEnd(card: HTMLElement): void {
   card.classList.remove("card--dragging");
-  boardEl.classList.remove("board--dragging");
+  boardEl?.classList.remove("board--dragging");
   boardEl
-    .querySelectorAll(".col")
+    ?.querySelectorAll<HTMLElement>(".col")
     .forEach((col) => col.classList.remove("col--legal", "col--illegal", "col--source", "col--over"));
   removeDropLine();
   dragging = null;
@@ -155,29 +167,29 @@ function onDragEnd(card) {
 
 // A cross-column move (changes state). The source column is NOT a legal cross target —
 // dropping there is a reorder, handled separately.
-function isLegalCross(stateId) {
+function isLegalCross(stateId: State): boolean {
   if (!dragging || stateId === dragging.from) return false;
   return (state.meta.transitions[dragging.from] || []).includes(stateId);
 }
 
 // --- within-column drop position -----------------------------------------
-function cardsIn(col) {
-  return [...col.querySelectorAll(".card:not(.card--dragging)")];
+function cardsIn(col: HTMLElement): HTMLElement[] {
+  return [...col.querySelectorAll<HTMLElement>(".card:not(.card--dragging)")];
 }
 
 /** Id of the card the dragged card should sit AFTER, given the cursor Y (null = top). */
-function dropAfterId(col, clientY) {
-  let afterId = null;
+function dropAfterId(col: HTMLElement, clientY: number): string | null {
+  let afterId: string | null = null;
   for (const card of cardsIn(col)) {
     const r = card.getBoundingClientRect();
-    if (clientY > r.top + r.height / 2) afterId = card.dataset.id;
+    if (clientY > r.top + r.height / 2) afterId = card.dataset.id ?? null;
     else break;
   }
   return afterId;
 }
 
-let dropLine = null;
-function showDropLine(col, afterId) {
+let dropLine: HTMLElement | null = null;
+function showDropLine(col: HTMLElement, afterId: string | null): void {
   if (!dropLine) dropLine = el("div", { class: "drop-line", "aria-hidden": "true" });
   const list = col.querySelector(".col__list");
   if (!list) return;
@@ -190,31 +202,31 @@ function showDropLine(col, afterId) {
   }
 }
 
-function removeDropLine() {
+function removeDropLine(): void {
   dropLine?.remove();
 }
 
 // A drop is valid on its own column (reorder) or any legal cross-column target (move).
-function isDropTarget(stateId) {
+function isDropTarget(stateId: State): boolean {
   return stateId === dragging?.from || isLegalCross(stateId);
 }
 
-function onDragOver(e, stateId, col) {
+function onDragOver(e: DragEvent, stateId: State, col: HTMLElement): void {
   if (!dragging || !isDropTarget(stateId)) return; // illegal: browser disallows drop
   e.preventDefault();
-  e.dataTransfer.dropEffect = "move";
+  if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
   col.classList.add("col--over");
   showDropLine(col, dropAfterId(col, e.clientY)); // line shows the exact landing spot
 }
 
-function onDragLeave(e, col) {
-  if (!col.contains(e.relatedTarget)) {
+function onDragLeave(e: DragEvent, col: HTMLElement): void {
+  if (!col.contains(e.relatedTarget as Node | null)) {
     col.classList.remove("col--over");
     removeDropLine();
   }
 }
 
-async function onDrop(e, stateId, col) {
+async function onDrop(e: DragEvent, stateId: State, col: HTMLElement): Promise<void> {
   if (!dragging || !isDropTarget(stateId)) return;
   e.preventDefault();
   col.classList.remove("col--over");
@@ -228,7 +240,7 @@ async function onDrop(e, stateId, col) {
  * when crossing columns), then persists — reorder for same-column, move for cross-column.
  * Reverts the whole board order (and the state) on failure.
  */
-async function doDrop(id, fromState, toState, afterId) {
+async function doDrop(id: string, fromState: State, toState: State, afterId: string | null): Promise<void> {
   const moving = state.tickets.find((t) => t.id === id);
   if (!moving) {
     dragging = null;
@@ -241,7 +253,7 @@ async function doDrop(id, fromState, toState, afterId) {
   // buckets by state in flat-list order, so the card lands exactly where it was dropped.
   moving.state = toState;
   const without = state.tickets.filter((t) => t.id !== id);
-  let idx;
+  let idx: number;
   if (afterId == null) {
     idx = without.findIndex((t) => t.state === toState);
     if (idx === -1) idx = without.length;
@@ -262,7 +274,7 @@ async function doDrop(id, fromState, toState, afterId) {
     state.tickets = prevOrder; // revert order
     moving.state = prevState; //  and state
     render();
-    toastError(err.message || "Move failed");
+    toastError((err as Error).message || "Move failed");
   } finally {
     movePending = false;
   }
