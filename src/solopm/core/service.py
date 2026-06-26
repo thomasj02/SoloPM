@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from . import workflow
 from .errors import ForbiddenTransitionError, NotFoundError, ValidationError
+from .github import GitHubClient
 from .models import (
     ASSIGNEES,
     ACTORS,
@@ -56,8 +57,11 @@ def _require_actor(actor: str) -> str:
 
 
 class Service:
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, github: GitHubClient | None = None):
         self.store = store
+        # Optional GitHub automation (Tier-1). When set, agent-managed tickets (those
+        # with a SoloPM branch) drive PRs on transition; absent it, moves are pure.
+        self.github = github
 
     @classmethod
     def open(cls, db_path) -> "Service":
@@ -273,23 +277,42 @@ class Service:
         return (target.position + nxt.position) / 2 if nxt else target.position + 1.0
 
     def move_ticket(
-        self, ticket_id: str, state: str, *, after=_UNSET, actor: str = "human"
+        self,
+        ticket_id: str,
+        state: str,
+        *,
+        after=_UNSET,
+        branch: str | None = None,
+        actor: str = "human",
     ) -> Ticket:
         """Transition a ticket and place it in the target column.
 
         ``after`` is the position hint (see :meth:`_position_in_column`): omit it to land
         at the bottom, pass ``None`` for the top, or a ticket id to drop directly below
-        that card. State-transition and actor rules are enforced regardless.
+        that card. ``branch`` records the SoloPM branch when an agent self-transitions to
+        ``in-ai-review``. State-transition and actor rules are enforced regardless.
+
+        If GitHub automation is configured and the ticket has a SoloPM branch, the
+        transition drives the PR: → in-ai-review pushes + opens/refreshes the PR;
+        → done squash-merges it; → cancelled closes it. The GitHub side effects run
+        **before** the state change, so a failure aborts the move.
         """
         _require_actor(actor)
         ticket = self.get_ticket(ticket_id)
         if workflow.is_noop(ticket.state, state):
             return ticket
         workflow.validate_transition(ticket.state, state, actor=actor)
+
+        pr_fields = self._git_side_effects(ticket, state, branch or ticket.branch)
+
         new_pos = self._position_in_column(ticket.project, state, after, exclude_id=ticket_id)
+        fields: dict = {"state": state, "position": new_pos}
+        if branch:
+            fields["branch"] = branch
+        fields.update(pr_fields)
         self.store.change_ticket(
             ticket_id,
-            {"state": state, "position": new_pos},
+            fields,
             actor=actor,
             kind="state_change",
             body=f"moved {ticket.state} → {state}",
@@ -297,6 +320,33 @@ class Service:
             when=_now(),
         )
         return self.get_ticket(ticket_id)
+
+    def _git_side_effects(self, ticket: Ticket, to_state: str, branch: str | None) -> dict:
+        """Run GitHub PR side effects for a transition; return ticket fields to persist.
+
+        Agent-only: a no-op unless GitHub automation is configured, the ticket has a
+        SoloPM branch, and the project has a repo. Raises on a git/gh failure so the
+        caller aborts the transition.
+        """
+        if self.github is None or not branch:
+            return {}
+        project = self.get_project(ticket.project)
+        if not project.repo:
+            return {}
+        repo, base = project.repo, project.master_branch
+        if to_state == "in-ai-review":
+            self.github.push_branch(repo, branch)
+            pr = self.github.open_or_refresh_pr(
+                repo, branch, base, f"{ticket.id}: {ticket.title}", ticket.description or ""
+            )
+            return {"pr_number": pr.number, "pr_url": pr.url, "pr_state": pr.state}
+        if to_state == "done" and ticket.pr_number:
+            self.github.merge_pr(repo, ticket.pr_number)
+            return {"pr_state": "merged"}
+        if to_state == "cancelled" and ticket.pr_number:
+            self.github.close_pr(repo, ticket.pr_number)
+            return {"pr_state": "closed"}
+        return {}
 
     def reorder_ticket(self, ticket_id: str, *, after: str | None = None, actor: str = "human") -> Ticket:
         """Reposition a ticket within its current column (cosmetic; no state change).

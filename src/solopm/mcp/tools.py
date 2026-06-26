@@ -97,8 +97,10 @@ class SoloPMTools:
         return self.svc.comment_ticket(ticket_id, body=body, actor=self.agent).to_dict()
 
     @_safe
-    def move_ticket(self, ticket_id: str, state: str) -> dict:
-        return self.svc.move_ticket(ticket_id, state, actor=self.agent).to_dict()
+    def move_ticket(self, ticket_id: str, state: str, branch: str | None = None) -> dict:
+        return self.svc.move_ticket(
+            ticket_id, state, branch=branch, actor=self.agent
+        ).to_dict()
 
     @_safe
     def assign_ticket(self, ticket_id: str, assignee: str) -> dict:
