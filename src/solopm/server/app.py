@@ -31,6 +31,8 @@ from ..core.workflow import TRANSITIONS
 from .schemas import (
     AssignRequest,
     CommentCreate,
+    CriterionCreate,
+    CriterionPatch,
     MoveRequest,
     ProjectCreate,
     ReorderRequest,
@@ -260,9 +262,53 @@ def create_app(
         svc: Service = Depends(get_service),
         actor: str = Depends(get_actor),
     ) -> dict:
+        results = (
+            [r.model_dump() for r in payload.criteria_results]
+            if payload.criteria_results
+            else None
+        )
         return svc.submit_review(
-            ticket_id, payload.verdict, comment=payload.comment, actor=actor
+            ticket_id,
+            payload.verdict,
+            comment=payload.comment,
+            criteria_results=results,
+            actor=actor,
         ).to_dict()
+
+    @app.post("/api/tickets/{ticket_id}/criteria", status_code=201)
+    def add_criterion(
+        ticket_id: str,
+        payload: CriterionCreate,
+        svc: Service = Depends(get_service),
+        actor: str = Depends(get_actor),
+    ) -> dict:
+        return svc.add_criterion(ticket_id, payload.text, actor=actor).to_dict()
+
+    @app.patch("/api/tickets/{ticket_id}/criteria/{criterion_id}")
+    def update_criterion(
+        ticket_id: str,
+        criterion_id: str,
+        payload: CriterionPatch,
+        svc: Service = Depends(get_service),
+        actor: str = Depends(get_actor),
+    ) -> dict:
+        ticket = None
+        if payload.text is not None:
+            ticket = svc.edit_criterion(ticket_id, criterion_id, payload.text, actor=actor)
+        if payload.done is not None:
+            ticket = svc.check_criterion(ticket_id, criterion_id, payload.done, actor=actor)
+        if ticket is None:
+            raise ValidationError("Provide 'text' and/or 'done' to update a criterion.")
+        return ticket.to_dict()
+
+    @app.delete("/api/tickets/{ticket_id}/criteria/{criterion_id}")
+    def remove_criterion(
+        ticket_id: str,
+        criterion_id: str,
+        svc: Service = Depends(get_service),
+        actor: str = Depends(get_actor),
+    ) -> dict:
+        return svc.remove_criterion(ticket_id, criterion_id, actor=actor).to_dict()
 
     # --- static web app (mounted last so /api wins) -------------------------
 

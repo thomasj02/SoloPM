@@ -107,6 +107,18 @@ class Activity:
 
 
 @dataclass
+class Criterion:
+    """One acceptance-criterion checklist item on a ticket."""
+
+    id: str
+    text: str
+    done: bool = False
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "text": self.text, "done": self.done}
+
+
+@dataclass
 class Ticket:
     id: str
     project: str
@@ -121,6 +133,7 @@ class Ticket:
     pr_state: str | None = None
     session_id: str | None = None
     session_active: bool = False
+    acceptance_criteria: list[Criterion] = field(default_factory=list)
     position: float = 0.0  # within-column ordering; internal, not serialized to the API
     created_at: str = ""
     updated_at: str = ""
@@ -138,6 +151,12 @@ class Ticket:
             return None
         return {"id": self.session_id, "active": self.session_active}
 
+    def acceptance_progress(self) -> dict:
+        return {
+            "done": sum(1 for c in self.acceptance_criteria if c.done),
+            "total": len(self.acceptance_criteria),
+        }
+
     def to_summary(self) -> dict:
         return {
             "id": self.id,
@@ -148,6 +167,7 @@ class Ticket:
             "branch": self.branch,
             "session_active": self.session_active,
             "pr": self.pr_dict(),
+            "acceptance": self.acceptance_progress(),
             "comment_count": self.comment_count,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -170,6 +190,7 @@ class Ticket:
             "branch": self.branch,
             "pr": self.pr_dict(),
             "session": self.session_dict(),
+            "acceptance_criteria": [c.to_dict() for c in self.acceptance_criteria],
             "comments": comments,
             "activity": [a.to_dict() for a in self.activity],
             "created_at": self.created_at,

@@ -45,6 +45,22 @@ class ReorderRequest(BaseModel):
     after: str | None = None  # place below this ticket; None = top of the column
 
 
+class CriterionResult(BaseModel):
+    criterion_id: str
+    verdict: str  # "pass" | "fail"
+    note: str | None = None
+
+
 class ReviewRequest(BaseModel):
     verdict: str  # "pass" | "fail"
     comment: str | None = None
+    criteria_results: list[CriterionResult] | None = None
+
+
+class CriterionCreate(BaseModel):
+    text: str
+
+
+class CriterionPatch(BaseModel):
+    text: str | None = None
+    done: bool | None = None

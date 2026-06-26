@@ -14,7 +14,7 @@ import sqlite3
 from pathlib import Path
 
 from .errors import DuplicateError
-from .models import Activity, Project, Ticket
+from .models import Activity, Criterion, Project, Ticket
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     pr_state       TEXT,
     session_id     TEXT,
     session_active INTEGER NOT NULL DEFAULT 0,
+    acceptance_criteria TEXT NOT NULL DEFAULT '[]',
     position       REAL NOT NULL DEFAULT 0,
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
@@ -77,6 +78,7 @@ _TICKET_UPDATABLE = frozenset(
         "pr_state",
         "session_id",
         "session_active",
+        "acceptance_criteria",
         "position",
     }
 )
@@ -121,6 +123,11 @@ class Store:
             # Added in 0.1: per-column manual ordering. Backfill = creation order.
             conn.execute("ALTER TABLE tickets ADD COLUMN position REAL NOT NULL DEFAULT 0")
             conn.execute("UPDATE tickets SET position = seq")
+        if "acceptance_criteria" not in cols:
+            # SOLO-6: structured acceptance criteria. Existing tickets start empty.
+            conn.execute(
+                "ALTER TABLE tickets ADD COLUMN acceptance_criteria TEXT NOT NULL DEFAULT '[]'"
+            )
 
     def exists(self) -> bool:
         return self.path.exists()
@@ -160,6 +167,10 @@ class Store:
             pr_state=row["pr_state"],
             session_id=row["session_id"],
             session_active=bool(row["session_active"]),
+            acceptance_criteria=[
+                Criterion(id=c["id"], text=c["text"], done=bool(c["done"]))
+                for c in json.loads(row["acceptance_criteria"] or "[]")
+            ],
             position=row["position"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],

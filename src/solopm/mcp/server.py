@@ -92,10 +92,39 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
         return tools.assign_ticket(ticket_id, assignee=assignee)
 
     @mcp.tool()
-    def submit_review(ticket_id: str, verdict: str, comment: str | None = None) -> dict:
+    def submit_review(
+        ticket_id: str,
+        verdict: str,
+        comment: str | None = None,
+        criteria_results: list[dict] | None = None,
+    ) -> dict:
         """Report an AI-review verdict on a ticket in 'in-ai-review'. 'pass' advances it to
         in-human-review; 'fail' records your notes as a comment and returns it to
-        in-progress for the implementer to address."""
-        return tools.submit_review(ticket_id, verdict, comment=comment)
+        in-progress for the implementer to address. Optionally pass `criteria_results` —
+        a list of {criterion_id, verdict ('pass'|'fail'), note} — to record a per-criterion
+        assessment in the activity log (the overall verdict still gates the transition)."""
+        return tools.submit_review(
+            ticket_id, verdict, comment=comment, criteria_results=criteria_results
+        )
+
+    @mcp.tool()
+    def add_criterion(ticket_id: str, text: str) -> dict:
+        """Add an acceptance criterion (definition-of-done checklist item) to a ticket."""
+        return tools.add_criterion(ticket_id, text)
+
+    @mcp.tool()
+    def check_criterion(ticket_id: str, criterion_id: str, done: bool = True) -> dict:
+        """Mark an acceptance criterion done (or not-done with done=False)."""
+        return tools.check_criterion(ticket_id, criterion_id, done=done)
+
+    @mcp.tool()
+    def edit_criterion(ticket_id: str, criterion_id: str, text: str) -> dict:
+        """Edit the text of an acceptance criterion."""
+        return tools.edit_criterion(ticket_id, criterion_id, text)
+
+    @mcp.tool()
+    def remove_criterion(ticket_id: str, criterion_id: str) -> dict:
+        """Remove an acceptance criterion from a ticket."""
+        return tools.remove_criterion(ticket_id, criterion_id)
 
     return mcp

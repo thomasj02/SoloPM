@@ -373,3 +373,44 @@ def test_trusted_host_rejects_foreign_host(tmp_path):
     assert c.get("/api/health", headers={"host": "evil.example.com"}).status_code == 400
     assert c.get("/api/health", headers={"host": "127.0.0.1"}).status_code == 200
     assert c.get("/api/health", headers={"host": "localhost:8787"}).status_code == 200
+
+
+def test_criteria_crud_via_api(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "x"})
+    r = client.post("/api/tickets/SOLO-1/criteria", json={"text": "tests pass"})
+    assert r.status_code == 201
+    cid = r.json()["acceptance_criteria"][0]["id"]
+    assert client.patch(f"/api/tickets/SOLO-1/criteria/{cid}", json={"done": True}).json()[
+        "acceptance_criteria"
+    ][0]["done"] is True
+    assert client.patch(f"/api/tickets/SOLO-1/criteria/{cid}", json={"text": "all green"}).json()[
+        "acceptance_criteria"
+    ][0]["text"] == "all green"
+    assert client.delete(f"/api/tickets/SOLO-1/criteria/{cid}").json()["acceptance_criteria"] == []
+
+
+def test_review_with_criteria_results_via_api(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "x"})
+    cid = client.post("/api/tickets/SOLO-1/criteria", json={"text": "c"}).json()[
+        "acceptance_criteria"
+    ][0]["id"]
+    client.post("/api/tickets/SOLO-1/move", json={"state": "in-progress"})
+    client.post(
+        "/api/tickets/SOLO-1/move",
+        json={"state": "in-ai-review"},
+        headers={"X-SoloPM-Actor": "claude"},
+    )
+    r = client.post(
+        "/api/tickets/SOLO-1/review",
+        json={
+            "verdict": "pass",
+            "criteria_results": [{"criterion_id": cid, "verdict": "pass", "note": "ok"}],
+        },
+        headers={"X-SoloPM-Actor": "codex"},
+    )
+    assert r.status_code == 200
+    assert r.json()["state"] == "in-human-review"
+    review = [a for a in r.json()["activity"] if a["kind"] == "review"]
+    assert review and review[-1]["meta"]["results"][0]["criterion_id"] == cid

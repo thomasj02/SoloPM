@@ -154,3 +154,15 @@ def test_version():
     r = runner.invoke(cli_main.app, ["--version"])
     assert r.exit_code == 0
     assert r.output.strip()
+
+
+def test_criteria_roundtrip_via_cli(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "x")
+    r = invoke("ticket", "criteria", "add", "SOLO-1", "tests pass", "--json")
+    assert r.exit_code == 0, r.output
+    cid = json.loads(r.output)["acceptance_criteria"][0]["id"]
+    r = invoke("ticket", "criteria", "check", "SOLO-1", cid, "--json")
+    assert json.loads(r.output)["acceptance_criteria"][0]["done"] is True
+    r = invoke("ticket", "criteria", "remove", "SOLO-1", cid, "--json")
+    assert json.loads(r.output)["acceptance_criteria"] == []
