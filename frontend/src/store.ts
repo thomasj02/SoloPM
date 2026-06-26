@@ -108,8 +108,10 @@ export function setProject(key: string): void {
   if (key === state.currentProject) return;
   state.currentProject = key;
   state.tickets = [];
+  state.radar = []; // drop the old project's overlaps so the badge can't show/open stale data
   persistProject();
   emit("projects");
+  emit("radar");
   void refreshTickets().catch(() => {});
 }
 
@@ -121,7 +123,9 @@ function persistProject(): void {
 export async function refreshTickets({ silent = false }: { silent?: boolean } = {}): Promise<void> {
   if (!state.currentProject) {
     state.tickets = [];
+    state.radar = [];
     emit("tickets");
+    emit("radar");
     return;
   }
   try {
