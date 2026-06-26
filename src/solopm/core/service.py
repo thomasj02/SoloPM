@@ -632,6 +632,7 @@ class Service:
     # --- review memory (the learning review gate) ---------------------------
 
     _MEMORY_STATUSES = frozenset({"candidate", "active", "retired"})
+    _MEMORY_SOURCES = frozenset({"ai_fail", "human_miss", "manual"})
 
     @staticmethod
     def _next_memory_id(items: list[dict]) -> str:
@@ -663,6 +664,8 @@ class Service:
             raise ValidationError("Review-memory text is required.")
         if status not in self._MEMORY_STATUSES:
             raise ValidationError(f"Unknown status {status!r}.")
+        if source not in self._MEMORY_SOURCES:
+            raise ValidationError(f"Unknown source {source!r}.")
         item = {
             "id": "", "text": text.strip(), "source": source, "status": status,
             "hits": 0, "ticket": ticket, "created_at": _now(),

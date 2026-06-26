@@ -83,6 +83,11 @@ def test_bad_status_rejected(service, project):
         service.update_review_memory("SOLO", item["id"], status="bogus")
 
 
+def test_unknown_source_rejected(service, project):
+    with pytest.raises(ValidationError):
+        service.add_review_memory("SOLO", "x", source="totally-made-up")
+
+
 # --- assembled prompt -------------------------------------------------------
 
 
