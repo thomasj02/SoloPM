@@ -34,6 +34,8 @@ from .schemas import (
     CriterionCreate,
     CriterionPatch,
     MoveRequest,
+    ReviewMemoryCreate,
+    ReviewMemoryPatch,
     ProjectCreate,
     ReorderRequest,
     ReviewRequest,
@@ -166,6 +168,37 @@ def create_app(
         if not fields:
             raise ValidationError("No fields to update.")
         return svc.update_project(key, fields).to_dict()
+
+    # --- review memory (learning review gate) -------------------------------
+
+    @app.get("/api/projects/{key}/review-memory")
+    def list_review_memory(
+        key: str, status: str | None = None, svc: Service = Depends(get_service)
+    ) -> dict:
+        return {"items": svc.list_review_memory(key, status=status)}
+
+    @app.post("/api/projects/{key}/review-memory", status_code=201)
+    def add_review_memory(
+        key: str, payload: ReviewMemoryCreate, svc: Service = Depends(get_service)
+    ) -> dict:
+        return svc.add_review_memory(
+            key, payload.text, source=payload.source, status=payload.status
+        )
+
+    @app.patch("/api/projects/{key}/review-memory/{item_id}")
+    def update_review_memory(
+        key: str,
+        item_id: str,
+        payload: ReviewMemoryPatch,
+        svc: Service = Depends(get_service),
+    ) -> dict:
+        return svc.update_review_memory(key, item_id, text=payload.text, status=payload.status)
+
+    @app.get("/api/projects/{key}/review-prompt")
+    def review_prompt(
+        key: str, record_hit: bool = False, svc: Service = Depends(get_service)
+    ) -> dict:
+        return {"prompt": svc.assembled_review_prompt(key, record_hit=record_hit)}
 
     # --- tickets ------------------------------------------------------------
 

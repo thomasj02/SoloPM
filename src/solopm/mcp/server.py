@@ -115,6 +115,33 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
         return tools.radar(project=project)
 
     @mcp.tool()
+    def list_review_memory(project: str, status: str | None = None) -> dict:
+        """List a project's review-memory items (the learning review gate), optionally
+        filtered by status: candidate | active | retired."""
+        return tools.list_review_memory(project, status=status)
+
+    @mcp.tool()
+    def add_review_memory(project: str, text: str, status: str = "active") -> dict:
+        """Add a review-memory checklist item to a project (default 'active')."""
+        return tools.add_review_memory(project, text, status=status)
+
+    @mcp.tool()
+    def update_review_memory(
+        project: str, item_id: str, text: str | None = None, status: str | None = None
+    ) -> dict:
+        """Curate a review-memory item: edit its text and/or set status — candidate→active
+        to promote a captured candidate, →retired to drop it."""
+        return tools.update_review_memory(project, item_id, text=text, status=status)
+
+    @mcp.tool()
+    def review_prompt(project: str, record_hit: bool = False) -> dict:
+        """The assembled review prompt for a project: the base review_prompt plus the
+        ACTIVE review-memory checklist. Fetch this when starting a fresh-context review so
+        the reviewer checks this project's accumulated standards; pass record_hit=true to
+        count the review (bumps each active item's hit count)."""
+        return tools.review_prompt(project, record_hit=record_hit)
+
+    @mcp.tool()
     def add_criterion(ticket_id: str, text: str) -> dict:
         """Add an acceptance criterion (definition-of-done checklist item) to a ticket."""
         return tools.add_criterion(ticket_id, text)
