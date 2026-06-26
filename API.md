@@ -142,8 +142,22 @@ position hint controls where the ticket lands in the **target** column:
 - `after: null` → top of the column;
 - `after: "<id>"` → directly below that ticket (which must already be in the target column).
 
+The optional `branch` records the SoloPM branch on the ticket (used when an agent
+self-transitions to `in-ai-review` after committing its work).
+
 Errors: `invalid_transition`, `forbidden_transition`, `validation` (if `after` is not in
 the target column), `not_found` (unknown `after`).
+
+**GitHub PR side effects (Tier-1, agent-only).** When the backend is run with GitHub
+automation enabled (`solopm serve` / `solopm mcp`) and the ticket has a SoloPM `branch`
+and its project has a `repo`, transitions drive the PR via `gh`/`git`:
+- → `in-ai-review`: push the branch and open (or refresh) the PR; the ticket's `pr` is
+  recorded.
+- → `done`: squash-merge the PR into the project's master branch (deletes the branch).
+- → `cancelled`: close the PR (deletes the branch).
+
+These run **before** the state change, so a `gh`/`git` failure (`github` error) aborts
+the transition. Branch-less / human-worked tickets are unaffected.
 
 `POST /api/tickets/{id}/reorder` body `{ "after": <id>|null }` → returns `<ticket>`.
 Repositions a ticket **within its current column** (cosmetic — no state change, no

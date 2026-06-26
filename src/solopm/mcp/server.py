@@ -79,10 +79,12 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
         return tools.comment_ticket(ticket_id, body=body)
 
     @mcp.tool()
-    def move_ticket(ticket_id: str, state: str) -> dict:
+    def move_ticket(ticket_id: str, state: str, branch: str | None = None) -> dict:
         """Transition a ticket to a new state (validated against the workflow). Only the
-        human may move a ticket to 'done'."""
-        return tools.move_ticket(ticket_id, state=state)
+        human may move a ticket to 'done'. When self-transitioning to 'in-ai-review',
+        pass `branch` to record your committed branch and (if GitHub automation is on)
+        push it and open/refresh the PR."""
+        return tools.move_ticket(ticket_id, state=state, branch=branch)
 
     @mcp.tool()
     def assign_ticket(ticket_id: str, assignee: str) -> dict:

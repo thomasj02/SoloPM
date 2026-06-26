@@ -143,13 +143,14 @@ def mcp_cmd(
     """Run the SoloPM MCP server (stdio) so an AI agent can drive SoloPM as MCP tools."""
     # Imported lazily so the rest of the CLI works without the optional `mcp` dependency.
     # NOTE: stdio is the MCP transport — nothing may be printed to stdout here.
+    from ..core.github import GitHub
     from ..core.service import Service
     from ..core.store import Store
     from ..mcp.server import build_server
 
     store = Store(config.db_path())
     store.init()  # lazily create/migrate the store so the server works standalone
-    build_server(Service(store), agent=agent).run()
+    build_server(Service(store, github=GitHub()), agent=agent).run()
 
 
 # --- project ----------------------------------------------------------------
@@ -339,13 +340,21 @@ def ticket_move(
         Optional[str],
         typer.Option("--after", help="Land directly below this ticket; omit for the column bottom."),
     ] = None,
+    branch: Annotated[
+        Optional[str],
+        typer.Option("--branch", help="Record this SoloPM branch (when self-transitioning to in-ai-review)."),
+    ] = None,
     json_out: JsonOpt = False,
     agent: AgentOpt = None,
     url: UrlOpt = None,
 ) -> None:
     """Transition a ticket to a new state (optionally positioned within the column)."""
     call = Call(json_out, agent, url)
-    body = {"state": state} if after is None else {"state": state, "after": after}
+    body: dict = {"state": state}
+    if after is not None:
+        body["after"] = after
+    if branch is not None:
+        body["branch"] = branch
 
     def render(t: dict) -> None:
         output.console.print(f"[green]✓[/] {t['id']} → [bold]{t['state']}[/]")

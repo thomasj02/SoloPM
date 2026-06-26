@@ -236,6 +236,21 @@ def test_assign_ticket(client):
     assert r.json()["assignee"] == "claude"
 
 
+def test_move_records_branch(client):
+    # Recording the branch on the in-ai-review self-transition (no GitHub in tests).
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "x"})
+    client.post("/api/tickets/SOLO-1/move", json={"state": "in-progress"})
+    r = client.post(
+        "/api/tickets/SOLO-1/move",
+        json={"state": "in-ai-review", "branch": "solo-1-x"},
+        headers={"X-SoloPM-Actor": "claude"},
+    )
+    assert r.status_code == 200
+    assert r.json()["branch"] == "solo-1-x"
+    assert r.json()["pr"] is None  # automation off in tests
+
+
 def test_reorder_endpoint(client):
     _make_project(client)
     for t in ("a", "b", "c"):

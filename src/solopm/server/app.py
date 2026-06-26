@@ -18,6 +18,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .. import __version__, config
 from ..core.errors import SoloPMError, ValidationError
+from ..core.github import GitHub
 from ..core.models import (
     ACTORS,
     ASSIGNEES,
@@ -66,7 +67,7 @@ def create_app(
     if service is None:
         store = Store(config.db_path())
         store.init()  # lazily create the store so `serve` works without explicit `init`
-        service = Service(store)
+        service = Service(store, github=GitHub())  # enable Tier-1 PR automation
     app.state.service = service
 
     # SoloPM is local-first; reject requests bearing a foreign Host header to close the
@@ -224,9 +225,13 @@ def create_app(
     ) -> dict:
         # Distinguish an omitted `after` (→ bottom) from an explicit null (→ top).
         if "after" in payload.model_fields_set:
-            ticket = svc.move_ticket(ticket_id, payload.state, after=payload.after, actor=actor)
+            ticket = svc.move_ticket(
+                ticket_id, payload.state, after=payload.after, branch=payload.branch, actor=actor
+            )
         else:
-            ticket = svc.move_ticket(ticket_id, payload.state, actor=actor)
+            ticket = svc.move_ticket(
+                ticket_id, payload.state, branch=payload.branch, actor=actor
+            )
         return ticket.to_dict()
 
     @app.post("/api/tickets/{ticket_id}/assign")
