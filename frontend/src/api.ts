@@ -8,6 +8,7 @@ import type {
   ProjectCreate,
   ProjectPatch,
   RadarReport,
+  ReviewMemoryItem,
   State,
   Ticket,
   TicketCreate,
@@ -119,4 +120,9 @@ export const api = {
 
   radar: (project?: string) =>
     request<RadarReport>("GET", `/radar${project ? "?project=" + enc(project) : ""}`),
+
+  addReviewMemory: (key: string, text: string) =>
+    request<ReviewMemoryItem>("POST", `/projects/${enc(key)}/review-memory`, { text }),
+  updateReviewMemory: (key: string, id: string, body: { text?: string; status?: string }) =>
+    request<ReviewMemoryItem>("PATCH", `/projects/${enc(key)}/review-memory/${enc(id)}`, body),
 };

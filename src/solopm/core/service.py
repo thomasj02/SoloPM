@@ -325,6 +325,16 @@ class Service:
             meta={"from": ticket.state, "to": state},
             when=_now(),
         )
+        # Learning gate: a human kicking back AI-passed work means the reviewer missed
+        # something — capture a high-priority candidate to curate into the review memory.
+        if ticket.state == "in-human-review" and state == "in-progress":
+            self._capture_review_memory(
+                ticket.project,
+                f"AI review passed but the human requested changes on {ticket_id} — "
+                "capture the standard the reviewer missed.",
+                "human_miss",
+                ticket_id,
+            )
         return self.get_ticket(ticket_id)
 
     def _git_side_effects(
@@ -451,6 +461,8 @@ class Service:
         # Fail: record the review notes (if any), then kick back to the implementer.
         if comment and comment.strip():
             self.comment_ticket(ticket_id, body=comment, actor=actor)
+            # Learning gate: the finding becomes a review-memory candidate for this project.
+            self._capture_review_memory(ticket.project, comment.strip(), "ai_fail", ticket_id)
         return self.move_ticket(ticket_id, "in-progress", actor=actor)
 
     @staticmethod
@@ -616,3 +628,113 @@ class Service:
                             }
                         )
         return {"overlaps": overlaps}
+
+    # --- review memory (the learning review gate) ---------------------------
+
+    _MEMORY_STATUSES = frozenset({"candidate", "active", "retired"})
+    _MEMORY_SOURCES = frozenset({"ai_fail", "human_miss", "manual"})
+
+    @staticmethod
+    def _next_memory_id(items: list[dict]) -> str:
+        nums = [int(i["id"][1:]) for i in items if str(i["id"])[1:].isdigit()]
+        return f"m{(max(nums) + 1) if nums else 1}"
+
+    @staticmethod
+    def _find_memory(items: list[dict], item_id: str, project_key: str) -> dict:
+        for i in items:
+            if i["id"] == item_id:
+                return i
+        raise NotFoundError(f"Review-memory item {item_id!r} not found in {project_key}.")
+
+    def list_review_memory(self, project: str, *, status: str | None = None) -> list[dict]:
+        items = self.get_project(project).review_memory
+        return [i.to_dict() for i in items if status is None or i.status == status]
+
+    def add_review_memory(
+        self,
+        project: str,
+        text: str,
+        *,
+        source: str = "manual",
+        status: str = "active",
+        ticket: str | None = None,
+    ) -> dict:
+        key = self.get_project(project).key
+        if not text or not text.strip():
+            raise ValidationError("Review-memory text is required.")
+        if status not in self._MEMORY_STATUSES:
+            raise ValidationError(f"Unknown status {status!r}.")
+        if source not in self._MEMORY_SOURCES:
+            raise ValidationError(f"Unknown source {source!r}.")
+        item = {
+            "id": "", "text": text.strip(), "source": source, "status": status,
+            "hits": 0, "ticket": ticket, "created_at": _now(),
+        }
+
+        def mutate(items: list[dict]):
+            item["id"] = self._next_memory_id(items)
+            items.append(item)
+            return items
+
+        self.store.mutate_review_memory(key, mutate, when=_now())
+        return item
+
+    def update_review_memory(
+        self, project: str, item_id: str, *, text: str | None = None, status: str | None = None
+    ) -> dict:
+        key = self.get_project(project).key
+        if status is not None and status not in self._MEMORY_STATUSES:
+            raise ValidationError(f"Unknown status {status!r}.")
+        if text is not None and not text.strip():
+            raise ValidationError("Review-memory text cannot be blank.")
+        if text is None and status is None:
+            raise ValidationError("Provide 'text' and/or 'status' to update.")
+        result: dict = {}
+
+        def mutate(items: list[dict]):
+            item = self._find_memory(items, item_id, key)
+            if text is not None:
+                item["text"] = text.strip()
+            if status is not None:
+                item["status"] = status
+            result.update(item)
+            return items
+
+        self.store.mutate_review_memory(key, mutate, when=_now())
+        return result
+
+    def assembled_review_prompt(self, project: str, *, record_hit: bool = False) -> str:
+        """The base ``review_prompt`` plus the project's ACTIVE review-memory checklist —
+        what a fresh-context reviewer should fetch. ``record_hit`` bumps each active item's
+        ``hits`` (call it when actually starting a review)."""
+        proj = self.get_project(project)
+        active = [i for i in proj.review_memory if i.status == "active"]
+        if record_hit and active:
+            ids = {i.id for i in active}
+
+            def mutate(items: list[dict]):
+                for it in items:
+                    if it["id"] in ids:
+                        it["hits"] = int(it.get("hits", 0)) + 1
+                return items
+
+            self.store.mutate_review_memory(proj.key, mutate, when=_now())
+        parts: list[str] = []
+        if proj.review_prompt.strip():
+            parts.append(proj.review_prompt.strip())
+        if active:
+            checklist = "\n".join(f"- {i.text}" for i in active)
+            parts.append(
+                "Project review checklist (accumulated review memory — verify each and "
+                "report per item):\n" + checklist
+            )
+        return "\n\n".join(parts)
+
+    def _capture_review_memory(self, project_key: str, text: str, source: str, ticket: str) -> None:
+        # Best-effort: capturing a learning candidate must never break the transition.
+        try:
+            self.add_review_memory(
+                project_key, text, source=source, status="candidate", ticket=ticket
+            )
+        except Exception:
+            pass

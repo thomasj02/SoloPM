@@ -156,6 +156,17 @@ def test_version():
     assert r.output.strip()
 
 
+def test_review_memory_via_cli(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    r = invoke("review", "memory", "add", "SOLO", "check security", "--json")
+    assert r.exit_code == 0, r.output
+    mid = json.loads(r.output)["id"]
+    r = invoke("review", "memory", "list", "SOLO", "--json")
+    assert any(i["id"] == mid for i in json.loads(r.output)["items"])
+    r = invoke("review", "memory", "set", "SOLO", mid, "--status", "retired", "--json")
+    assert json.loads(r.output)["status"] == "retired"
+
+
 def test_radar_cli(wired):
     invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
     r = invoke("radar", "--json")

@@ -17,7 +17,7 @@ import { el, clearChildren } from "./util";
 import { openModal, closeTopModal, isOverlayOpen, toast, toastError, toastSuccess } from "./ui";
 import { initBoard, isDragging } from "./board";
 import { closeTicket, isTicketOpen, openTicket, pollOpenTicket } from "./ticket";
-import type { Assignee, Project, State } from "./types";
+import type { Assignee, Project, ReviewMemoryItem, State } from "./types";
 
 const POLL_MS = 4000;
 let searchInput: HTMLInputElement | null = null;
@@ -339,6 +339,82 @@ function openCreateTicket(): void {
   });
 }
 
+/** A self-contained curation panel for a project's review memory (immediate API calls). */
+function reviewMemorySection(key: string, initial: ReviewMemoryItem[]): HTMLElement {
+  const container = el("div", { class: "rm" });
+  let items = initial;
+
+  const refresh = async (): Promise<void> => {
+    try {
+      items = (await api.project(key)).review_memory || [];
+      render();
+    } catch {
+      /* keep the current view on a failed refresh */
+    }
+  };
+  const act = async (fn: () => Promise<unknown>): Promise<void> => {
+    try {
+      await fn();
+      await refresh();
+    } catch (err) {
+      toastError((err as ApiError).message || "Review-memory update failed");
+    }
+  };
+
+  function render(): void {
+    clearChildren(container);
+    if (!items.length) {
+      container.append(
+        el("div", { class: "muted rm__empty" }, "None yet — items accrue from AI-review fails and human kickbacks."),
+      );
+    }
+    for (const i of items) {
+      const meta = el(
+        "span",
+        { class: "rm__meta muted" },
+        `${i.status} · ${i.source}${i.hits ? ` · ${i.hits} hit${i.hits === 1 ? "" : "s"}` : ""}`,
+      );
+      const actions: HTMLElement[] = [];
+      if (i.status !== "active")
+        actions.push(
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", onClick: () => void act(() => api.updateReviewMemory(key, i.id, { status: "active" })) }, "Activate"),
+        );
+      if (i.status !== "retired")
+        actions.push(
+          el("button", { type: "button", class: "btn btn--ghost btn--sm", onClick: () => void act(() => api.updateReviewMemory(key, i.id, { status: "retired" })) }, "Retire"),
+        );
+      container.append(
+        el("div", { class: `rm__item rm__item--${i.status}` }, [
+          el("div", { class: "rm__text" }, i.text),
+          el("div", { class: "rm__row" }, [meta, el("span", { class: "rm__spacer" }), ...actions]),
+        ]),
+      );
+    }
+    const input = el("input", { class: "input rm__add", placeholder: "Add an item…", maxlength: 500 });
+    const addItem = async (): Promise<void> => {
+      const text = input.value.trim();
+      if (!text) {
+        input.focus();
+        return;
+      }
+      input.value = "";
+      await act(() => api.addReviewMemory(key, text));
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void addItem();
+      }
+    });
+    container.append(
+      el("div", { class: "rm__addrow" }, [input, el("button", { type: "button", class: "btn btn--ghost btn--sm", onClick: () => void addItem() }, "Add")]),
+    );
+  }
+
+  render();
+  return container;
+}
+
 async function openProjectSettings(): Promise<void> {
   const key = state.currentProject;
   if (!key) {
@@ -403,6 +479,11 @@ async function openProjectSettings(): Promise<void> {
     el("div", { class: "form__row" }, [field("Master branch", masterInput), field("Branch convention", conventionInput)]),
     el("div", { class: "form__row" }, [field("Default implementer", implSelect), field("Default reviewer", revSelect)]),
     field("Review prompt", promptInput, "The fresh-context prompt used when an agent reviews this project's work."),
+    field(
+      "Review memory",
+      reviewMemorySection(key, project.review_memory || []),
+      "Accumulated review checklist — active items are appended to the review prompt. Candidates are captured from AI-review fails and human kickbacks; curate them here.",
+    ),
     errBox,
   ]);
   const modal = openModal({
