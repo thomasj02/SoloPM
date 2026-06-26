@@ -292,14 +292,9 @@ def create_app(
         svc: Service = Depends(get_service),
         actor: str = Depends(get_actor),
     ) -> dict:
-        ticket = None
-        if payload.text is not None:
-            ticket = svc.edit_criterion(ticket_id, criterion_id, payload.text, actor=actor)
-        if payload.done is not None:
-            ticket = svc.check_criterion(ticket_id, criterion_id, payload.done, actor=actor)
-        if ticket is None:
-            raise ValidationError("Provide 'text' and/or 'done' to update a criterion.")
-        return ticket.to_dict()
+        return svc.update_criterion(
+            ticket_id, criterion_id, text=payload.text, done=payload.done, actor=actor
+        ).to_dict()
 
     @app.delete("/api/tickets/{ticket_id}/criteria/{criterion_id}")
     def remove_criterion(

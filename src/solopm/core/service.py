@@ -507,20 +507,48 @@ class Service:
         self.store.mutate_criteria(ticket_id, mutate, actor=actor, when=_now())
         return self.get_ticket(ticket_id)
 
-    def edit_criterion(
-        self, ticket_id: str, criterion_id: str, text: str, *, actor: str = "human"
+    def update_criterion(
+        self,
+        ticket_id: str,
+        criterion_id: str,
+        *,
+        text: str | None = None,
+        done: bool | None = None,
+        actor: str = "human",
     ) -> Ticket:
+        """Edit a criterion's text and/or its done flag in a single atomic mutation.
+
+        Applying both fields in one ``mutate_criteria`` keeps a combined update from
+        partially landing (text committed, then the flag failing) under concurrency.
+        """
         _require_actor(actor)
-        if not text or not text.strip():
-            raise ValidationError("Criterion text is required.")
-        text = text.strip()
+        if text is not None and not text.strip():
+            raise ValidationError("Criterion text cannot be blank.")
+        if text is None and done is None:
+            raise ValidationError("Provide 'text' and/or 'done' to update a criterion.")
+        text_clean = text.strip() if text is not None else None
 
         def mutate(criteria: list[dict]):
-            self._criterion(criteria, criterion_id, ticket_id)["text"] = text
-            return criteria, "criteria", f"edited acceptance criterion {criterion_id}", {"op": "edit", "id": criterion_id}
+            crit = self._criterion(criteria, criterion_id, ticket_id)
+            if text_clean is not None:
+                crit["text"] = text_clean
+            if done is not None:
+                crit["done"] = bool(done)
+            if text_clean is not None and done is not None:
+                body = f"updated acceptance criterion {criterion_id}"
+            elif text_clean is not None:
+                body = f"edited acceptance criterion {criterion_id}"
+            else:
+                body = f"{'checked' if crit['done'] else 'unchecked'} acceptance criterion: {crit['text']}"
+            return criteria, "criteria", body, {"op": "update", "id": criterion_id, "done": crit["done"]}
 
         self.store.mutate_criteria(ticket_id, mutate, actor=actor, when=_now())
         return self.get_ticket(ticket_id)
+
+    def edit_criterion(
+        self, ticket_id: str, criterion_id: str, text: str, *, actor: str = "human"
+    ) -> Ticket:
+        return self.update_criterion(ticket_id, criterion_id, text=text, actor=actor)
 
     def remove_criterion(self, ticket_id: str, criterion_id: str, *, actor: str = "human") -> Ticket:
         _require_actor(actor)
@@ -536,13 +564,4 @@ class Service:
     def check_criterion(
         self, ticket_id: str, criterion_id: str, done: bool = True, *, actor: str = "human"
     ) -> Ticket:
-        _require_actor(actor)
-
-        def mutate(criteria: list[dict]):
-            crit = self._criterion(criteria, criterion_id, ticket_id)
-            crit["done"] = bool(done)
-            verb = "checked" if crit["done"] else "unchecked"
-            return criteria, "criteria", f"{verb} acceptance criterion: {crit['text']}", {"op": "check", "id": criterion_id, "done": crit["done"]}
-
-        self.store.mutate_criteria(ticket_id, mutate, actor=actor, when=_now())
-        return self.get_ticket(ticket_id)
+        return self.update_criterion(ticket_id, criterion_id, done=done, actor=actor)

@@ -40,6 +40,17 @@ def test_check_and_uncheck_criterion(service, project):
     assert _crit(service.check_criterion(t.id, cid, done=False, actor="claude"))[0]["done"] is False
 
 
+def test_update_criterion_applies_text_and_done_in_one_activity(service, project):
+    t = service.create_ticket(project="SOLO", title="x")
+    cid = _crit(service.add_criterion(t.id, "old", actor="human"))[0]["id"]
+    before = sum(1 for a in service.get_ticket(t.id).activity if a.kind == "criteria")
+    out = service.update_criterion(t.id, cid, text="new", done=True, actor="human")
+    c = _crit(out)[0]
+    assert c["text"] == "new" and c["done"] is True
+    after = sum(1 for a in service.get_ticket(t.id).activity if a.kind == "criteria")
+    assert after == before + 1  # a single atomic update, not two
+
+
 def test_edit_criterion(service, project):
     t = service.create_ticket(project="SOLO", title="x")
     cid = _crit(service.add_criterion(t.id, "old", actor="human"))[0]["id"]
