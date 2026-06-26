@@ -433,7 +433,9 @@ class Service:
             raise ValidationError(
                 f"Ticket {ticket_id} is not in AI review (state: {ticket.state})."
             )
-        results = self._validate_criteria_results(criteria_results)
+        results = self._validate_criteria_results(
+            criteria_results, {c.id for c in ticket.acceptance_criteria}
+        )
         if results:
             self.store.change_ticket(
                 ticket_id,
@@ -453,7 +455,7 @@ class Service:
         return self.move_ticket(ticket_id, "in-progress", actor=actor)
 
     @staticmethod
-    def _validate_criteria_results(results: list[dict] | None) -> list[dict]:
+    def _validate_criteria_results(results: list[dict] | None, valid_ids: set[str]) -> list[dict]:
         if not results:
             return []
         clean: list[dict] = []
@@ -462,6 +464,10 @@ class Service:
             verdict = r.get("verdict")
             if not cid:
                 raise ValidationError("Each criteria result needs a 'criterion_id'.")
+            if cid not in valid_ids:
+                # Audit data must reference a real criterion on this ticket — a typo or
+                # stale id would otherwise be recorded silently.
+                raise ValidationError(f"Unknown criterion {cid!r} for this ticket.")
             if verdict not in ("pass", "fail"):
                 raise ValidationError(
                     f"Criterion {cid} result verdict must be 'pass' or 'fail', got {verdict!r}."

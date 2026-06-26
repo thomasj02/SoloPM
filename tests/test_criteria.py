@@ -116,6 +116,17 @@ def test_submit_review_without_criteria_results_unchanged(service, project):
     assert not [a for a in service.get_ticket(tid).activity if a.kind == "review"]
 
 
+def test_submit_review_rejects_unknown_criterion_id(service, project):
+    tid = _into_ai_review(service)
+    service.add_criterion(tid, "real one", actor="claude")
+    with pytest.raises(ValidationError):
+        service.submit_review(
+            tid, "pass",
+            criteria_results=[{"criterion_id": "c999", "verdict": "pass"}],
+            actor="codex",
+        )
+
+
 def test_submit_review_rejects_bad_criterion_verdict(service, project):
     tid = _into_ai_review(service)
     cid = _crit(service.add_criterion(tid, "c", actor="claude"))[0]["id"]
