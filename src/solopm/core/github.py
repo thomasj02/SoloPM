@@ -142,10 +142,15 @@ class GitHub:
         self._run(["gh", "pr", "merge", str(number), "--squash", "--delete-branch"], cwd=repo)
         # Read back the squash commit so the ticket can record exactly what landed. A
         # failure here is non-fatal: the merge already happened, so return None rather
-        # than abort the transition over a missing sha.
-        proc = self._run(
-            ["gh", "pr", "view", str(number), "--json", "mergeCommit"], cwd=repo, check=False
-        )
+        # than abort the transition over a missing sha. `check=False` suppresses a
+        # non-zero exit, but a timeout / missing `gh` still raises GitHubError from
+        # `_run`, so swallow that too — the merge must not be undone by a flaky lookup.
+        try:
+            proc = self._run(
+                ["gh", "pr", "view", str(number), "--json", "mergeCommit"], cwd=repo, check=False
+            )
+        except GitHubError:
+            return None
         if proc.returncode != 0:
             return None
         try:

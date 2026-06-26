@@ -326,3 +326,24 @@ def test_merge_pr_returns_sha_from_gh(tmp_path, monkeypatch):
     sha = gh.merge_pr("/repo", 17)
     assert sha == "deadbeefcafe"
     assert ["gh", "pr", "merge", "17", "--squash", "--delete-branch"] in calls
+
+
+def test_merge_pr_sha_readback_failure_is_nonfatal(tmp_path, monkeypatch):
+    # [SOLO-11] The merge already happened, so a failing sha read-back (e.g. a timeout
+    # surfacing as GitHubError despite check=False) must NOT abort — return None.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+
+    def fake_run(args, cwd, check=True):
+        if args[:3] == ["gh", "pr", "merge"]:
+            class P:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return P()
+        raise GitHubError("Command timed out: gh pr view 17")
+
+    monkeypatch.setattr(gh, "_run", fake_run)
+    assert gh.merge_pr("/repo", 17) is None  # does not raise
