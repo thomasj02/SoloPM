@@ -11,10 +11,11 @@ from solopm.core.store import Store
 class FakeGitHub:
     """Records calls; no real git/gh. `fail_on` makes one method raise."""
 
-    def __init__(self, pr_number: int = 17, fail_on: str | None = None):
+    def __init__(self, pr_number: int = 17, fail_on: str | None = None, merge_sha: str | None = "1a2b3c4d5e6f"):
         self.calls: list[tuple] = []
         self.pr_number = pr_number
         self.fail_on = fail_on
+        self.merge_sha = merge_sha
 
     def _maybe_fail(self, name: str) -> None:
         if self.fail_on == name:
@@ -37,6 +38,7 @@ class FakeGitHub:
     def merge_pr(self, repo, number):
         self._maybe_fail("merge_pr")
         self.calls.append(("merge", number))
+        return self.merge_sha
 
     def close_pr(self, repo, number):
         self._maybe_fail("close_pr")
@@ -210,3 +212,117 @@ def test_git_failure_aborts_the_move(tmp_path):
     aborted = svc.get_ticket(t.id)
     assert aborted.state == "in-progress"
     assert aborted.branch is None
+
+
+def _comments(svc, tid):
+    return [a.body for a in svc.get_ticket(tid).activity if a.kind == "comment"]
+
+
+def test_done_appends_merge_confirmation_comment(tmp_path):
+    # [SOLO-11] On done with a recorded PR, a confirmation comment naming the PR #,
+    # URL, squash sha, base branch, and branch deletion is appended.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc)  # PR #17 on branch solo-9-feature
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    svc.move_ticket(tid, "done", actor="human")
+
+    comments = _comments(svc, tid)
+    assert len(comments) == 1
+    note = comments[0]
+    assert "#17" in note
+    assert "/pull/17" in note  # the PR URL
+    assert "1a2b3c4d5e6f" in note  # the squash commit sha
+    assert "main" in note  # the base branch
+    assert "solo-9-feature" in note  # the deleted branch
+    assert "deleted" in note.lower()
+
+
+def test_merge_confirmation_comment_attributed_to_actor(tmp_path):
+    # [SOLO-11] The note is attributed to the actor performing the Done (human).
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc)
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    svc.move_ticket(tid, "done", actor="human")
+
+    notes = [a for a in svc.get_ticket(tid).activity if a.kind == "comment"]
+    assert len(notes) == 1
+    assert notes[0].actor == "human"
+
+
+def test_done_comment_records_sha_resolved_by_branch(tmp_path):
+    # [SOLO-11] The merge sha returned by merge_pr is used even when the PR was
+    # resolved by branch rather than recorded up front.
+    gh = FakeGitHub(merge_sha="cafef00dbabe")
+    svc = _svc(tmp_path, github=gh)
+    t = svc.create_ticket(project="SOLO", title="x")
+    svc.move_ticket(t.id, "in-progress")
+    svc.move_ticket(t.id, "in-ai-review", branch="b", actor="human")  # records branch, no PR
+    svc.move_ticket(t.id, "in-human-review", actor="codex")
+    svc.move_ticket(t.id, "done", actor="human")
+
+    comments = _comments(svc, t.id)
+    assert len(comments) == 1
+    assert "cafef00dbabe" in comments[0]
+    assert "#17" in comments[0]
+
+
+def test_branchless_done_appends_no_comment(tmp_path):
+    # [SOLO-11] A branch-less ticket reaching done has no PR, so no merge note.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    t = svc.create_ticket(project="SOLO", title="y")
+    svc.move_ticket(t.id, "in-progress")
+    svc.move_ticket(t.id, "in-ai-review", actor="claude")  # no branch → no PR
+    svc.move_ticket(t.id, "in-human-review", actor="codex")
+    svc.move_ticket(t.id, "done", actor="human")
+    assert _comments(svc, t.id) == []
+
+
+def test_done_without_github_appends_no_comment(tmp_path):
+    # [SOLO-11] No GitHub automation → no merge note even with a recorded branch.
+    svc = _svc(tmp_path, github=None)
+    t = svc.create_ticket(project="SOLO", title="x")
+    svc.move_ticket(t.id, "in-progress")
+    svc.move_ticket(t.id, "in-ai-review", branch="b", actor="claude")
+    svc.move_ticket(t.id, "in-human-review", actor="codex")
+    svc.move_ticket(t.id, "done", actor="human")
+    assert _comments(svc, t.id) == []
+
+
+def test_cancelled_appends_close_note(tmp_path):
+    # [SOLO-11] Mirror for cancelled: a "closed PR #N" note attributed to the actor.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc)  # PR #17 on branch solo-9-feature
+    svc.move_ticket(tid, "cancelled", actor="claude")
+
+    notes = [a for a in svc.get_ticket(tid).activity if a.kind == "comment"]
+    assert len(notes) == 1
+    assert "#17" in notes[0].body
+    assert "solo-9-feature" in notes[0].body
+    assert notes[0].actor == "claude"
+
+
+def test_merge_pr_returns_sha_from_gh(tmp_path, monkeypatch):
+    # [SOLO-11] The real adapter reads the squash commit sha back via `gh pr view`.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    calls = []
+
+    def fake_run(args, cwd, check=True):
+        calls.append(args)
+
+        class P:
+            returncode = 0
+            stderr = ""
+            stdout = '{"mergeCommit": {"oid": "deadbeefcafe"}}'
+
+        return P()
+
+    monkeypatch.setattr(gh, "_run", fake_run)
+    sha = gh.merge_pr("/repo", 17)
+    assert sha == "deadbeefcafe"
+    assert ["gh", "pr", "merge", "17", "--squash", "--delete-branch"] in calls

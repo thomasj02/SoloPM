@@ -68,7 +68,7 @@ class GitHubClient(Protocol):
         self, repo: str, branch: str, base: str, title: str, body: str
     ) -> PR: ...
 
-    def merge_pr(self, repo: str, number: int) -> None: ...
+    def merge_pr(self, repo: str, number: int) -> str | None: ...
 
     def close_pr(self, repo: str, number: int) -> None: ...
 
@@ -138,8 +138,23 @@ class GitHub:
             raise GitHubError("PR was created but could not be read back from gh.")
         return pr
 
-    def merge_pr(self, repo: str, number: int) -> None:
+    def merge_pr(self, repo: str, number: int) -> str | None:
         self._run(["gh", "pr", "merge", str(number), "--squash", "--delete-branch"], cwd=repo)
+        # Read back the squash commit so the ticket can record exactly what landed. A
+        # failure here is non-fatal: the merge already happened, so return None rather
+        # than abort the transition over a missing sha.
+        proc = self._run(
+            ["gh", "pr", "view", str(number), "--json", "mergeCommit"], cwd=repo, check=False
+        )
+        if proc.returncode != 0:
+            return None
+        try:
+            data = json.loads(proc.stdout)
+        except (ValueError, TypeError):
+            return None
+        commit = data.get("mergeCommit") or {}
+        oid = commit.get("oid")
+        return str(oid) if oid else None
 
     def close_pr(self, repo: str, number: int) -> None:
         self._run(["gh", "pr", "close", str(number), "--delete-branch"], cwd=repo)
