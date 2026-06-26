@@ -108,6 +108,13 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
         )
 
     @mcp.tool()
+    def radar(project: str | None = None) -> dict:
+        """Overlap/conflict radar — report active worktrees touching the same files
+        (informational; never blocks). Returns {overlaps: [{a:{ticket,branch},
+        b:{ticket,branch}, files:[...]}]} so you can warn before two tickets collide."""
+        return tools.radar(project=project)
+
+    @mcp.tool()
     def add_criterion(ticket_id: str, text: str) -> dict:
         """Add an acceptance criterion (definition-of-done checklist item) to a ticket."""
         return tools.add_criterion(ticket_id, text)

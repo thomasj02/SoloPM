@@ -565,3 +565,49 @@ class Service:
         self, ticket_id: str, criterion_id: str, done: bool = True, *, actor: str = "human"
     ) -> Ticket:
         return self.update_criterion(ticket_id, criterion_id, done=done, actor=actor)
+
+    # --- overlap / conflict radar -------------------------------------------
+
+    _RADAR_ACTIVE_STATES = frozenset({"in-progress", "in-ai-review"})
+
+    def compute_radar(self, project: str | None = None) -> dict:
+        """Warn (don't block) when active worktrees touch the same files.
+
+        Reads each project repo's live worktrees straight from git, computes each one's
+        changed-file set vs. the master branch (committed + uncommitted), and reports every
+        pair whose sets intersect. A branch is annotated with the active ticket that records
+        it; unmapped branches are still reported. A no-op without a git client / repo, so it
+        degrades gracefully rather than erroring.
+        """
+        projects = [self.get_project(project)] if project else self.list_projects()
+        overlaps: list[dict] = []
+        for proj in projects:
+            if self.github is None or not proj.repo:
+                continue
+            by_branch = {
+                t.branch: t.id
+                for t in self.list_tickets(project=proj.key)
+                if t.branch and t.state in self._RADAR_ACTIVE_STATES
+            }
+            entries: list[dict] = []
+            for wt in self.github.list_worktrees(proj.repo):
+                if not wt.branch or wt.branch == proj.master_branch:
+                    continue
+                files = self.github.worktree_changed_files(wt.path, proj.master_branch)
+                if files:
+                    entries.append(
+                        {"branch": wt.branch, "ticket": by_branch.get(wt.branch), "files": files}
+                    )
+            for i in range(len(entries)):
+                for j in range(i + 1, len(entries)):
+                    shared = sorted(entries[i]["files"] & entries[j]["files"])
+                    if shared:
+                        overlaps.append(
+                            {
+                                "project": proj.key,
+                                "a": {"ticket": entries[i]["ticket"], "branch": entries[i]["branch"]},
+                                "b": {"ticket": entries[j]["ticket"], "branch": entries[j]["branch"]},
+                                "files": shared,
+                            }
+                        )
+        return {"overlaps": overlaps}

@@ -156,6 +156,13 @@ def test_version():
     assert r.output.strip()
 
 
+def test_radar_cli(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    r = invoke("radar", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output) == {"overlaps": []}
+
+
 def test_criteria_roundtrip_via_cli(wired):
     invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
     invoke("ticket", "create", "--project", "SOLO", "--title", "x")

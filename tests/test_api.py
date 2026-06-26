@@ -375,6 +375,13 @@ def test_trusted_host_rejects_foreign_host(tmp_path):
     assert c.get("/api/health", headers={"host": "localhost:8787"}).status_code == 200
 
 
+def test_radar_endpoint(client):
+    _make_project(client)
+    r = client.get("/api/radar?project=SOLO")
+    assert r.status_code == 200
+    assert r.json() == {"overlaps": []}  # no GitHub wired in tests → graceful empty
+
+
 def test_criteria_crud_via_api(client):
     _make_project(client)
     client.post("/api/tickets", json={"project": "SOLO", "title": "x"})
