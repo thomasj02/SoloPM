@@ -563,7 +563,7 @@ async function manualRefresh(): Promise<void> {
   try {
     await refreshTickets();
     if (isTicketOpen()) await pollOpenTicket();
-    toast("Refreshed", "info", 1200);
+    toast("Refreshed");
   } catch (err) {
     toastError((err as Error).message || "Refresh failed");
   }

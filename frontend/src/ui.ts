@@ -15,8 +15,12 @@ function host(): HTMLElement {
 
 export type ToastKind = "info" | "success" | "error";
 
-/** Show a transient toast. Returns a dismiss fn. */
-export function toast(message: string, kind: ToastKind = "info", timeout = 4000): () => void {
+/**
+ * Show a toast. It stays visible until the user dismisses it (clicks ×) or the
+ * returned dismiss fn is called — toasts never auto-dismiss, so the user always
+ * has time to read them.
+ */
+export function toast(message: string, kind: ToastKind = "info"): () => void {
   const node = el("div", { class: `toast toast--${kind}`, role: "status" });
   const dismiss = () => {
     node.classList.add("toast--out");
@@ -27,12 +31,11 @@ export function toast(message: string, kind: ToastKind = "info", timeout = 4000)
     el("button", { class: "toast__close", title: "Dismiss", "aria-label": "Dismiss", onClick: dismiss }, "×"),
   );
   host().append(node);
-  if (timeout) setTimeout(dismiss, timeout);
   return dismiss;
 }
 
-export const toastError = (m: string): (() => void) => toast(m, "error", 6000);
-export const toastSuccess = (m: string): (() => void) => toast(m, "success", 3000);
+export const toastError = (m: string): (() => void) => toast(m, "error");
+export const toastSuccess = (m: string): (() => void) => toast(m, "success");
 
 // --- modal ----------------------------------------------------------------
 export interface ModalHandle {
