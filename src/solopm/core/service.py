@@ -305,6 +305,19 @@ class Service:
         workflow.validate_transition(ticket.state, state, actor=actor)
         if branch:
             validate_branch_name(branch)
+            # Once a PR has been opened, its branch is the PR head and is pinned: a differing
+            # branch on any later move is rejected. Otherwise the recorded branch could drift
+            # from the PR head, and a later done/cancelled would clean up `refs/heads/<that
+            # branch>` — an unrelated branch — while leaving the real PR head behind. (See
+            # SOLO-16: branch deletion is split out of `gh pr merge` and resolved from the
+            # recorded head, so that head must not drift.) Before a PR exists the branch is
+            # still free to be set/changed (e.g. an agent recording its worktree branch on
+            # → in-progress for the overlap radar).
+            if ticket.pr_number is not None and branch != ticket.branch:
+                raise ValidationError(
+                    "This ticket's branch is pinned to its open PR's head and cannot be "
+                    f"changed (PR #{ticket.pr_number} on branch {ticket.branch!r})."
+                )
         # All local validation (transition, branch, position/after) runs BEFORE any
         # external GitHub side effect, so a bad request can never push/merge/close a PR
         # and then fail the move.

@@ -30,6 +30,8 @@ class FakeGitHub:
         self.merge_sha = merge_sha
         self.merge_state = merge_state  # "merged" or "queued"
         self.branch_deleted = branch_deleted
+        self.merge_branch = None  # branch the client was last asked to clean up
+        self.close_branch = None
 
     def _maybe_fail(self, name: str) -> None:
         if self.fail_on == name:
@@ -793,27 +795,66 @@ def test_done_reaches_done_when_branch_delete_fails(tmp_path):
     assert "deleted" not in note.lower()
 
 
-def test_done_cleanup_targets_recorded_pr_head_not_branch_override(tmp_path):
-    # [SOLO-16 gpt-review P1] A done move that supplies a spurious branch override must not
-    # redirect branch cleanup. The PR is resolved by the recorded pr_number, so the branch
-    # handed to the client for deletion must be the recorded PR head — never the override.
+def test_branch_pinned_to_pr_head_after_pr_opened(tmp_path):
+    # [SOLO-16 gpt-review P1] The recorded branch is the PR head used for merge/close cleanup,
+    # so once a PR exists it is pinned. A differing branch on any later move is rejected —
+    # both the reviewer's intermediate-move exploit and a terminal-move override.
     gh = FakeGitHub()
     svc = _svc(tmp_path, github=gh)
-    tid, _ = _to_ai_review(svc, branch="solo-16-real")  # PR #17 opened on solo-16-real
+    tid, _ = _to_ai_review(svc, branch="solo-16-real")  # PR #17, head solo-16-real
+    # Exploit: rewrite the pinned branch on an intermediate move.
+    with pytest.raises(ValidationError):
+        svc.move_ticket(tid, "in-human-review", actor="codex", branch="main")
+    assert svc.get_ticket(tid).branch == "solo-16-real"  # unchanged
+    # And a bogus override on the terminal move itself is rejected before any merge.
     svc.move_ticket(tid, "in-human-review", actor="codex")
-    svc.move_ticket(tid, "done", actor="human", branch="solo-16-bogus-override")
-    assert ("merge", 17) in gh.calls
-    assert gh.merge_branch == "solo-16-real"  # the recorded head, not the override
+    with pytest.raises(ValidationError):
+        svc.move_ticket(tid, "done", actor="human", branch="solo-16-bogus")
+    assert svc.get_ticket(tid).state == "in-human-review"  # not moved
+    assert gh.merge_branch is None  # no merge attempted with a bogus branch
 
 
-def test_cancelled_cleanup_targets_recorded_pr_head_not_branch_override(tmp_path):
-    # [SOLO-16 gpt-review P1] Same guarantee for the close path.
+def test_branch_settable_before_pr_exists(tmp_path):
+    # [SOLO-16] Before a PR is opened the branch is still free to set/change (e.g. an agent
+    # recording its worktree branch on → in-progress) — only the post-PR head is pinned.
+    svc = _svc(tmp_path, github=None)  # no PR automation → pr_number stays None
+    t = svc.create_ticket(project="SOLO", title="x")
+    a = svc.move_ticket(t.id, "in-progress", branch="solo-16-a", actor="claude")
+    assert a.branch == "solo-16-a"
+    # Still no PR recorded, so a different branch on a later move is allowed.
+    b = svc.move_ticket(t.id, "backlog", branch="solo-16-b", actor="claude")
+    assert b.branch == "solo-16-b"
+
+
+def test_done_cleanup_targets_recorded_pr_head(tmp_path):
+    # [SOLO-16 gpt-review P1] With the branch pinned to the PR head, done cleanup targets it.
     gh = FakeGitHub()
     svc = _svc(tmp_path, github=gh)
-    tid, _ = _to_ai_review(svc, branch="solo-16-real")  # PR #17 on solo-16-real
-    svc.move_ticket(tid, "cancelled", actor="claude", branch="solo-16-bogus-override")
+    tid, _ = _to_ai_review(svc, branch="solo-16-real")
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    svc.move_ticket(tid, "done", actor="human")
+    assert ("merge", 17) in gh.calls
+    assert gh.merge_branch == "solo-16-real"
+
+
+def test_cancelled_cleanup_targets_recorded_pr_head(tmp_path):
+    # [SOLO-16 gpt-review P1] Same for the close path.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc, branch="solo-16-real")
+    svc.move_ticket(tid, "cancelled", actor="claude")
     assert ("close", 17) in gh.calls
     assert gh.close_branch == "solo-16-real"
+
+
+def test_branch_override_allowed_when_unchanged(tmp_path):
+    # [SOLO-16] Passing the *same* branch on a later move is a harmless no-op, not rejected.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc, branch="solo-16-real")
+    moved = svc.move_ticket(tid, "in-human-review", actor="codex", branch="solo-16-real")
+    assert moved.state == "in-human-review"
+    assert moved.branch == "solo-16-real"
 
 
 def test_cancelled_reaches_cancelled_when_branch_delete_fails(tmp_path):
