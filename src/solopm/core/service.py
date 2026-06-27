@@ -972,19 +972,23 @@ class Service:
             adjacency.setdefault(ln.to_ticket, set()).add(ln.from_ticket)
 
         scope_project: str | None = None
+        dist: dict[str, int] = {}  # BFS distance from the ego root, for distance-aware capping
         if around is not None:
             around = normalize_ticket_id(around)
             self._require_ticket(around)  # NotFoundError if missing
             if depth < 0:
                 raise ValidationError("Graph depth must be >= 0.")
             node_ids = {around}
+            dist[around] = 0
             frontier = {around}
-            for _ in range(depth):
+            for hop in range(1, depth + 1):
                 nxt: set[str] = set()
                 for node in frontier:
                     nxt |= adjacency.get(node, set()) - node_ids
                 if not nxt:
                     break
+                for m in nxt:
+                    dist[m] = hop
                 node_ids |= nxt
                 frontier = nxt
         elif project is not None:
@@ -1016,9 +1020,36 @@ class Service:
 
         truncated = False
         if len(node_ids) > node_limit:
-            ordered = sorted(node_ids, key=lambda i: self._node_sort_key(i, briefs))
-            node_ids = set(ordered[:node_limit])
+            # For an ego-graph keep the nodes nearest the root (the root, at distance 0, is
+            # never dropped); otherwise order by (project, seq).
+            if around is not None:
+                order = lambda i: (dist.get(i, 1 << 30), *self._node_sort_key(i, briefs))
+            else:
+                order = lambda i: self._node_sort_key(i, briefs)
+            node_ids = set(sorted(node_ids, key=order)[:node_limit])
             truncated = True
+
+        # Edges first, so we can prune now-orphaned cross-project neighbours below.
+        edges = sorted(
+            (
+                {"from": ln.from_ticket, "to": ln.to_ticket, "type": ln.type}
+                for ln in view_links
+                if ln.from_ticket in node_ids and ln.to_ticket in node_ids
+            ),
+            key=lambda e: (e["from"], e["to"], e["type"]),
+        )
+
+        # Project scope: a foreign (cross-project) node only earns a place via an edge to an
+        # in-project node. If active-only filtering dropped that in-project anchor, the foreign
+        # node is left with no surviving edge — prune it (its edges are already gone, so the
+        # edge list is unaffected). In-project nodes are kept even if they end up isolated.
+        if scope_project is not None:
+            endpoints = {e["from"] for e in edges} | {e["to"] for e in edges}
+            node_ids = {
+                n
+                for n in node_ids
+                if briefs.get(n, {}).get("project") == scope_project or n in endpoints
+            }
 
         # Derived blocked / sub-ticket rollup from the FULL link set (view-independent).
         blocked_ids: set[str] = set()
@@ -1050,15 +1081,6 @@ class Service:
                     "subtickets": {"done": sub_done.get(nid, 0), "total": sub_total.get(nid, 0)},
                 }
             )
-
-        edges = sorted(
-            (
-                {"from": ln.from_ticket, "to": ln.to_ticket, "type": ln.type}
-                for ln in view_links
-                if ln.from_ticket in node_ids and ln.to_ticket in node_ids
-            ),
-            key=lambda e: (e["from"], e["to"], e["type"]),
-        )
         cycles = self._blocks_cycles(node_ids, [e for e in edges if e["type"] == "blocks"])
         return {
             "nodes": nodes,

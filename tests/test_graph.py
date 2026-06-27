@@ -158,6 +158,30 @@ def test_type_filter_keeps_only_selected_edges(service, project):
     assert "SOLO-3" not in _ids(g)  # c only had a (filtered-out) related edge
 
 
+def test_active_only_prunes_orphaned_cross_project_neighbor(service):
+    # A done SOLO ticket related to an open BLOG ticket: active_only drops the SOLO node, and
+    # the BLOG neighbour — now edgeless and outside the requested project — must not linger.
+    service.add_project(key="SOLO", name="SoloPM")
+    service.add_project(key="BLOG", name="Blog")
+    done = service.create_ticket(project="SOLO", title="done", state="done", actor="human")
+    other = service.create_ticket(project="BLOG", title="open")
+    service.link_tickets(done.id, "related", other.id, actor="human")
+    g = service.build_graph(project="SOLO", active_only=True)
+    assert g["nodes"] == []
+    assert g["edges"] == []
+
+
+def test_ego_graph_node_cap_keeps_root_and_nearest(service, project):
+    a, b, c, d = _chain(service)  # SOLO-1..4: a→b→c→d
+    g = service.build_graph(around=d.id, depth=3, limit=2)
+    assert g["truncated"] is True
+    ids = _ids(g)
+    assert len(ids) == 2
+    assert d.id in ids  # the ego root survives the cap…
+    assert c.id in ids  # …along with its nearest neighbour
+    assert a.id not in ids  # the farthest node is dropped
+
+
 def test_active_only_drops_finished_nodes(service, project):
     a = _mk(service, title="a")
     done = service.create_ticket(project="SOLO", title="done one", state="done", actor="human")
