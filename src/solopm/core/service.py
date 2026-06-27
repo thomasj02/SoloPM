@@ -415,9 +415,7 @@ class Service:
                     # landed — record that honestly instead of a false merge confirmation.
                     note = self._queued_note(number, url, base, note_branch)
                     return {**extra, "pr_state": "queued"}, note
-                note = self._merge_note(
-                    number, url, base, note_branch, result.sha, result.branch_deleted
-                )
+                note = self._merge_note(number, url, base, note_branch, result.sha)
                 return {**extra, "pr_state": "merged"}, note
             result = self.github.close_pr(repo, number, cleanup_head)
             note = self._close_note(number, url, note_branch, result.branch_deleted)
@@ -436,14 +434,19 @@ class Service:
         return f"Branch `{branch}` retained (checked out in a worktree or cleanup failed)."
 
     @staticmethod
-    def _merge_note(
-        number: int, url: str | None, base: str, branch: str, sha: str | None, branch_deleted: bool
-    ) -> str:
-        """A self-contained record of a squash-merge for the ticket's activity log."""
+    def _merge_note(number: int, url: str | None, base: str, branch: str, sha: str | None) -> str:
+        """A self-contained record of a squash-merge for the ticket's activity log.
+
+        The local branch is intentionally retained [SOLO-18]: it's checked out in the
+        developer's worktree, which SoloPM leaves in place, so the note never claims a local
+        deletion. (The remote branch is cleaned up separately, best-effort.)
+        """
         where = f" ({url})" if url else ""
         commit = f"squash commit `{sha}`" if sha else "squash-merged"
-        cleanup = Service._branch_cleanup_note(branch, branch_deleted)
-        return f"Merged PR #{number}{where} into `{base}` — {commit}. {cleanup}"
+        return (
+            f"Merged PR #{number}{where} into `{base}` — {commit}. Local branch `{branch}` "
+            f"left in place for its worktree — delete it when you remove the worktree."
+        )
 
     @staticmethod
     def _queued_note(number: int, url: str | None, base: str, branch: str) -> str:
