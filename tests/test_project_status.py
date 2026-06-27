@@ -53,6 +53,18 @@ def test_count_unpushed_commits_nonzero_exit_is_zero(monkeypatch):
     assert gh.count_unpushed_commits("/repo") == 0
 
 
+def test_run_wraps_bad_cwd_oserror_as_github_error(tmp_path):
+    # [gpt-review P2] A repo path that is a regular file (or unreadable dir) makes the spawn
+    # raise NotADirectoryError/PermissionError (OSError), not a non-zero exit. The shared
+    # `_run` must wrap it as GitHubError so callers' graceful paths absorb it — not let a raw
+    # OSError escape (which would 500 the status endpoint).
+    repo_file = tmp_path / "not-a-dir"
+    repo_file.write_text("x")
+    gh = GitHub()
+    with pytest.raises(GitHubError):
+        gh.count_unpushed_commits(str(repo_file))
+
+
 # --- the service aggregation -------------------------------------------------
 
 
@@ -130,6 +142,15 @@ def test_status_git_error_degrades_to_zero(tmp_path):
     gh = FakeGit(raises=True)
     svc = _svc(tmp_path, github=gh)
     assert svc.project_status("SOLO")["unpushed_commits"] == 0
+
+
+def test_status_bad_repo_path_degrades_to_zero_with_real_client(tmp_path):
+    # [gpt-review P2] End-to-end with the REAL GitHub client: a repo path pointing at a file
+    # (NotADirectoryError from the spawn) degrades to zeros instead of escaping as a 500.
+    repo_file = tmp_path / "repo-file"
+    repo_file.write_text("not a dir")
+    svc = _svc(tmp_path, github=GitHub(), repo=str(repo_file))
+    assert svc.project_status("SOLO") == {"open_prs": 0, "unpushed_commits": 0}
 
 
 def test_status_no_github_client_returns_zero_unpushed(tmp_path):

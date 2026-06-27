@@ -167,13 +167,18 @@ export async function refreshRadar(): Promise<void> {
 }
 
 export async function refreshStatus(): Promise<void> {
-  if (!state.currentProject) {
+  const key = state.currentProject;
+  if (!key) {
     state.status = null;
     emit("status");
     return;
   }
   try {
-    state.status = await api.projectStatus(state.currentProject);
+    const status = await api.projectStatus(key);
+    // Drop a late response for a project the user has since switched away from, so the
+    // header never shows the previous project's counts until the next poll.
+    if (state.currentProject !== key) return;
+    state.status = status;
   } catch {
     // The status strip is informational and best-effort; keep the last-known on error.
   }
