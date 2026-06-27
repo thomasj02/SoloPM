@@ -171,6 +171,39 @@ def test_active_only_prunes_orphaned_cross_project_neighbor(service):
     assert g["edges"] == []
 
 
+def test_active_only_does_not_keep_foreign_foreign_chain(service):
+    # done SOLO anchors drop under active_only; a surviving foreign↔foreign edge between
+    # their neighbours must NOT keep those neighbours in a SOLO-scoped graph.
+    for k in ("SOLO", "AAA", "BBB"):
+        service.add_project(key=k, name=k)
+    s1 = service.create_ticket(project="SOLO", title="s1", state="done", actor="human")
+    s2 = service.create_ticket(project="SOLO", title="s2", state="done", actor="human")
+    a1 = service.create_ticket(project="AAA", title="a1")
+    b1 = service.create_ticket(project="BBB", title="b1")
+    service.link_tickets(s1.id, "related", a1.id, actor="human")
+    service.link_tickets(s2.id, "related", b1.id, actor="human")
+    service.link_tickets(a1.id, "related", b1.id, actor="human")
+    g = service.build_graph(project="SOLO", active_only=True)
+    assert g["nodes"] == []
+    assert g["edges"] == []
+
+
+def test_project_truncation_prioritizes_in_project_nodes(service):
+    # A foreign neighbour whose key sorts before SOLO must not crowd the in-project nodes
+    # out under the cap (which would then leave the requested project's graph empty).
+    service.add_project(key="SOLO", name="SoloPM")
+    service.add_project(key="AAA", name="Aaa")
+    s1 = service.create_ticket(project="SOLO", title="s1")
+    s2 = service.create_ticket(project="SOLO", title="s2")
+    a1 = service.create_ticket(project="AAA", title="a1")
+    service.link_tickets(s1.id, "blocks", s2.id, actor="human")
+    service.link_tickets(s1.id, "related", a1.id, actor="human")
+    g = service.build_graph(project="SOLO", limit=2)
+    assert g["truncated"] is True
+    assert set(_ids(g)) == {s1.id, s2.id}  # in-project kept; foreign neighbour capped out
+    assert _edges(g) == {(s1.id, s2.id, "blocks")}
+
+
 def test_ego_graph_node_cap_keeps_root_and_nearest(service, project):
     a, b, c, d = _chain(service)  # SOLO-1..4: a→b→c→d
     g = service.build_graph(around=d.id, depth=3, limit=2)
