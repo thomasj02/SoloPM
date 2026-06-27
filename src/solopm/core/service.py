@@ -700,6 +700,13 @@ class Service:
             for t in self.list_tickets(project=proj.key):
                 if not t.branch:
                     continue
+                # `pr_state == "queued"` is read from stored state, not refreshed live: once
+                # the merge queue lands the PR there is no callback to flip it to "merged",
+                # so a queued-done branch can stay radar-live longer than strictly necessary.
+                # That is deliberate — the radar is a cheap, local, best-effort scan and must
+                # not make a GitHub API call per ticket. The cost is at worst a non-blocking
+                # spurious warning, bounded by the worktree's lifetime (cleaning up the merged
+                # worktree drops the entry), which is the safe direction for a conflict radar.
                 if t.state in self._RADAR_ACTIVE_STATES or (
                     t.state == "done" and t.pr_state == "queued"
                 ):
