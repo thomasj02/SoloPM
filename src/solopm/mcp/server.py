@@ -172,9 +172,17 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
         return tools.link_ticket(ticket_id, type, other_id)
 
     @mcp.tool()
-    def unlink_ticket(ticket_id: str, other_id: str, type: str | None = None) -> dict:
-        """Remove the relationship(s) between two tickets (order-independent). Pass `type`
-        to remove only that relation type; omit it to remove every link between the pair."""
-        return tools.unlink_ticket(ticket_id, other_id, type=type)
+    def unlink_ticket(
+        ticket_id: str,
+        other_id: str,
+        type: str | None = None,
+        direction: str | None = None,
+    ) -> dict:
+        """Remove the relationship(s) between two tickets. Pass `type` to remove only that
+        relation type; omit it to remove every link between the pair. `direction` ('out' =
+        ticket_id is the stored from, 'in' = it is the to) pins one orientation — only needed
+        to disambiguate a pair that holds opposing directional links (e.g. A blocks B and B
+        blocks A)."""
+        return tools.unlink_ticket(ticket_id, other_id, type=type, direction=direction)
 
     return mcp

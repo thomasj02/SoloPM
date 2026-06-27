@@ -343,7 +343,7 @@ function renderRelationRow(r: Relation, isSub: boolean): HTMLElement {
     "aria-label": "Remove link",
     onClick: (e: Event) => {
       e.stopPropagation();
-      void doRemoveRelation(tk.id, r.type);
+      void doRemoveRelation(r);
     },
   }, "×");
 
@@ -601,12 +601,14 @@ async function doAddRelation(type: LinkType, other: string): Promise<void> {
   }
 }
 
-async function doRemoveRelation(other: string, type: LinkType): Promise<void> {
+async function doRemoveRelation(r: Relation): Promise<void> {
   const id = currentId;
   if (!id || busy) return;
   busy = true;
   try {
-    ticket = await api.removeLink(id, other, type);
+    // Pass the row's direction so removing one relation never deletes its mirror
+    // (e.g. an "A blocks B" row must not also drop a separate "B blocks A").
+    ticket = await api.removeLink(id, r.ticket.id, r.type, r.direction);
     renderPanel();
     refreshTickets({ silent: true }).catch(() => {});
   } catch (err) {

@@ -479,6 +479,19 @@ def test_unlink_type_filter_via_api(client):
     assert keys == {"related"}
 
 
+def test_unlink_direction_preserves_opposing_link_via_api(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "a"})
+    client.post("/api/tickets", json={"project": "SOLO", "title": "b"})
+    client.post("/api/tickets/SOLO-1/links", json={"type": "blocks", "other": "SOLO-2"})
+    client.post("/api/tickets/SOLO-2/links", json={"type": "blocks", "other": "SOLO-1"})
+    # Remove only SOLO-1's outgoing blocks; the opposing SOLO-2->SOLO-1 link must remain.
+    r = client.delete("/api/tickets/SOLO-1/links/SOLO-2?type=blocks&direction=out")
+    assert r.status_code == 200
+    keys = {rel["key"] for rel in r.json()["relations"]}
+    assert keys == {"blocked_by"}
+
+
 def test_link_attribution_via_api(client):
     _make_project(client)
     client.post("/api/tickets", json={"project": "SOLO", "title": "a"})

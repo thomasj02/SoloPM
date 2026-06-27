@@ -124,11 +124,15 @@ export const api = {
 
   addLink: (id: string, type: LinkType, other: string) =>
     request<Ticket>("POST", `/tickets/${enc(id)}/links`, { type, other }),
-  removeLink: (id: string, other: string, type?: LinkType) =>
-    request<Ticket>(
-      "DELETE",
-      `/tickets/${enc(id)}/links/${enc(other)}${type ? "?type=" + enc(type) : ""}`,
-    ),
+  // `direction` ("out"/"in", relative to `id`) pins one orientation so removing a relation
+  // row never also deletes its opposite-direction sibling (e.g. A blocks B vs B blocks A).
+  removeLink: (id: string, other: string, type?: LinkType, direction?: "out" | "in") => {
+    const params = new URLSearchParams();
+    if (type) params.set("type", type);
+    if (direction) params.set("direction", direction);
+    const qs = params.toString();
+    return request<Ticket>("DELETE", `/tickets/${enc(id)}/links/${enc(other)}${qs ? "?" + qs : ""}`);
+  },
 
   radar: (project?: string) =>
     request<RadarReport>("GET", `/radar${project ? "?project=" + enc(project) : ""}`),

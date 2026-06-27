@@ -768,18 +768,32 @@ class Service:
         return self.get_ticket(a_id)
 
     def unlink_tickets(
-        self, ticket_id: str, other_id: str, *, type: str | None = None, actor: str = "human"
+        self,
+        ticket_id: str,
+        other_id: str,
+        *,
+        type: str | None = None,
+        direction: str | None = None,
+        actor: str = "human",
     ) -> Ticket:
-        """Remove the link(s) between ``ticket_id`` and ``other_id`` (order-independent).
+        """Remove the link(s) between ``ticket_id`` and ``other_id``.
 
         ``type`` optionally narrows to one relation type; without it, every link between the
-        pair is removed. Raises ``NotFoundError`` if no matching link exists. Returns the
-        (refreshed) acting ticket.
+        pair is removed. ``direction`` (``"out"`` = ``ticket_id`` is the stored ``from``,
+        ``"in"`` = it is the ``to``) pins which orientation to remove — needed when a pair
+        holds opposing directional links (e.g. ``A blocks B`` *and* ``B blocks A``) so the
+        UI's per-row removal deletes exactly the relation clicked, not its mirror. Omitting
+        it removes the link(s) in either order (order-independent). Raises ``NotFoundError``
+        if no matching link exists. Returns the (refreshed) acting ticket.
         """
         _require_actor(actor)
         if type is not None and type not in LINK_TYPES:
             raise ValidationError(
                 f"Unknown relation type {type!r}: expected one of {', '.join(LINK_TYPES)}."
+            )
+        if direction is not None and direction not in ("out", "in"):
+            raise ValidationError(
+                f"Unknown direction {direction!r}: expected 'out' or 'in'."
             )
         a_id = normalize_ticket_id(ticket_id)
         b_id = normalize_ticket_id(other_id)
@@ -793,7 +807,8 @@ class Service:
             return f"unlinked {other} ({label.lower()})"
 
         removed = self.store.remove_links(
-            a_id, b_id, link_type=type, actor=actor, when=_now(), body_for=body_for
+            a_id, b_id, link_type=type, direction=direction, actor=actor, when=_now(),
+            body_for=body_for,
         )
         if removed == 0:
             qualifier = f"{type} " if type else ""

@@ -367,10 +367,13 @@ def create_app(
         ticket_id: str,
         other_id: str,
         type: str | None = None,
+        direction: str | None = None,
         svc: Service = Depends(get_service),
         actor: str = Depends(get_actor),
     ) -> dict:
-        return svc.unlink_tickets(ticket_id, other_id, type=type, actor=actor).to_dict()
+        return svc.unlink_tickets(
+            ticket_id, other_id, type=type, direction=direction, actor=actor
+        ).to_dict()
 
     # --- static web app (mounted last so /api wins) -------------------------
 

@@ -234,9 +234,13 @@ cycles are rejected.
   (self-link, unknown type, second parent, or a cycle), `not_found` (unknown ticket),
   `duplicate` (409 — only under a concurrent conflicting second-parent insert that races
   past the validation check; the one-parent DB index is the backstop).
-- `DELETE /api/tickets/{id}/links/{other-id}[?type=<type>]` → full `<ticket>`. Removes the
-  link(s) between the pair (order-independent); `type` narrows to one relation, otherwise
-  all links between the two are removed. Errors: `not_found` (no such link / unknown ticket).
+- `DELETE /api/tickets/{id}/links/{other-id}[?type=<type>][&direction=out|in]` → full
+  `<ticket>`. Removes the link(s) between the pair; `type` narrows to one relation, otherwise
+  all links between the two are removed. `direction` pins the stored orientation relative to
+  `{id}` (`out` = `{id}` is the `from`, `in` = it is the `to`) — needed only to disambiguate a
+  pair holding *opposing* directional links (e.g. `A blocks B` and `B blocks A`), so the web's
+  per-row remove deletes exactly the relation shown. Errors: `validation` (bad `direction`),
+  `not_found` (no such link / unknown ticket).
 
 Link/unlink are each recorded as a `link` / `unlink` activity **on both tickets**. The full
 `<ticket>` carries a `relations` array (the derived per-perspective view, grouped+sorted):

@@ -654,19 +654,31 @@ class Store:
         b_id: str,
         *,
         link_type: str | None,
+        direction: str | None,
         actor: str,
         when: str,
         body_for: "Callable[[Link, str], str]",
     ) -> int:
-        """Delete the link(s) between the unordered pair ``{a, b}`` and log an ``unlink``
-        activity on both endpoints for each removed link. Returns the number removed.
+        """Delete link(s) between ``a`` and ``b`` and log an ``unlink`` activity on both
+        endpoints for each removed link. Returns the number removed.
 
-        ``link_type`` optionally narrows to one relation type. ``body_for(link, ticket_id)``
-        renders the per-endpoint activity body (perspective-aware), supplied by the service.
-        All deletes + activity rows share one transaction.
+        ``link_type`` optionally narrows to one relation type. ``direction`` selects the
+        stored orientation relative to ``a``: ``"out"`` (``a``→``b``), ``"in"`` (``b``→``a``),
+        or ``None`` (either order). Direction matters only when a pair holds *opposing*
+        directional links (e.g. ``A blocks B`` and ``B blocks A``): passing it removes just
+        the one the caller means, instead of both. ``body_for(link, ticket_id)`` renders the
+        per-endpoint activity body (perspective-aware). All deletes + activity rows share one
+        transaction.
         """
-        clauses = "((from_ticket=? AND to_ticket=?) OR (from_ticket=? AND to_ticket=?))"
-        params: list = [a_id, b_id, b_id, a_id]
+        if direction == "out":
+            clauses = "(from_ticket=? AND to_ticket=?)"
+            params: list = [a_id, b_id]
+        elif direction == "in":
+            clauses = "(from_ticket=? AND to_ticket=?)"
+            params = [b_id, a_id]
+        else:
+            clauses = "((from_ticket=? AND to_ticket=?) OR (from_ticket=? AND to_ticket=?))"
+            params = [a_id, b_id, b_id, a_id]
         if link_type is not None:
             clauses += " AND type=?"
             params.append(link_type)

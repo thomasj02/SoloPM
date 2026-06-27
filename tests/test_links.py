@@ -228,6 +228,40 @@ def test_unlink_with_type_filter_keeps_other_relations(service, project):
     assert _by_key(service.get_ticket(a.id), "related") == [b.id]
 
 
+def test_typed_unlink_preserves_opposing_directional_link(service, project):
+    # A blocks B AND B blocks A both exist; removing A's "blocks" (outgoing) must leave the
+    # opposing "blocked by" (B blocks A) intact — direction disambiguates the two rows.
+    a = _mk(service, title="a")
+    b = _mk(service, title="b")
+    service.link_tickets(a.id, "blocks", b.id, actor="human")  # a -> b
+    service.link_tickets(b.id, "blocks", a.id, actor="human")  # b -> a
+    service.unlink_tickets(a.id, b.id, type="blocks", direction="out", actor="human")
+    a_full = service.get_ticket(a.id)
+    assert _by_key(a_full, "blocks") == []  # the a->b link is gone
+    assert _by_key(a_full, "blocked_by") == [b.id]  # the b->a link survives
+    assert len(service.store.list_links()) == 1
+
+
+def test_unlink_direction_in_targets_incoming_link(service, project):
+    a = _mk(service, title="a")
+    b = _mk(service, title="b")
+    service.link_tickets(a.id, "blocks", b.id, actor="human")  # a -> b
+    service.link_tickets(b.id, "blocks", a.id, actor="human")  # b -> a
+    # From A, direction "in" is the b->a link (A is the `to`).
+    service.unlink_tickets(a.id, b.id, type="blocks", direction="in", actor="human")
+    a_full = service.get_ticket(a.id)
+    assert _by_key(a_full, "blocked_by") == []
+    assert _by_key(a_full, "blocks") == [b.id]
+
+
+def test_unlink_bad_direction_rejected(service, project):
+    a = _mk(service, title="a")
+    b = _mk(service, title="b")
+    service.link_tickets(a.id, "blocks", b.id, actor="human")
+    with pytest.raises(ValidationError):
+        service.unlink_tickets(a.id, b.id, direction="sideways", actor="human")
+
+
 def test_unlink_nonexistent_raises(service, project):
     a = _mk(service, title="a")
     b = _mk(service, title="b")

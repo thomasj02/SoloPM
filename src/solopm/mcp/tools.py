@@ -166,8 +166,12 @@ class SoloPMTools:
 
     @_safe
     def unlink_ticket(
-        self, ticket_id: str, other_id: str, type: str | None = None
+        self,
+        ticket_id: str,
+        other_id: str,
+        type: str | None = None,
+        direction: str | None = None,
     ) -> dict:
         return self.svc.unlink_tickets(
-            ticket_id, other_id, type=type, actor=self.agent
+            ticket_id, other_id, type=type, direction=direction, actor=self.agent
         ).to_dict()
