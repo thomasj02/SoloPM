@@ -213,6 +213,20 @@ def test_unlink_type_filter_via_cli(wired):
     assert keys == {"related"}
 
 
+def test_unlink_direction_preserves_opposing_link_via_cli(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "a")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "b")
+    invoke("ticket", "link", "SOLO-1", "blocks", "SOLO-2")  # SOLO-1 -> SOLO-2
+    invoke("ticket", "link", "SOLO-2", "blocks", "SOLO-1")  # SOLO-2 -> SOLO-1
+    # Remove only SOLO-1's outgoing blocks; the opposing link must survive.
+    r = invoke("ticket", "unlink", "SOLO-1", "SOLO-2", "--type", "blocks",
+               "--direction", "out", "--json")
+    assert r.exit_code == 0, r.output
+    keys = {rel["key"] for rel in json.loads(r.output)["relations"]}
+    assert keys == {"blocked_by"}
+
+
 def test_human_show_renders_relations(wired):
     invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
     invoke("ticket", "create", "--project", "SOLO", "--title", "Alpha")

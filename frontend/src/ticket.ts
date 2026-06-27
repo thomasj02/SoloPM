@@ -40,6 +40,15 @@ export function isTicketOpen(): boolean {
   return !!currentId;
 }
 
+/** A cheap signature of the rendered relation rows (linked id/state/title + perspective),
+ * so polling can tell when a *linked* ticket changed even though this ticket's own
+ * updated_at did not. */
+function relationsSignature(t: Ticket | null): string {
+  return (t?.relations ?? [])
+    .map((r) => `${r.key}:${r.ticket.id}:${r.ticket.state}:${r.ticket.title}`)
+    .join("|");
+}
+
 export async function openTicket(id: string): Promise<void> {
   ensurePanel();
   currentId = id;
@@ -83,7 +92,11 @@ export async function pollOpenTicket(): Promise<void> {
   const changed =
     !ticket ||
     fresh.updated_at !== ticket.updated_at ||
-    (fresh.activity?.length ?? 0) !== (ticket.activity?.length ?? 0);
+    (fresh.activity?.length ?? 0) !== (ticket.activity?.length ?? 0) ||
+    // Relation rows render the *linked* ticket's title/state, which change independently of
+    // this ticket's updated_at — re-render when any of them shift (e.g. a sub-ticket reaches
+    // Done). GET /tickets/{id} re-resolves these on every poll.
+    relationsSignature(fresh) !== relationsSignature(ticket);
   if (!changed) return;
 
   const draft = panelEl?.querySelector<HTMLTextAreaElement>(".composer__input")?.value ?? null;

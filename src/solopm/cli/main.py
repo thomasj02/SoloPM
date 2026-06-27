@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Optional
+from urllib.parse import urlencode
 
 import typer
 from typing_extensions import Annotated
@@ -495,15 +496,27 @@ def ticket_unlink(
         Optional[str],
         typer.Option("--type", help="Only remove this relation type; omit to remove all links to it."),
     ] = None,
+    direction: Annotated[
+        Optional[str],
+        typer.Option(
+            "--direction",
+            help="out|in — pin one orientation (out = <id> is the blocker/duplicate/child) "
+            "when a pair holds opposing directional links.",
+        ),
+    ] = None,
     json_out: JsonOpt = False,
     agent: AgentOpt = None,
     url: UrlOpt = None,
 ) -> None:
-    """Remove the relationship(s) between two tickets (order-independent)."""
+    """Remove the relationship(s) between two tickets (order-independent by default)."""
     call = Call(json_out, agent, url)
-    path = f"/api/tickets/{ticket_id}/links/{other_id}"
+    params = {}
     if type is not None:
-        path += f"?type={type}"
+        params["type"] = type
+    if direction is not None:
+        params["direction"] = direction
+    query = urlencode(params)
+    path = f"/api/tickets/{ticket_id}/links/{other_id}" + (f"?{query}" if query else "")
 
     def render(t: dict) -> None:
         output.console.print(f"[green]✓[/] {ticket_id} ⇄ {other_id} unlinked")
