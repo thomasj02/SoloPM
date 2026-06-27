@@ -2,7 +2,7 @@
 // Views subscribe to events and re-render; actions mutate `state` then emit.
 
 import { api, ApiError } from "./api";
-import type { Meta, Project, RadarOverlap, TicketSummary } from "./types";
+import type { Meta, Project, ProjectStatus, RadarOverlap, TicketSummary } from "./types";
 
 // Fallback enums so the UI stays usable even if GET /api/meta is unreachable.
 const FALLBACK_META: Meta = {
@@ -41,6 +41,7 @@ export interface AppState {
   ticketsError: ApiError | null;
   backendDown: boolean;
   radar: RadarOverlap[];
+  status: ProjectStatus | null;
 }
 
 export const state: AppState = {
@@ -52,6 +53,7 @@ export const state: AppState = {
   ticketsError: null,
   backendDown: false,
   radar: [],
+  status: null,
 };
 
 // --- tiny event bus -------------------------------------------------------
@@ -109,9 +111,11 @@ export function setProject(key: string): void {
   state.currentProject = key;
   state.tickets = [];
   state.radar = []; // drop the old project's overlaps so the badge can't show/open stale data
+  state.status = null; // and the old project's git/PR status strip
   persistProject();
   emit("projects");
   emit("radar");
+  emit("status");
   void refreshTickets().catch(() => {});
 }
 
@@ -124,8 +128,10 @@ export async function refreshTickets({ silent = false }: { silent?: boolean } = 
   if (!state.currentProject) {
     state.tickets = [];
     state.radar = [];
+    state.status = null;
     emit("tickets");
     emit("radar");
+    emit("status");
     return;
   }
   try {
@@ -134,6 +140,7 @@ export async function refreshTickets({ silent = false }: { silent?: boolean } = 
     state.ticketsError = null;
     emit("tickets");
     void refreshRadar(); // best-effort, non-blocking — keeps the overlap badge fresh
+    void refreshStatus(); // best-effort — keeps the open-PR / unpushed strip fresh
   } catch (err) {
     // A failed *background* poll must not blank an already-populated board — keep the
     // last-known cards on screen. Only initial/explicit loads show the error/Retry view.
@@ -157,6 +164,20 @@ export async function refreshRadar(): Promise<void> {
     // Radar is informational and best-effort; keep the last-known on error.
   }
   emit("radar");
+}
+
+export async function refreshStatus(): Promise<void> {
+  if (!state.currentProject) {
+    state.status = null;
+    emit("status");
+    return;
+  }
+  try {
+    state.status = await api.projectStatus(state.currentProject);
+  } catch {
+    // The status strip is informational and best-effort; keep the last-known on error.
+  }
+  emit("status");
 }
 
 export function setFilter(value: string): void {

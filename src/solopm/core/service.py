@@ -129,6 +129,33 @@ class Service:
     def set_project_field(self, key: str, field: str, value) -> Project:
         return self.update_project(key, {field: value})
 
+    def project_status(self, key: str) -> dict:
+        """Live git/PR health for a project: ``{open_prs, unpushed_commits}``.
+
+        *Open PRs* counts this project's tickets whose recorded PR is still ``open`` —
+        SoloPM is the system of record for the PRs it drives, so this needs no network call
+        and reflects exactly what's in flight on the board. *Unpushed commits* is a git
+        query (commits on local branches not on any remote) against the project repo.
+
+        Degrades gracefully: a project with no ``repo``, no GitHub client, or an
+        unreachable/odd git repo reports ``unpushed_commits = 0`` rather than erroring, so
+        the board's status strip never turns a transient git hiccup into a 500.
+        """
+        project = self.get_project(key)  # 404 (not 500) for an unknown project
+        open_prs = sum(
+            1
+            for t in self.store.list_tickets(project=project.key)
+            if t.pr_state == "open"
+        )
+        unpushed = 0
+        if self.github is not None and project.repo:
+            try:
+                unpushed = self.github.count_unpushed_commits(project.repo)
+            except GitHubError:
+                # A non-git path, missing git, or a timeout must not fail the status read.
+                unpushed = 0
+        return {"open_prs": open_prs, "unpushed_commits": unpushed}
+
     # --- tickets ------------------------------------------------------------
 
     def create_ticket(

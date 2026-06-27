@@ -51,6 +51,12 @@ export interface Meta {
   transitions: Record<string, State[]>;
 }
 
+// SOLO-12: live git/PR health for the board header.
+export interface ProjectStatus {
+  open_prs: number;
+  unpushed_commits: number;
+}
+
 export interface ReviewMemoryItem {
   id: string;
   text: string;

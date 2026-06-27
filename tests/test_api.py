@@ -102,6 +102,21 @@ def test_patch_project_non_string_field_does_not_500(client):
         assert r.json()["error"]["code"] == "validation"
 
 
+def test_project_status_endpoint_zeros_without_git(client):
+    # [SOLO-12 c3/c4] No GitHub automation + no repo in tests → graceful zeros, not a 500.
+    _make_project(client)
+    r = client.get("/api/projects/SOLO/status")
+    assert r.status_code == 200
+    assert r.json() == {"open_prs": 0, "unpushed_commits": 0}
+
+
+def test_project_status_unknown_project_404(client):
+    # [SOLO-12 c4] An unknown project is a clean 404, never a 500.
+    r = client.get("/api/projects/NOPE/status")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
 # --- tickets ----------------------------------------------------------------
 
 
