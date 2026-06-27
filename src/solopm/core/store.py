@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from .errors import DuplicateError, NotFoundError
-from .models import Activity, Criterion, Project, ReviewMemoryItem, Ticket
+from .models import Activity, Criterion, Link, Project, ReviewMemoryItem, Ticket
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -64,8 +64,23 @@ CREATE TABLE IF NOT EXISTS activity (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ticket_links (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_ticket TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    to_ticket   TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    type        TEXT NOT NULL,
+    created_by  TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_tickets_project ON tickets(project_key);
 CREATE INDEX IF NOT EXISTS idx_activity_ticket ON activity(ticket_id, id);
+CREATE INDEX IF NOT EXISTS idx_links_from ON ticket_links(from_ticket);
+CREATE INDEX IF NOT EXISTS idx_links_to ON ticket_links(to_ticket);
+-- Dedupe identical links (one row per from/to/type).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_links_unique ON ticket_links(from_ticket, to_ticket, type);
+-- Enforce "at most one parent": a ticket appears as a parent-link `from` at most once.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_links_one_parent ON ticket_links(from_ticket) WHERE type = 'parent';
 """
 
 # Columns clients may update on a ticket (whitelist guards against arbitrary writes).
@@ -215,6 +230,17 @@ class Store:
             kind=row["kind"],
             body=row["body"],
             meta=json.loads(row["meta"] or "{}"),
+            created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _link(row: sqlite3.Row) -> Link:
+        return Link(
+            id=row["id"],
+            from_ticket=row["from_ticket"],
+            to_ticket=row["to_ticket"],
+            type=row["type"],
+            created_by=row["created_by"],
             created_at=row["created_at"],
         )
 
@@ -549,4 +575,168 @@ class Store:
             conn.execute(
                 "UPDATE tickets SET position = ? WHERE id = ?", (position, ticket_id)
             )
+
+    # --- ticket links (relationships) ---------------------------------------
+
+    def add_link(
+        self,
+        from_id: str,
+        to_id: str,
+        link_type: str,
+        *,
+        actor: str,
+        when: str,
+        body_from: str,
+        body_to: str,
+    ) -> tuple[Link, bool]:
+        """Insert one canonical link and log a ``link`` activity on BOTH endpoints, atomically.
+
+        Idempotent: if the identical (from, to, type) link already exists, returns it with
+        ``created=False`` and writes nothing — so re-adding a link dedupes silently. The
+        existence check, insert, and both activity rows share one ``BEGIN IMMEDIATE``
+        transaction (and one timestamp), so concurrent callers can't double-insert or drift.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = conn.execute(
+                    "SELECT * FROM ticket_links WHERE from_ticket=? AND to_ticket=? AND type=?",
+                    (from_id, to_id, link_type),
+                ).fetchone()
+                if existing is not None:
+                    conn.execute("COMMIT")
+                    return self._link(existing), False
+                cur = conn.execute(
+                    """INSERT INTO ticket_links (from_ticket, to_ticket, type, created_by, created_at)
+                       VALUES (?,?,?,?,?)""",
+                    (from_id, to_id, link_type, actor, when),
+                )
+                link_id = cur.lastrowid
+                meta = json.dumps({"type": link_type, "from": from_id, "to": to_id})
+                for ticket_id, body in ((from_id, body_from), (to_id, body_to)):
+                    conn.execute(
+                        """INSERT INTO activity (ticket_id, actor, kind, body, meta, created_at)
+                           VALUES (?,?,?,?,?,?)""",
+                        (ticket_id, actor, "link", body, meta, when),
+                    )
+                conn.execute(
+                    "UPDATE tickets SET updated_at=? WHERE id IN (?, ?)", (when, from_id, to_id)
+                )
+                conn.execute("COMMIT")
+            except sqlite3.IntegrityError as exc:
+                conn.execute("ROLLBACK")
+                # Backstop for the unique indexes. The service pre-checks dedupe (above) and
+                # the one-parent rule, but those checks aren't race-free across connections;
+                # under truly concurrent writers the partial one-parent index can still fire
+                # here (e.g. two simultaneous parent links for the same child) — surface it as
+                # a clean domain error rather than a raw IntegrityError. (Parent cycles are
+                # guarded only by the service-level walk, which is best-effort under the same
+                # rare concurrency; a single-user tool serializes these writes in practice.)
+                raise DuplicateError("That link conflicts with an existing one.") from exc
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return (
+            Link(
+                id=link_id,
+                from_ticket=from_id,
+                to_ticket=to_id,
+                type=link_type,
+                created_by=actor,
+                created_at=when,
+            ),
+            True,
+        )
+
+    def remove_links(
+        self,
+        a_id: str,
+        b_id: str,
+        *,
+        link_type: str | None,
+        actor: str,
+        when: str,
+        body_for: "Callable[[Link, str], str]",
+    ) -> int:
+        """Delete the link(s) between the unordered pair ``{a, b}`` and log an ``unlink``
+        activity on both endpoints for each removed link. Returns the number removed.
+
+        ``link_type`` optionally narrows to one relation type. ``body_for(link, ticket_id)``
+        renders the per-endpoint activity body (perspective-aware), supplied by the service.
+        All deletes + activity rows share one transaction.
+        """
+        clauses = "((from_ticket=? AND to_ticket=?) OR (from_ticket=? AND to_ticket=?))"
+        params: list = [a_id, b_id, b_id, a_id]
+        if link_type is not None:
+            clauses += " AND type=?"
+            params.append(link_type)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = conn.execute(
+                    f"SELECT * FROM ticket_links WHERE {clauses}", params
+                ).fetchall()
+                links = [self._link(r) for r in rows]
+                for link in links:
+                    conn.execute("DELETE FROM ticket_links WHERE id=?", (link.id,))
+                    meta = json.dumps(
+                        {"type": link.type, "from": link.from_ticket, "to": link.to_ticket}
+                    )
+                    for ticket_id in (link.from_ticket, link.to_ticket):
+                        conn.execute(
+                            """INSERT INTO activity (ticket_id, actor, kind, body, meta, created_at)
+                               VALUES (?,?,?,?,?,?)""",
+                            (ticket_id, actor, "unlink", body_for(link, ticket_id), meta, when),
+                        )
+                if links:
+                    conn.execute(
+                        "UPDATE tickets SET updated_at=? WHERE id IN (?, ?)", (when, a_id, b_id)
+                    )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return len(links)
+
+    def links_for_ticket(self, ticket_id: str) -> list[Link]:
+        """Every link touching ``ticket_id`` (as either endpoint), oldest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM ticket_links WHERE from_ticket=? OR to_ticket=? ORDER BY id",
+                (ticket_id, ticket_id),
+            ).fetchall()
+            return [self._link(r) for r in rows]
+
+    def list_links(self) -> list[Link]:
+        """All links across the store, oldest first (used to batch-resolve board relations)."""
+        with self._connect() as conn:
+            return [
+                self._link(r)
+                for r in conn.execute("SELECT * FROM ticket_links ORDER BY id").fetchall()
+            ]
+
+    def get_parent(self, ticket_id: str) -> str | None:
+        """The ticket id of ``ticket_id``'s parent, or ``None`` (used for cycle/one-parent checks)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT to_ticket FROM ticket_links WHERE from_ticket=? AND type='parent'",
+                (ticket_id,),
+            ).fetchone()
+            return row["to_ticket"] if row else None
+
+    def ticket_briefs(self, ids) -> dict[str, dict]:
+        """``id -> {title, state, project}`` for a set of ticket ids, in one query."""
+        ids = list(ids)
+        if not ids:
+            return {}
+        placeholders = ",".join("?" * len(ids))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT id, title, state, project_key FROM tickets WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            return {
+                r["id"]: {"title": r["title"], "state": r["state"], "project": r["project_key"]}
+                for r in rows
+            }
 

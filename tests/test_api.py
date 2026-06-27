@@ -429,6 +429,69 @@ def test_criteria_crud_via_api(client):
     assert client.delete(f"/api/tickets/SOLO-1/criteria/{cid}").json()["acceptance_criteria"] == []
 
 
+def test_links_crud_via_api(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "blocker"})
+    client.post("/api/tickets", json={"project": "SOLO", "title": "blocked"})
+    # SOLO-1 blocks SOLO-2
+    r = client.post("/api/tickets/SOLO-1/links", json={"type": "blocks", "other": "SOLO-2"})
+    assert r.status_code == 201
+    rels = r.json()["relations"]
+    assert rels[0]["key"] == "blocks" and rels[0]["ticket"]["id"] == "SOLO-2"
+    # the inverse shows on SOLO-2, and it reads as blocked
+    other = client.get("/api/tickets/SOLO-2").json()
+    assert other["relations"][0]["key"] == "blocked_by"
+    summaries = {t["id"]: t for t in client.get("/api/tickets?project=SOLO").json()["tickets"]}
+    assert summaries["SOLO-2"]["blocked"] is True
+    assert summaries["SOLO-1"]["blocked"] is False
+    # unlink (order-independent)
+    r = client.delete("/api/tickets/SOLO-2/links/SOLO-1")
+    assert r.status_code == 200
+    assert r.json()["relations"] == []
+
+
+def test_link_self_link_rejected_via_api(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "x"})
+    r = client.post("/api/tickets/SOLO-1/links", json={"type": "blocks", "other": "SOLO-1"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "validation"
+
+
+def test_unlink_missing_link_404_via_api(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "a"})
+    client.post("/api/tickets", json={"project": "SOLO", "title": "b"})
+    r = client.delete("/api/tickets/SOLO-1/links/SOLO-2")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+def test_unlink_type_filter_via_api(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "a"})
+    client.post("/api/tickets", json={"project": "SOLO", "title": "b"})
+    client.post("/api/tickets/SOLO-1/links", json={"type": "blocks", "other": "SOLO-2"})
+    client.post("/api/tickets/SOLO-1/links", json={"type": "related", "other": "SOLO-2"})
+    r = client.delete("/api/tickets/SOLO-1/links/SOLO-2?type=blocks")
+    assert r.status_code == 200
+    keys = {rel["key"] for rel in r.json()["relations"]}
+    assert keys == {"related"}
+
+
+def test_link_attribution_via_api(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "a"})
+    client.post("/api/tickets", json={"project": "SOLO", "title": "b"})
+    client.post(
+        "/api/tickets/SOLO-1/links",
+        json={"type": "related", "other": "SOLO-2"},
+        headers={"X-SoloPM-Actor": "claude"},
+    )
+    full = client.get("/api/tickets/SOLO-1").json()
+    assert any(a["kind"] == "link" and a["actor"] == "claude" for a in full["activity"])
+
+
 def test_review_with_criteria_results_via_api(client):
     _make_project(client)
     client.post("/api/tickets", json={"project": "SOLO", "title": "x"})

@@ -39,7 +39,57 @@ ASSIGNEES: tuple[str, ...] = ("human", "claude", "codex", "unassigned")
 ACTORS: tuple[str, ...] = ("human", "claude", "codex")
 AGENT_ACTORS: tuple[str, ...] = ("claude", "codex")
 
-ACTIVITY_KINDS: tuple[str, ...] = ("created", "comment", "state_change", "assignment", "edit")
+ACTIVITY_KINDS: tuple[str, ...] = (
+    "created",
+    "comment",
+    "state_change",
+    "assignment",
+    "edit",
+    "criteria",
+    "review",
+    "link",
+    "unlink",
+)
+
+# Ticket relationship types (SOLO-10). Each has a defined canonical storage direction
+# (the link is stored from→to once and the inverse is derived for the other ticket):
+#   blocks    — from blocks to            (from is the blocker)
+#   related   — symmetric                 (stored in a stable order so it dedupes)
+#   duplicate — from is a duplicate of to (from is the duplicate)
+#   parent    — from's parent is to       (from is the child, to is the parent)
+LINK_TYPES: tuple[str, ...] = ("blocks", "related", "duplicate", "parent")
+
+# (link type, viewing ticket is the stored ``from``) -> (perspective group key, label).
+# Used to derive how a link reads from each endpoint's point of view.
+_RELATION_VIEW: dict[tuple[str, bool], tuple[str, str]] = {
+    ("blocks", True): ("blocks", "Blocks"),
+    ("blocks", False): ("blocked_by", "Blocked by"),
+    ("related", True): ("related", "Related"),
+    ("related", False): ("related", "Related"),
+    ("duplicate", True): ("duplicate_of", "Duplicate of"),
+    ("duplicate", False): ("duplicated_by", "Duplicated by"),
+    ("parent", True): ("parent", "Parent"),
+    ("parent", False): ("sub", "Sub-tickets"),
+}
+
+# Stable display order of the perspective groups (used to sort a ticket's relations).
+RELATION_GROUP_ORDER: tuple[str, ...] = (
+    "parent",
+    "sub",
+    "blocks",
+    "blocked_by",
+    "related",
+    "duplicate_of",
+    "duplicated_by",
+)
+
+
+def relation_view(link_type: str, is_from: bool) -> tuple[str, str]:
+    """The (group key, human label) for a link type as seen from one endpoint.
+
+    ``is_from`` is True when the viewing ticket is the canonical ``from`` of the link.
+    """
+    return _RELATION_VIEW[(link_type, is_from)]
 
 DEFAULT_REVIEW_PROMPT = (
     "You are reviewing a coding change with fresh eyes and no prior context. "
@@ -146,6 +196,52 @@ class Criterion:
 
 
 @dataclass
+class Link:
+    """One stored ticket relationship row (canonical direction; inverse is derived)."""
+
+    id: int
+    from_ticket: str
+    to_ticket: str
+    type: str  # blocks | related | duplicate | parent
+    created_by: str = ""
+    created_at: str = ""
+
+
+@dataclass
+class Relation:
+    """A link as seen from one ticket — assembled on read, not stored.
+
+    Carries the perspective ``key``/``label`` (e.g. ``blocked_by`` / "Blocked by") plus a
+    brief of the *other* ticket so a single ticket's relations render without extra lookups.
+    """
+
+    type: str  # canonical link type
+    key: str  # perspective group key (blocks | blocked_by | related | …)
+    label: str  # human group label
+    direction: str  # "out" when this ticket is the canonical from, else "in"
+    other_id: str
+    other_title: str
+    other_state: str
+    created_by: str = ""
+    created_at: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type,
+            "key": self.key,
+            "label": self.label,
+            "direction": self.direction,
+            "ticket": {
+                "id": self.other_id,
+                "title": self.other_title,
+                "state": self.other_state,
+            },
+            "created_by": self.created_by,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass
 class Ticket:
     id: str
     project: str
@@ -171,6 +267,13 @@ class Ticket:
     # Populated by the service/store on read.
     activity: list[Activity] = field(default_factory=list)
     comment_count: int = 0
+    # Ticket relationships (SOLO-10), assembled by the service on read. ``relations`` is the
+    # full perspective list (serialized on the detail ticket); ``blocked`` / ``sub_*`` are
+    # the derived board-summary signals (an open blocker exists; sub-ticket rollup).
+    relations: list[Relation] = field(default_factory=list)
+    blocked: bool = False
+    sub_done: int = 0
+    sub_total: int = 0
 
     def pr_dict(self) -> dict | None:
         if self.pr_number is None:
@@ -221,6 +324,8 @@ class Ticket:
             "pr": self.pr_dict(),
             "acceptance": self.acceptance_progress(),
             "comment_count": self.comment_count,
+            "blocked": self.blocked,
+            "subtickets": {"done": self.sub_done, "total": self.sub_total},
             "state_entered_at": self.state_entered_at,
             "time_in_state_seconds": self.time_in_state_seconds(),
             "created_at": self.created_at,
@@ -245,6 +350,7 @@ class Ticket:
             "pr": self.pr_dict(),
             "session": self.session_dict(),
             "acceptance_criteria": [c.to_dict() for c in self.acceptance_criteria],
+            "relations": [r.to_dict() for r in self.relations],
             "comments": comments,
             "activity": [a.to_dict() for a in self.activity],
             "state_entered_at": self.state_entered_at,
@@ -281,3 +387,19 @@ def normalize_project_key(key: str) -> str:
             "letters and digits (e.g. SOLO, BLOG7)."
         )
     return candidate
+
+
+_TICKET_ID_RE = re.compile(r"^([A-Za-z][A-Za-z0-9]*)-(\d+)$")
+
+
+def normalize_ticket_id(ticket_id: str) -> str:
+    """Normalize a ticket id's project prefix to uppercase (e.g. ``solo-10`` → ``SOLO-10``).
+
+    Leaves an unrecognized shape untouched so the caller's existence check raises a clean
+    ``not_found`` rather than this masking it.
+    """
+    candidate = (ticket_id or "").strip()
+    match = _TICKET_ID_RE.match(candidate)
+    if not match:
+        return candidate
+    return f"{match.group(1).upper()}-{match.group(2)}"

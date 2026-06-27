@@ -465,6 +465,52 @@ def ticket_reorder(
     )
 
 
+@ticket_app.command("link")
+def ticket_link(
+    ticket_id: Annotated[str, typer.Argument(help="Ticket ID (the subject of the relation).")],
+    type: Annotated[
+        str, typer.Argument(help="blocks | related | duplicate | parent.")
+    ],
+    other_id: Annotated[str, typer.Argument(help="The other ticket ID.")],
+    json_out: JsonOpt = False,
+    agent: AgentOpt = None,
+    url: UrlOpt = None,
+) -> None:
+    """Relate two tickets. Read as "<id> <type> <other>": `link A blocks B`, `link A
+    related B`, `link A duplicate B` (A duplicates B), `link A parent B` (B is A's parent)."""
+    call = Call(json_out, agent, url)
+    body = {"type": type, "other": other_id}
+
+    def render(t: dict) -> None:
+        output.console.print(f"[green]✓[/] {ticket_id} [bold]{type}[/] {other_id}")
+
+    _run(call, lambda api: api.post(f"/api/tickets/{ticket_id}/links", json=body), render)
+
+
+@ticket_app.command("unlink")
+def ticket_unlink(
+    ticket_id: Annotated[str, typer.Argument(help="Ticket ID.")],
+    other_id: Annotated[str, typer.Argument(help="The other ticket ID.")],
+    type: Annotated[
+        Optional[str],
+        typer.Option("--type", help="Only remove this relation type; omit to remove all links to it."),
+    ] = None,
+    json_out: JsonOpt = False,
+    agent: AgentOpt = None,
+    url: UrlOpt = None,
+) -> None:
+    """Remove the relationship(s) between two tickets (order-independent)."""
+    call = Call(json_out, agent, url)
+    path = f"/api/tickets/{ticket_id}/links/{other_id}"
+    if type is not None:
+        path += f"?type={type}"
+
+    def render(t: dict) -> None:
+        output.console.print(f"[green]✓[/] {ticket_id} ⇄ {other_id} unlinked")
+
+    _run(call, lambda api: api.delete(path), render)
+
+
 # --- review -----------------------------------------------------------------
 
 

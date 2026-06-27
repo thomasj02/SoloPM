@@ -57,6 +57,11 @@ class ReviewRequest(BaseModel):
     criteria_results: list[CriterionResult] | None = None
 
 
+class LinkCreate(BaseModel):
+    type: str  # blocks | related | duplicate | parent
+    other: str  # the other ticket id
+
+
 class CriterionCreate(BaseModel):
     text: str
 

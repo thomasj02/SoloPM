@@ -162,6 +162,36 @@ def test_radar_tool(service, project):
     assert tools_for(service).radar() == {"overlaps": []}  # service fixture has no github
 
 
+def test_links_via_mcp_tools(service, project):
+    t = tools_for(service)
+    t.create_ticket(project="SOLO", title="a")
+    t.create_ticket(project="SOLO", title="b")
+    out = t.link_ticket("SOLO-1", "blocks", "SOLO-2")
+    assert out["relations"][0]["key"] == "blocks"
+    assert out["relations"][0]["ticket"]["id"] == "SOLO-2"
+    # inverse + attribution surface in show_ticket
+    shown = t.show_ticket("SOLO-2")
+    assert shown["relations"][0]["key"] == "blocked_by"
+    assert any(a["kind"] == "link" and a["actor"] == "claude" for a in shown["activity"])
+    # unlink round-trips
+    assert t.unlink_ticket("SOLO-1", "SOLO-2")["relations"] == []
+
+
+def test_link_errors_returned_as_structured_dict(service, project):
+    t = tools_for(service)
+    t.create_ticket(project="SOLO", title="a")
+    assert t.link_ticket("SOLO-1", "blocks", "SOLO-1")["error"]["code"] == "validation"
+    assert t.link_ticket("SOLO-1", "blocks", "SOLO-999")["error"]["code"] == "not_found"
+
+
+def test_link_tools_registered(service, project):
+    from solopm.mcp.server import build_server
+
+    mcp = build_server(service, agent="claude")
+    names = {t.name for t in asyncio.run(mcp.list_tools())}
+    assert {"link_ticket", "unlink_ticket"} <= names
+
+
 def test_criteria_via_mcp_tools(service, project):
     t = tools_for(service)
     t.create_ticket(project="SOLO", title="x")

@@ -18,11 +18,17 @@ from .models import (
     ACTORS,
     DEFAULT_BRANCH_CONVENTION,
     DEFAULT_REVIEW_PROMPT,
+    LINK_TYPES,
+    RELATION_GROUP_ORDER,
     STATES,
     Activity,
+    Link,
     Project,
+    Relation,
     Ticket,
     normalize_project_key,
+    normalize_ticket_id,
+    relation_view,
 )
 from .store import Store
 
@@ -214,12 +220,23 @@ class Service:
         # Group by workflow state, then by manual position within each column.
         rank = {s: i for i, s in enumerate(STATES)}
         tickets.sort(key=lambda t: (rank.get(t.state, 99), t.position, t.seq))
+        self._attach_relations(tickets)
         return tickets
 
-    def get_ticket(self, ticket_id: str) -> Ticket:
+    def _require_ticket(self, ticket_id: str) -> Ticket:
+        """Fetch a ticket (no relations attached) or raise ``NotFoundError``.
+
+        Used for existence checks where the full relation/derived-field assembly of
+        :meth:`get_ticket` would be wasted work.
+        """
         ticket = self.store.get_ticket(ticket_id)
         if ticket is None:
             raise NotFoundError(f"Ticket {ticket_id!r} not found.")
+        return ticket
+
+    def get_ticket(self, ticket_id: str) -> Ticket:
+        ticket = self._require_ticket(ticket_id)
+        self._attach_relations([ticket])
         return ticket
 
     def edit_ticket(
@@ -696,6 +713,190 @@ class Service:
         self, ticket_id: str, criterion_id: str, done: bool = True, *, actor: str = "human"
     ) -> Ticket:
         return self.update_criterion(ticket_id, criterion_id, done=done, actor=actor)
+
+    # --- ticket relationships (SOLO-10) -------------------------------------
+    #
+    # Links are stored once in a canonical direction (see ``models.LINK_TYPES``); the
+    # inverse view is derived per endpoint on read by ``_attach_relations`` so a link made
+    # from either side shows correctly on both tickets. Cross-project links are allowed —
+    # ids are resolved against the whole ticket space, not the project.
+
+    _CLOSED_STATES = frozenset({"done", "cancelled"})
+
+    def link_tickets(
+        self, ticket_id: str, link_type: str, other_id: str, *, actor: str = "human"
+    ) -> Ticket:
+        """Create a relationship from ``ticket_id`` to ``other_id``.
+
+        ``link_type`` ∈ ``blocks | related | duplicate | parent`` (read as
+        "``ticket_id`` <type> ``other_id``"): blocks → ``ticket_id`` is the blocker;
+        duplicate → ``ticket_id`` is the duplicate of ``other_id``; parent → ``other_id``
+        becomes ``ticket_id``'s parent (``ticket_id`` is the sub-ticket); related is
+        symmetric. Re-creating an identical link is an idempotent no-op (deduped). Rejects
+        self-links, parent cycles, and a second parent. Returns the (refreshed) acting ticket.
+        """
+        _require_actor(actor)
+        if link_type not in LINK_TYPES:
+            raise ValidationError(
+                f"Unknown relation type {link_type!r}: expected one of {', '.join(LINK_TYPES)}."
+            )
+        a_id = normalize_ticket_id(ticket_id)
+        b_id = normalize_ticket_id(other_id)
+        if a_id == b_id:
+            raise ValidationError("A ticket cannot be linked to itself.")
+        a = self._require_ticket(a_id)  # raises NotFoundError if missing
+        b = self._require_ticket(b_id)
+
+        from_id, to_id = self._canonical(a, b, link_type)
+        if link_type == "parent":
+            # Canonical parent storage is child→parent, so ``from`` is the child.
+            self._check_parent_link(child=from_id, parent=to_id)
+
+        _, from_label = relation_view(link_type, True)
+        _, to_label = relation_view(link_type, False)
+        body_from = f"linked {to_id} ({from_label.lower()})"
+        body_to = f"linked {from_id} ({to_label.lower()})"
+        self.store.add_link(
+            from_id,
+            to_id,
+            link_type,
+            actor=actor,
+            when=_now(),
+            body_from=body_from,
+            body_to=body_to,
+        )
+        return self.get_ticket(a_id)
+
+    def unlink_tickets(
+        self, ticket_id: str, other_id: str, *, type: str | None = None, actor: str = "human"
+    ) -> Ticket:
+        """Remove the link(s) between ``ticket_id`` and ``other_id`` (order-independent).
+
+        ``type`` optionally narrows to one relation type; without it, every link between the
+        pair is removed. Raises ``NotFoundError`` if no matching link exists. Returns the
+        (refreshed) acting ticket.
+        """
+        _require_actor(actor)
+        if type is not None and type not in LINK_TYPES:
+            raise ValidationError(
+                f"Unknown relation type {type!r}: expected one of {', '.join(LINK_TYPES)}."
+            )
+        a_id = normalize_ticket_id(ticket_id)
+        b_id = normalize_ticket_id(other_id)
+        self._require_ticket(a_id)  # existence checks (clean not_found, not an empty unlink)
+        self._require_ticket(b_id)
+
+        def body_for(link: Link, this_id: str) -> str:
+            is_from = link.from_ticket == this_id
+            other = link.to_ticket if is_from else link.from_ticket
+            _, label = relation_view(link.type, is_from)
+            return f"unlinked {other} ({label.lower()})"
+
+        removed = self.store.remove_links(
+            a_id, b_id, link_type=type, actor=actor, when=_now(), body_for=body_for
+        )
+        if removed == 0:
+            qualifier = f"{type} " if type else ""
+            raise NotFoundError(f"No {qualifier}link between {a_id} and {b_id}.")
+        return self.get_ticket(a_id)
+
+    @staticmethod
+    def _canonical(a: Ticket, b: Ticket, link_type: str) -> tuple[str, str]:
+        """The canonical (from, to) ids to store for a link between ``a`` and ``b``.
+
+        Directional types keep the caller's order (``a`` is the subject). ``related`` is
+        symmetric, so it is stored in a stable (project, seq) order — that way a link added
+        from either side maps to the same row and dedupes.
+        """
+        if link_type == "related" and (b.project, b.seq) < (a.project, a.seq):
+            return b.id, a.id
+        return a.id, b.id
+
+    def _check_parent_link(self, *, child: str, parent: str) -> None:
+        """Enforce the parent invariants: at most one parent, and no cycles."""
+        existing = self.store.get_parent(child)
+        if existing is not None and existing != parent:
+            raise ValidationError(
+                f"{child} already has a parent ({existing}); a ticket may have only one parent."
+            )
+        # A cycle forms iff ``child`` is already an ancestor of ``parent`` — walk up from
+        # ``parent`` and reject if we reach ``child``.
+        cursor: str | None = parent
+        seen: set[str] = set()
+        while cursor is not None and cursor not in seen:
+            if cursor == child:
+                raise ValidationError(
+                    f"Cannot set {parent} as the parent of {child}: it would create a cycle."
+                )
+            seen.add(cursor)
+            cursor = self.store.get_parent(cursor)
+
+    def _attach_relations(self, tickets: list[Ticket]) -> None:
+        """Populate each ticket's ``relations`` plus the derived ``blocked`` / ``sub_*`` fields.
+
+        Resolves the full link graph and the linked tickets' briefs in a fixed number of
+        queries (regardless of how many tickets are passed), so list/board reads stay cheap.
+        A ticket is ``blocked`` when it has an *open* (non-done/cancelled) blocker; the
+        sub-ticket rollup counts its children (incoming parent links) and how many are done.
+        """
+        if not tickets:
+            return
+        # One ticket (the detail/get path) needs only its own links; the board path loads
+        # the whole graph once and slices it per card.
+        if len(tickets) == 1:
+            links = self.store.links_for_ticket(tickets[0].id)
+        else:
+            links = self.store.list_links()
+        if not links:
+            return  # defaults already mean: no relations, not blocked, no sub-tickets
+        by_ticket: dict[str, list[Link]] = {}
+        for link in links:
+            by_ticket.setdefault(link.from_ticket, []).append(link)
+            by_ticket.setdefault(link.to_ticket, []).append(link)
+
+        needed: set[str] = set()
+        for ticket in tickets:
+            for link in by_ticket.get(ticket.id, []):
+                needed.add(link.to_ticket if link.from_ticket == ticket.id else link.from_ticket)
+        briefs = self.store.ticket_briefs(needed)
+
+        for ticket in tickets:
+            relations: list[Relation] = []
+            sub_done = sub_total = 0
+            blocked = False
+            for link in by_ticket.get(ticket.id, []):
+                is_from = link.from_ticket == ticket.id
+                other = link.to_ticket if is_from else link.from_ticket
+                key, label = relation_view(link.type, is_from)
+                brief = briefs.get(other, {})
+                other_state = brief.get("state", "")
+                relations.append(
+                    Relation(
+                        type=link.type,
+                        key=key,
+                        label=label,
+                        direction="out" if is_from else "in",
+                        other_id=other,
+                        other_title=brief.get("title", other),
+                        other_state=other_state,
+                        created_by=link.created_by,
+                        created_at=link.created_at,
+                    )
+                )
+                if link.type == "blocks" and not is_from and other_state not in self._CLOSED_STATES:
+                    blocked = True  # an open blocker → this ticket is blocked
+                if link.type == "parent" and not is_from:
+                    sub_total += 1  # this ticket is the parent; ``other`` is a child
+                    if other_state == "done":
+                        sub_done += 1
+            relations.sort(key=lambda r: (RELATION_GROUP_ORDER.index(r.key), r.other_id))
+            ticket.relations = relations
+            # A finished (done/cancelled) ticket is never "blocked" — only open work can be
+            # held up — so don't flag it even if a blocker is still open (cf. the radar
+            # excluding finished tickets in SOLO-17).
+            ticket.blocked = blocked and ticket.state not in self._CLOSED_STATES
+            ticket.sub_done = sub_done
+            ticket.sub_total = sub_total
 
     # --- overlap / conflict radar -------------------------------------------
 

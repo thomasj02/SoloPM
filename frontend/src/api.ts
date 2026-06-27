@@ -3,6 +3,7 @@
 
 import type {
   Activity,
+  LinkType,
   Meta,
   Project,
   ProjectCreate,
@@ -120,6 +121,14 @@ export const api = {
     request<Ticket>("PATCH", `/tickets/${enc(id)}/criteria/${enc(cid)}`, body),
   removeCriterion: (id: string, cid: string) =>
     request<Ticket>("DELETE", `/tickets/${enc(id)}/criteria/${enc(cid)}`),
+
+  addLink: (id: string, type: LinkType, other: string) =>
+    request<Ticket>("POST", `/tickets/${enc(id)}/links`, { type, other }),
+  removeLink: (id: string, other: string, type?: LinkType) =>
+    request<Ticket>(
+      "DELETE",
+      `/tickets/${enc(id)}/links/${enc(other)}${type ? "?type=" + enc(type) : ""}`,
+    ),
 
   radar: (project?: string) =>
     request<RadarReport>("GET", `/radar${project ? "?project=" + enc(project) : ""}`),

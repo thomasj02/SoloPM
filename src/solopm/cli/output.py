@@ -152,6 +152,22 @@ def render_ticket(t: dict) -> None:
         body += [f"[grey62]session:[/] {s['id']} ({live})"]
     console.print(Panel("\n".join(body), expand=False))
 
+    relations = t.get("relations") or []
+    if relations:
+        console.print("[bold]Relations[/]")
+        # Relations arrive pre-sorted by perspective group; print each group once.
+        seen: list[str] = []
+        for r in relations:
+            label = r.get("label", r.get("key", ""))
+            if label not in seen:
+                seen.append(label)
+                console.print(f"  [grey62]{label}[/]")
+            tk = r.get("ticket", {})
+            console.print(
+                f"    [bold]{tk.get('id', '')}[/] {tk.get('title', '')} "
+                f"{_state_label(tk.get('state', ''))}"
+            )
+
     activity = t.get("activity") or []
     if activity:
         console.print("[bold]Activity[/]")

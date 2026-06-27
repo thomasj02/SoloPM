@@ -7,7 +7,26 @@ import { api } from "./api";
 import { el, clearChildren, relativeTime } from "./util";
 import { renderMarkdown } from "./markdown";
 import { toastError, toastSuccess, assigneeBadge } from "./ui";
-import type { Activity, State, Ticket } from "./types";
+import type { Activity, LinkType, Relation, RelationKey, State, Ticket } from "./types";
+
+// Stable display order of the relation perspective groups (mirrors the backend).
+const RELATION_GROUP_ORDER: RelationKey[] = [
+  "parent",
+  "sub",
+  "blocks",
+  "blocked_by",
+  "related",
+  "duplicate_of",
+  "duplicated_by",
+];
+
+// The relation types a user can create, read as "<this ticket> <label> <other>".
+const LINK_TYPE_OPTIONS: { value: LinkType; label: string }[] = [
+  { value: "blocks", label: "Blocks" },
+  { value: "related", label: "Related to" },
+  { value: "duplicate", label: "Duplicate of" },
+  { value: "parent", label: "Parent" },
+];
 
 let overlayEl: HTMLElement | null = null;
 let panelEl: HTMLElement | null = null;
@@ -123,6 +142,7 @@ function renderPanel(): void {
       renderMetaCard(t),
       renderMoveActions(t),
       renderCriteria(t),
+      renderRelations(t),
       renderDescription(t),
       renderActivity(t),
     );
@@ -256,6 +276,119 @@ function renderCriteria(t: Ticket): HTMLElement {
     list,
     el("div", { class: "tp__critaddrow" }, [input, addBtn]),
   ]);
+}
+
+function renderRelations(t: Ticket): HTMLElement {
+  const rels = t.relations || [];
+  const groups = new Map<RelationKey, Relation[]>();
+  for (const r of rels) {
+    const arr = groups.get(r.key) ?? [];
+    arr.push(r);
+    groups.set(r.key, arr);
+  }
+
+  const section = el("section", { class: "tp__section" }, [
+    el("h3", { class: "tp__sectionhead" }, `Relations (${rels.length})`),
+  ]);
+  if (!rels.length) {
+    section.append(el("div", { class: "muted tp__critempty" }, "No linked tickets yet."));
+  }
+  for (const key of RELATION_GROUP_ORDER) {
+    const items = groups.get(key);
+    if (items && items.length) section.append(renderRelationGroup(key, items));
+  }
+  section.append(renderAddRelation(t));
+  return section;
+}
+
+function renderRelationGroup(key: RelationKey, items: Relation[]): HTMLElement {
+  let heading = items[0].label;
+  if (key === "sub") {
+    const done = items.filter((r) => r.ticket.state === "done").length;
+    heading = `Sub-tickets (${done}/${items.length})`;
+  }
+  const list = el("ul", { class: "tp__rellist" });
+  for (const r of items) list.append(renderRelationRow(r, key === "sub"));
+  return el("div", { class: "tp__relgroup" }, [
+    el("div", { class: "tp__rellabel" }, heading),
+    list,
+  ]);
+}
+
+function renderRelationRow(r: Relation, isSub: boolean): HTMLElement {
+  const tk = r.ticket;
+  const main: HTMLElement[] = [];
+  if (isSub) {
+    // Sub-tickets render as a (read-only) checklist with state — a sub-ticket is "done"
+    // when it reaches the Done column, not by ticking it here.
+    main.push(
+      el("input", {
+        type: "checkbox",
+        class: "tp__critbox",
+        checked: tk.state === "done",
+        disabled: true,
+        title: "A sub-ticket completes when it reaches the Done column",
+      }),
+    );
+  }
+  main.push(
+    el("span", { class: "tp__relid mono" }, tk.id),
+    el("span", { class: "tp__reltitle" }, tk.title || "(untitled)"),
+    statePill(tk.state),
+  );
+
+  const remove = el("button", {
+    class: "icon-btn tp__reldel",
+    title: "Remove link",
+    "aria-label": "Remove link",
+    onClick: (e: Event) => {
+      e.stopPropagation();
+      void doRemoveRelation(tk.id, r.type);
+    },
+  }, "×");
+
+  return el("li", { class: "tp__rel" }, [
+    el("div", { class: "tp__relmain", title: `Open ${tk.id}`, onClick: () => void openTicket(tk.id) }, main),
+    remove,
+  ]);
+}
+
+function renderAddRelation(t: Ticket): HTMLElement {
+  const typeSelect = el("select", { class: "select tp__reltype", "aria-label": "Relation type" });
+  for (const o of LINK_TYPE_OPTIONS) typeSelect.append(el("option", { value: o.value }, o.label));
+
+  const listId = "rel-ticket-options";
+  const datalist = el("datalist", { id: listId });
+  for (const s of state.tickets) {
+    if (s.id !== t.id) datalist.append(el("option", { value: s.id }, `${s.id} — ${s.title}`));
+  }
+  const idInput = el("input", {
+    class: "input tp__relinput",
+    placeholder: "Ticket id (e.g. SOLO-2)…",
+    list: listId,
+    autocomplete: "off",
+    maxlength: 64,
+  });
+
+  const add = async (): Promise<void> => {
+    // Tolerate a pasted "SOLO-2 — title" by taking the leading id token.
+    const other = idInput.value.trim().split(/[\s—]/)[0].trim();
+    if (!other) {
+      idInput.focus();
+      return;
+    }
+    await doAddRelation(typeSelect.value as LinkType, other);
+    idInput.value = "";
+  };
+  idInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void add();
+    }
+  });
+  const addBtn = el("button", { class: "btn btn--ghost btn--sm", onClick: () => void add() }, "Link");
+
+  return el("div", { class: "tp__reladd" }, [typeSelect, datalist, idInput, addBtn]);
 }
 
 function renderDescription(t: Ticket): HTMLElement {
@@ -447,6 +580,37 @@ async function doRemoveCriterion(cid: string): Promise<void> {
     refreshTickets({ silent: true }).catch(() => {});
   } catch (err) {
     toastError((err as Error).message || "Remove failed");
+  } finally {
+    busy = false;
+  }
+}
+
+async function doAddRelation(type: LinkType, other: string): Promise<void> {
+  const id = currentId;
+  if (!id || busy) return;
+  busy = true;
+  try {
+    ticket = await api.addLink(id, type, other);
+    renderPanel();
+    toastSuccess("Linked");
+    refreshTickets({ silent: true }).catch(() => {});
+  } catch (err) {
+    toastError((err as Error).message || "Link failed");
+  } finally {
+    busy = false;
+  }
+}
+
+async function doRemoveRelation(other: string, type: LinkType): Promise<void> {
+  const id = currentId;
+  if (!id || busy) return;
+  busy = true;
+  try {
+    ticket = await api.removeLink(id, other, type);
+    renderPanel();
+    refreshTickets({ silent: true }).catch(() => {});
+  } catch (err) {
+    toastError((err as Error).message || "Unlink failed");
   } finally {
     busy = false;
   }
