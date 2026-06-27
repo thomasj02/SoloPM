@@ -114,6 +114,8 @@ class GitHubClient(Protocol):
 
     def worktree_changed_files(self, worktree_path: str, base: str) -> set[str]: ...
 
+    def count_unpushed_commits(self, repo: str) -> int: ...
+
 
 class GitHub:
     """Real client over the local ``git`` and GitHub ``gh`` CLIs."""
@@ -130,6 +132,13 @@ class GitHub:
             raise GitHubError(f"Command not found: {args[0]} (is it installed?)") from exc
         except subprocess.TimeoutExpired as exc:
             raise GitHubError(f"Command timed out: {' '.join(args)}") from exc
+        except OSError as exc:
+            # A repo path that is a regular file or an unreadable directory makes the spawn
+            # raise NotADirectoryError/PermissionError (OSError) from `cwd`, not a non-zero
+            # exit. Wrap it as a GitHubError so callers' best-effort paths (status, radar,
+            # cleanup) absorb it via their existing GitHubError handling instead of letting
+            # a raw OSError escape to a 500.
+            raise GitHubError(f"Could not run `{' '.join(args)}` in {cwd!r}: {exc}") from exc
         if check and proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "").strip()
             raise GitHubError(f"`{' '.join(args)}` failed: {detail}")
@@ -409,6 +418,25 @@ class GitHub:
                 worktrees.append(Worktree(path=path, branch=branch))
                 path = None
         return worktrees
+
+    def count_unpushed_commits(self, repo: str) -> int:
+        """Count commits on local branches not present on any remote.
+
+        ``git log --branches --not --remotes`` enumerates exactly the commits that exist
+        locally but haven't been pushed anywhere — the "committed but not yet pushed" state
+        the board surfaces. ``--format=%H`` prints one sha per line, so the count is the
+        number of non-blank lines. Best-effort: a repo with no commits (or where the query
+        otherwise exits non-zero, e.g. a bare/odd repo) reports zero rather than failing —
+        a missing ``git`` or a timeout still raises ``GitHubError`` for the caller to absorb.
+        """
+        proc = self._run(
+            ["git", "log", "--branches", "--not", "--remotes", "--format=%H"],
+            cwd=repo,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return 0
+        return sum(1 for line in proc.stdout.splitlines() if line.strip())
 
     def worktree_changed_files(self, worktree_path: str, base: str) -> set[str]:
         files: set[str] = set()

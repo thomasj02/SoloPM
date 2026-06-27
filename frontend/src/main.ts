@@ -22,6 +22,7 @@ import type { Assignee, Project, ReviewMemoryItem, State } from "./types";
 const POLL_MS = 4000;
 let searchInput: HTMLInputElement | null = null;
 let radarBadge: HTMLButtonElement | null = null;
+let statusStrip: HTMLElement | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 async function main(): Promise<void> {
@@ -31,6 +32,7 @@ async function main(): Promise<void> {
   wireShortcuts();
   on("projects", renderTopbar);
   on("radar", updateRadarBadge); // update the overlap badge in place (no topbar rebuild)
+  on("status", updateStatusStrip); // update the git/PR status strip in place
 
   await loadMeta();
   try {
@@ -126,6 +128,11 @@ function renderTopbar(): void {
   });
   updateRadarBadge();
 
+  // SOLO-12: a small git/PR health strip (open PRs + unpushed commits), refreshed by the
+  // existing poll. Built here, content filled (and shown/hidden) by updateStatusStrip.
+  statusStrip = el("div", { class: "board-status", "aria-label": "Project git status" });
+  updateStatusStrip();
+
   bar.append(
     el("div", { class: "topbar__left" }, [
       brand,
@@ -133,6 +140,7 @@ function renderTopbar(): void {
       el("div", { class: "selectwrap" }, select),
       settingsBtn,
       newProjectBtn,
+      statusStrip,
     ]),
     el("div", { class: "topbar__right" }, [radarBadge, searchInput, refreshBtn, newTicketBtn]),
   );
@@ -155,6 +163,39 @@ function updateRadarBadge(): void {
     overlaps
       .map((o) => `${o.a.ticket || o.a.branch} ⇄ ${o.b.ticket || o.b.branch}: ${o.files.join(", ")}`)
       .join("\n");
+}
+
+/** Fill the git/PR status strip from state.status (no topbar rebuild). Hidden until a
+ * project's status has loaded, so it never flashes stale or placeholder counts. */
+function updateStatusStrip(): void {
+  if (!statusStrip) return;
+  const s = state.status;
+  if (!state.currentProject || !s) {
+    statusStrip.style.display = "none";
+    return;
+  }
+  statusStrip.style.display = "";
+  clearChildren(statusStrip);
+  const prs = s.open_prs;
+  const unpushed = s.unpushed_commits;
+  statusStrip.append(
+    el(
+      "span",
+      {
+        class: `board-status__item${prs ? "" : " board-status__item--zero"}`,
+        title: `${prs} open pull request${prs === 1 ? "" : "s"}`,
+      },
+      [el("span", { class: "board-status__icon", "aria-hidden": "true" }, "⊙"), `${prs} PR${prs === 1 ? "" : "s"} open`],
+    ),
+    el(
+      "span",
+      {
+        class: `board-status__item${unpushed ? "" : " board-status__item--zero"}`,
+        title: `${unpushed} commit${unpushed === 1 ? "" : "s"} committed locally but not pushed`,
+      },
+      [el("span", { class: "board-status__icon", "aria-hidden": "true" }, "↑"), `${unpushed} unpushed`],
+    ),
+  );
 }
 
 // Onboarding / backend-down overlay in the board area.

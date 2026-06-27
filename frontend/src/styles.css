@@ -167,6 +167,29 @@ body {
 }
 .radar-badge:hover { background: color-mix(in srgb, var(--warning) 22%, transparent); }
 
+/* SOLO-12: git/PR health strip (open PRs + unpushed commits) in the header. */
+.board-status { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.board-status__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  padding: 2px 9px;
+}
+.board-status__item--zero { color: var(--muted); }
+.board-status__icon { color: var(--accent); opacity: 0.85; }
+.board-status__item--zero .board-status__icon { color: var(--muted); opacity: 0.7; }
+
+@media (max-width: 860px) {
+  .board-status { display: none; }
+}
+
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 650; letter-spacing: 0.2px; }
 .brand__logo { color: var(--accent-hover); font-size: 17px; }
 .brand__name { font-size: 15px; }
