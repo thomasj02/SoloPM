@@ -16,7 +16,11 @@ const GAP_X = 80;
 const GAP_Y = 26;
 const PAD = 60;
 const ALL_TYPES: LinkType[] = ["blocks", "parent", "related", "duplicate"];
+// Edges that drive the layered layout (the dependency hierarchy).
 const DIRECTED: ReadonlySet<LinkType> = new Set<LinkType>(["blocks", "parent"]);
+// Edges drawn with an arrowhead (all canonical-directional types). ``duplicate`` is
+// directional (duplicate→canonical) so it gets an arrow, but it does NOT shape the layout.
+const ARROWED: ReadonlySet<LinkType> = new Set<LinkType>(["blocks", "parent", "duplicate"]);
 const TYPE_LABEL: Record<LinkType, string> = {
   blocks: "Blocks",
   parent: "Parent",
@@ -351,7 +355,7 @@ function renderEdge(e: GraphEdge, placed: Map<string, Placed>, cycleNodes: Set<s
     d: `M${sx},${sy} C${c1x},${sy} ${c2x},${ty} ${tx},${ty}`,
     fill: "none",
   };
-  if (DIRECTED.has(e.type)) attrs["marker-end"] = `url(#arrow-${e.type})`;
+  if (ARROWED.has(e.type)) attrs["marker-end"] = `url(#arrow-${e.type})`;
   const title = svgNode("title", {}, [`${e.from} ${e.type} ${e.to}`]);
   const path = svgNode("path", attrs, [title]);
   return path;

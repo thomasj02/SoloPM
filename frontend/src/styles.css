@@ -640,7 +640,9 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 13px; }
 .tp__sectionrow { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 
 .graph-overlay {
-  position: fixed; inset: 0; z-index: 50;
+  /* Above the ticket panel (90) and modals (100) — it can be opened from inside the panel —
+     but below toasts (200) so error toasts still surface over it. */
+  position: fixed; inset: 0; z-index: 150;
   display: none;
   background: color-mix(in srgb, var(--bg) 92%, black);
 }

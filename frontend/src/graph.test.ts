@@ -78,6 +78,23 @@ describe("dependency graph render", () => {
     expect(document.querySelector(".graph__center")?.textContent).toContain("No relationships");
   });
 
+  it("draws arrowheads on directional edges (incl. duplicate) but not on related", async () => {
+    graphMock.mockResolvedValue({
+      ...FIXTURE,
+      nodes: [FIXTURE.nodes[0], FIXTURE.nodes[1], FIXTURE.nodes[3]],
+      edges: [
+        { from: "DEMO-1", to: "DEMO-2", type: "blocks" },
+        { from: "DEMO-1", to: "DEMO-5", type: "duplicate" },
+        { from: "DEMO-2", to: "DEMO-5", type: "related" },
+      ],
+      cycles: [],
+    });
+    await openGraph({ project: "DEMO" });
+    expect(document.querySelector(".graph__edge--blocks")?.getAttribute("marker-end")).toContain("arrow-blocks");
+    expect(document.querySelector(".graph__edge--duplicate")?.getAttribute("marker-end")).toContain("arrow-duplicate");
+    expect(document.querySelector(".graph__edge--related")?.getAttribute("marker-end")).toBeNull();
+  });
+
   it("requests an ego-graph with depth when opened around a ticket", async () => {
     await openGraph({ around: "DEMO-1", depth: 2 });
     expect(graphMock).toHaveBeenCalledWith(expect.objectContaining({ around: "DEMO-1", depth: 2 }));
