@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, Depends, FastAPI, Header, Request
+from fastapi import Body, Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -132,6 +132,26 @@ def create_app(
     def radar(project: str | None = None, svc: Service = Depends(get_service)) -> dict:
         # Overlap/conflict radar across active worktrees (informational; never blocks).
         return svc.compute_radar(project)
+
+    @app.get("/api/graph")
+    def graph(
+        project: str | None = None,
+        around: str | None = None,
+        depth: int = 1,
+        active_only: bool = False,
+        type: list[str] | None = Query(default=None),
+        svc: Service = Depends(get_service),
+    ) -> dict:
+        # Read-only dependency graph (nodes + typed edges) over ticket relationships.
+        # `around` (+ depth) gives an ego-graph; `project` the project's relational subgraph.
+        # Repeat `type` to filter relation types (e.g. ?type=blocks&type=parent).
+        return svc.build_graph(
+            project=project,
+            around=around,
+            depth=depth,
+            active_only=active_only,
+            types=type,
+        )
 
     # --- projects -----------------------------------------------------------
 

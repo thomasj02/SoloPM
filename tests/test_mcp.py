@@ -162,6 +162,26 @@ def test_radar_tool(service, project):
     assert tools_for(service).radar() == {"overlaps": []}  # service fixture has no github
 
 
+def test_graph_tool(service, project):
+    t = tools_for(service)
+    t.create_ticket(project="SOLO", title="a")
+    t.create_ticket(project="SOLO", title="b")
+    t.link_ticket("SOLO-1", "blocks", "SOLO-2")
+    g = t.graph(project="SOLO")
+    assert {n["id"] for n in g["nodes"]} == {"SOLO-1", "SOLO-2"}
+    assert g["edges"][0] == {"from": "SOLO-1", "to": "SOLO-2", "type": "blocks"}
+    # structured error for a bad scope, not an exception
+    assert t.graph(project="NOPE")["error"]["code"] == "not_found"
+
+
+def test_graph_tool_registered(service, project):
+    from solopm.mcp.server import build_server
+
+    mcp = build_server(service, agent="claude")
+    names = {tool.name for tool in asyncio.run(mcp.list_tools())}
+    assert "graph" in names
+
+
 def test_links_via_mcp_tools(service, project):
     t = tools_for(service)
     t.create_ticket(project="SOLO", title="a")

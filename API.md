@@ -282,6 +282,41 @@ A branch is annotated with the active ticket (`in-progress` / `in-ai-review`) th
 it; unmapped branches are still reported. The master worktree is excluded. Degrades to
 `{ "overlaps": [] }` when the project has no repo or GitHub automation is off (no error).
 
+### Dependency graph
+
+`GET /api/graph` → a read-only node/edge projection of the ticket relationships (SOLO-14),
+for visualization and topological reasoning. No new storage — derived from `ticket_links`.
+Query params (all optional):
+- `around=<id>` (+ `depth=<N>`, default `1`) — the ego-graph reachable within `N` hops of a
+  ticket, following links of the selected types in either direction.
+- `project=<key>` — that project's *connected* tickets (those in ≥1 link) plus their linked
+  neighbours (cross-project neighbours included so every edge has both endpoints). Isolated
+  tickets are omitted. `around` takes precedence over `project`; with neither, the whole
+  store's relational graph is returned.
+- `type=<t>` (repeatable, e.g. `?type=blocks&type=parent`) — restrict relation types.
+- `active_only=true` — drop done/cancelled nodes (and their edges).
+
+```json
+{
+  "nodes": [
+    { "id": "SOLO-42", "project": "SOLO", "title": "…", "state": "in-progress",
+      "assignee": "claude", "blocked": true, "subtickets": { "done": 2, "total": 5 } }
+  ],
+  "edges": [ { "from": "SOLO-42", "to": "SOLO-43", "type": "blocks" } ],
+  "cycles": [ ["SOLO-1", "SOLO-2", "SOLO-3"] ],
+  "scope": { "project": "SOLO", "around": null, "depth": null,
+             "active_only": false, "types": ["blocks","related","duplicate","parent"] },
+  "truncated": false
+}
+```
+- Edges use SOLO-10's canonical `from`→`to` direction (blocker→blocked; child→parent; the
+  symmetric/`related` stable order; duplicate→canonical). Nodes carry the same derived
+  `blocked` / `subtickets` as `<ticket-summary>`, computed from the full link graph.
+- `cycles` lists strongly-connected groups of the **`blocks`** sub-graph (parent cycles are
+  forbidden by SOLO-10; blocks cycles are detected and flagged, never fatal). `truncated` is
+  `true` if the node cap was hit. Errors: `not_found` (unknown `project`/`around`),
+  `validation` (unknown `type`, negative `depth`).
+
 ### Review memory (the learning review gate)
 
 A project carries `review_memory` — a list of `{ id, text, source, status, hits, ticket,

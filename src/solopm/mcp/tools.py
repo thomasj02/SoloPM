@@ -127,6 +127,23 @@ class SoloPMTools:
         return self.svc.compute_radar(project)
 
     @_safe
+    def graph(
+        self,
+        project: str | None = None,
+        around: str | None = None,
+        depth: int = 1,
+        active_only: bool = False,
+        types: list[str] | None = None,
+    ) -> dict:
+        return self.svc.build_graph(
+            project=project,
+            around=around,
+            depth=depth,
+            active_only=active_only,
+            types=types,
+        )
+
+    @_safe
     def list_review_memory(self, project: str, status: str | None = None) -> dict:
         return {"items": self.svc.list_review_memory(project, status=status)}
 

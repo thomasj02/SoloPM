@@ -7,6 +7,7 @@ import { api } from "./api";
 import { el, clearChildren, relativeTime } from "./util";
 import { renderMarkdown } from "./markdown";
 import { toastError, toastSuccess, assigneeBadge } from "./ui";
+import { openGraph } from "./graph";
 import type { Activity, LinkType, Relation, RelationKey, State, Ticket } from "./types";
 
 // Stable display order of the relation perspective groups (mirrors the backend).
@@ -301,7 +302,18 @@ function renderRelations(t: Ticket): HTMLElement {
   }
 
   const section = el("section", { class: "tp__section" }, [
-    el("h3", { class: "tp__sectionhead" }, `Relations (${rels.length})`),
+    el("div", { class: "tp__sectionrow" }, [
+      el("h3", { class: "tp__sectionhead" }, `Relations (${rels.length})`),
+      el(
+        "button",
+        {
+          class: "btn btn--ghost btn--sm",
+          title: "Open the dependency graph around this ticket",
+          onClick: () => void openGraph({ around: t.id, depth: 2 }),
+        },
+        "⛓ Graph",
+      ),
+    ]),
   ]);
   if (!rels.length) {
     section.append(el("div", { class: "muted tp__critempty" }, "No linked tickets yet."));
