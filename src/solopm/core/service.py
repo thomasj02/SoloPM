@@ -382,25 +382,32 @@ class Service:
             extra: dict = {}
             number = ticket.pr_number
             url = ticket.pr_url
+            # The branch handed to the client for cleanup must be the PR's own head, never a
+            # caller-supplied override on this move — deleting `refs/heads/<override>` after
+            # merging a different PR would destroy an unrelated branch. For a recorded PR the
+            # head is the branch it was opened from (``ticket.branch``); for a PR resolved by
+            # lookup it is the branch that matched ``find_pr``.
+            head = ticket.branch
             if number is None:
                 found = self.github.find_pr(repo, branch)
                 if found is None:
                     return {}, None  # nothing to merge/close
                 number, url = found.number, found.url
+                head = branch
                 extra = {"pr_number": found.number, "pr_url": found.url}
             if to_state == "done":
-                result = self.github.merge_pr(repo, number, branch)
+                result = self.github.merge_pr(repo, number, head)
                 if result.state == "queued":
                     # On a merge-queue-protected branch the PR was only enqueued, not
                     # landed — record that honestly instead of a false merge confirmation.
-                    note = self._queued_note(number, url, base, branch)
+                    note = self._queued_note(number, url, base, head)
                     return {**extra, "pr_state": "queued"}, note
                 note = self._merge_note(
-                    number, url, base, branch, result.sha, result.branch_deleted
+                    number, url, base, head, result.sha, result.branch_deleted
                 )
                 return {**extra, "pr_state": "merged"}, note
-            result = self.github.close_pr(repo, number, branch)
-            note = self._close_note(number, url, branch, result.branch_deleted)
+            result = self.github.close_pr(repo, number, head)
+            note = self._close_note(number, url, head, result.branch_deleted)
             return {**extra, "pr_state": "closed"}, note
         return {}, None
 

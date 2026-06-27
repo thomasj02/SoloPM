@@ -52,6 +52,7 @@ class FakeGitHub:
     def merge_pr(self, repo, number, branch=None):
         self._maybe_fail("merge_pr")
         self.calls.append(("merge", number))
+        self.merge_branch = branch  # the branch the client was asked to clean up
         if self.merge_state == "queued":
             return MergeResult("queued")
         return MergeResult("merged", self.merge_sha, branch_deleted=self.branch_deleted)
@@ -59,6 +60,7 @@ class FakeGitHub:
     def close_pr(self, repo, number, branch=None):
         self._maybe_fail("close_pr")
         self.calls.append(("close", number))
+        self.close_branch = branch
         return CloseResult(branch_deleted=self.branch_deleted)
 
 
@@ -789,6 +791,29 @@ def test_done_reaches_done_when_branch_delete_fails(tmp_path):
     note = _comments(svc, tid)[0]
     assert "retained" in note.lower()
     assert "deleted" not in note.lower()
+
+
+def test_done_cleanup_targets_recorded_pr_head_not_branch_override(tmp_path):
+    # [SOLO-16 gpt-review P1] A done move that supplies a spurious branch override must not
+    # redirect branch cleanup. The PR is resolved by the recorded pr_number, so the branch
+    # handed to the client for deletion must be the recorded PR head — never the override.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc, branch="solo-16-real")  # PR #17 opened on solo-16-real
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    svc.move_ticket(tid, "done", actor="human", branch="solo-16-bogus-override")
+    assert ("merge", 17) in gh.calls
+    assert gh.merge_branch == "solo-16-real"  # the recorded head, not the override
+
+
+def test_cancelled_cleanup_targets_recorded_pr_head_not_branch_override(tmp_path):
+    # [SOLO-16 gpt-review P1] Same guarantee for the close path.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc, branch="solo-16-real")  # PR #17 on solo-16-real
+    svc.move_ticket(tid, "cancelled", actor="claude", branch="solo-16-bogus-override")
+    assert ("close", 17) in gh.calls
+    assert gh.close_branch == "solo-16-real"
 
 
 def test_cancelled_reaches_cancelled_when_branch_delete_fails(tmp_path):
