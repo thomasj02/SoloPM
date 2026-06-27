@@ -305,6 +305,19 @@ class Service:
         workflow.validate_transition(ticket.state, state, actor=actor)
         if branch:
             validate_branch_name(branch)
+            # Once a PR has been opened, its branch is the PR head and is pinned: a differing
+            # branch on any later move is rejected. Otherwise the recorded branch could drift
+            # from the PR head, and a later done/cancelled would clean up `refs/heads/<that
+            # branch>` — an unrelated branch — while leaving the real PR head behind. (See
+            # SOLO-16: branch deletion is split out of `gh pr merge` and resolved from the
+            # recorded head, so that head must not drift.) Before a PR exists the branch is
+            # still free to be set/changed (e.g. an agent recording its worktree branch on
+            # → in-progress for the overlap radar).
+            if ticket.pr_number is not None and branch != ticket.branch:
+                raise ValidationError(
+                    "This ticket's branch is pinned to its open PR's head and cannot be "
+                    f"changed (PR #{ticket.pr_number} on branch {ticket.branch!r})."
+                )
         # All local validation (transition, branch, position/after) runs BEFORE any
         # external GitHub side effect, so a bad request can never push/merge/close a PR
         # and then fail the move.
@@ -388,44 +401,72 @@ class Service:
                     return {}, None  # nothing to merge/close
                 number, url = found.number, found.url
                 extra = {"pr_number": found.number, "pr_url": found.url}
+            # Branch cleanup must target the PR's *own* head, resolved fresh from GitHub —
+            # not any stored ticket field, which could have drifted from the real head (a
+            # caller override, or a row from before branch pinning). If the head can't be
+            # confirmed, ``cleanup_head`` is None and the client skips deletion rather than
+            # risk removing an unrelated branch. ``note_branch`` is display-only.
+            cleanup_head = self.github.pr_head(repo, number)
+            note_branch = cleanup_head or ticket.branch or branch
             if to_state == "done":
-                result = self.github.merge_pr(repo, number)
+                result = self.github.merge_pr(repo, number, cleanup_head)
                 if result.state == "queued":
                     # On a merge-queue-protected branch the PR was only enqueued, not
                     # landed — record that honestly instead of a false merge confirmation.
-                    note = self._queued_note(number, url, base, branch)
+                    note = self._queued_note(number, url, base, note_branch)
                     return {**extra, "pr_state": "queued"}, note
-                note = self._merge_note(number, url, base, branch, result.sha)
+                note = self._merge_note(
+                    number, url, base, note_branch, result.sha, result.branch_deleted
+                )
                 return {**extra, "pr_state": "merged"}, note
-            self.github.close_pr(repo, number)
-            note = self._close_note(number, url, branch)
+            result = self.github.close_pr(repo, number, cleanup_head)
+            note = self._close_note(number, url, note_branch, result.branch_deleted)
             return {**extra, "pr_state": "closed"}, note
         return {}, None
 
     @staticmethod
-    def _merge_note(number: int, url: str | None, base: str, branch: str, sha: str | None) -> str:
+    def _branch_cleanup_note(branch: str, branch_deleted: bool) -> str:
+        """How the merge/close note describes the best-effort branch cleanup outcome.
+
+        Honest either way: a branch checked out in a worktree (the normal SoloPM workflow)
+        is *retained*, not deleted, so the note must not claim a deletion that didn't happen.
+        """
+        if branch_deleted:
+            return f"Branch `{branch}` deleted."
+        return f"Branch `{branch}` retained (checked out in a worktree or cleanup failed)."
+
+    @staticmethod
+    def _merge_note(
+        number: int, url: str | None, base: str, branch: str, sha: str | None, branch_deleted: bool
+    ) -> str:
         """A self-contained record of a squash-merge for the ticket's activity log."""
         where = f" ({url})" if url else ""
         commit = f"squash commit `{sha}`" if sha else "squash-merged"
-        return (
-            f"Merged PR #{number}{where} into `{base}` — {commit}. "
-            f"Branch `{branch}` deleted."
-        )
+        cleanup = Service._branch_cleanup_note(branch, branch_deleted)
+        return f"Merged PR #{number}{where} into `{base}` — {commit}. {cleanup}"
 
     @staticmethod
     def _queued_note(number: int, url: str | None, base: str, branch: str) -> str:
-        """A record that a PR was added to GitHub's merge queue rather than merged yet."""
+        """A record that a PR was added to GitHub's merge queue rather than merged yet.
+
+        The gating merge no longer carries ``--delete-branch`` (it would abort on a branch
+        held by a worktree), and SoloPM gets no callback when the queue finally lands the
+        merge — so this note does not promise a SoloPM-driven branch deletion. Branch `{branch}`
+        is cleaned up by GitHub's auto-delete-on-merge (if enabled) or manually afterwards.
+        """
         where = f" ({url})" if url else ""
         return (
             f"PR #{number}{where} was added to the merge queue for `{base}` — it will "
-            f"squash-merge and delete branch `{branch}` once required checks pass."
+            f"squash-merge once required checks pass. Branch `{branch}` remains until then "
+            f"(removed by GitHub auto-delete if enabled, otherwise clean up manually)."
         )
 
     @staticmethod
-    def _close_note(number: int, url: str | None, branch: str) -> str:
+    def _close_note(number: int, url: str | None, branch: str, branch_deleted: bool) -> str:
         """A record of a PR closed when a ticket is cancelled."""
         where = f" ({url})" if url else ""
-        return f"Closed PR #{number}{where}. Branch `{branch}` deleted."
+        cleanup = Service._branch_cleanup_note(branch, branch_deleted)
+        return f"Closed PR #{number}{where}. {cleanup}"
 
     def reorder_ticket(self, ticket_id: str, *, after: str | None = None, actor: str = "human") -> Ticket:
         """Reposition a ticket within its current column (cosmetic; no state change).
