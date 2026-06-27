@@ -207,7 +207,9 @@ class GitHub:
         # let the merge command be the gate.
         pre_state = self._pr_state(repo, number)
         if pre_state == "MERGED":
-            deleted = self._delete_branch_best_effort(repo, branch)
+            # [SOLO-18] Never delete the local branch on a merge — it's checked out in the
+            # developer's worktree, which SoloPM leaves in place. The remote is still cleaned.
+            deleted = self._delete_branch_best_effort(repo, branch, delete_local=False)
             return MergeResult("merged", self._merge_commit_oid(repo, number), deleted)
         if pre_state == "CLOSED":
             raise GitHubError(f"PR #{number} is CLOSED, not open — cannot merge.")
@@ -226,7 +228,8 @@ class GitHub:
 
         # A readback that positively shows the PR merged is the strongest signal.
         if oid or state == "MERGED":
-            deleted = self._delete_branch_best_effort(repo, branch)
+            # [SOLO-18] Local branch kept (held by the worktree); remote still cleaned up.
+            deleted = self._delete_branch_best_effort(repo, branch, delete_local=False)
             return MergeResult("merged", str(oid) if oid else None, deleted)
         # Otherwise trust an explicit "queued" signal — from gh's output or a still-open
         # readback. The branch is left for the queue to delete once the merge lands.
@@ -275,7 +278,9 @@ class GitHub:
         oid = (self._pr_json(repo, number, "state,mergeCommit").get("mergeCommit") or {}).get("oid")
         return str(oid) if oid else None
 
-    def _delete_branch_best_effort(self, repo: str, branch: str | None) -> bool:
+    def _delete_branch_best_effort(
+        self, repo: str, branch: str | None, *, delete_local: bool = True
+    ) -> bool:
         """Delete a merged/closed branch locally and on the remote, swallowing failures.
 
         Returns True only if the **local** branch was actually removed. Branch cleanup must
@@ -283,9 +288,14 @@ class GitHub:
         so that even a timeout or missing command (which :meth:`_run` raises as
         ``GitHubError`` regardless of ``check``) is logged, not propagated — otherwise a
         cleanup hang after a successful ``gh pr merge``/``gh pr close`` would abort the
-        transition and leave SoloPM out of sync with GitHub. A branch checked out in a
-        worktree (the normal SoloPM workflow) can't be deleted locally — that case is
-        detected and skipped rather than producing a noisy expected error.
+        transition and leave SoloPM out of sync with GitHub.
+
+        ``delete_local=False`` skips the local ``git branch -D`` entirely (the remote delete
+        still runs). The → done path uses this [SOLO-18]: a ticket's local branch is checked
+        out in the developer's worktree, so deleting it can't succeed and isn't wanted —
+        SoloPM leaves the branch (and its worktree) in place for the developer to remove.
+        With ``delete_local=True`` (the → cancelled path), a branch a worktree still has
+        checked out is detected and skipped rather than producing a noisy expected error.
         """
         if not branch:
             return False
@@ -302,8 +312,12 @@ class GitHub:
         remote_ok = self._remote_branch_gone(remote)
         if not remote_ok:
             logger.warning("Best-effort delete of remote branch %s failed: %s", branch, _detail(remote))
-        # Local delete: skip a branch that a worktree has checked out (it can't be removed,
-        # and that is expected — SoloPM keeps the worktree until the human cleans it up).
+        # Local delete: skipped outright on → done (the branch lives in the developer's
+        # worktree), and skipped on → cancelled when a worktree still has it checked out.
+        # Either way SoloPM keeps the local branch until the developer tears the worktree down.
+        if not delete_local:
+            logger.info("Leaving local branch %s in place (held by its worktree).", branch)
+            return False
         if self._branch_in_worktree(repo, branch):
             logger.info(
                 "Local branch %s is checked out in a worktree; leaving it in place.", branch
