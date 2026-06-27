@@ -161,4 +161,28 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
         """Remove an acceptance criterion from a ticket."""
         return tools.remove_criterion(ticket_id, criterion_id)
 
+    @mcp.tool()
+    def link_ticket(ticket_id: str, type: str, other_id: str) -> dict:
+        """Relate two tickets. `type` is one of blocks | related | duplicate | parent, read
+        as "<ticket_id> <type> <other_id>": blocks → ticket_id blocks other_id; duplicate →
+        ticket_id is a duplicate of other_id; parent → other_id becomes ticket_id's parent
+        (ticket_id is the sub-ticket); related is symmetric. The inverse shows on the other
+        ticket. Re-linking an identical pair is a no-op (deduped). Rejects self-links, a
+        second parent, and parent cycles. Relations appear in show_ticket's `relations`."""
+        return tools.link_ticket(ticket_id, type, other_id)
+
+    @mcp.tool()
+    def unlink_ticket(
+        ticket_id: str,
+        other_id: str,
+        type: str | None = None,
+        direction: str | None = None,
+    ) -> dict:
+        """Remove the relationship(s) between two tickets. Pass `type` to remove only that
+        relation type; omit it to remove every link between the pair. `direction` ('out' =
+        ticket_id is the stored from, 'in' = it is the to) pins one orientation — only needed
+        to disambiguate a pair that holds opposing directional links (e.g. A blocks B and B
+        blocks A)."""
+        return tools.unlink_ticket(ticket_id, other_id, type=type, direction=direction)
+
     return mcp

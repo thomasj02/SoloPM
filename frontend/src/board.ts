@@ -134,6 +134,14 @@ function renderCard(t: TicketSummary): HTMLElement {
     el("div", { class: "card__title" }, t.title || "(untitled)"),
     el("div", { class: "card__meta" }, [
       assigneeBadge(t.assignee),
+      t.blocked ? el("span", { class: "card__blocked", title: "Blocked by an open ticket" }, "Blocked") : null,
+      t.subtickets && t.subtickets.total
+        ? el(
+            "span",
+            { class: "card__subs", title: `${t.subtickets.done}/${t.subtickets.total} sub-tickets done` },
+            `${t.subtickets.done}/${t.subtickets.total}`,
+          )
+        : null,
       t.pr ? el("span", { class: `card__pr card__pr--${t.pr.state}`, title: `PR #${t.pr.number} · ${t.pr.state}` }, `#${t.pr.number}`) : null,
       t.comment_count ? el("span", { class: "card__comments", title: `${t.comment_count} comment(s)` }, `${t.comment_count}`) : null,
       ageBadge(t),

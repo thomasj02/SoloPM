@@ -174,6 +174,70 @@ def test_radar_cli(wired):
     assert json.loads(r.output) == {"overlaps": []}
 
 
+def test_links_roundtrip_via_cli(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "a")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "b")
+    # link SOLO-1 blocks SOLO-2 (attributed to claude)
+    r = invoke("ticket", "link", "SOLO-1", "blocks", "SOLO-2", "--agent", "claude", "--json")
+    assert r.exit_code == 0, r.output
+    body = json.loads(r.output)
+    assert body["relations"][0]["key"] == "blocks"
+    assert body["relations"][0]["ticket"]["id"] == "SOLO-2"
+    # the inverse appears on SOLO-2 in show
+    r = invoke("ticket", "show", "SOLO-2", "--json")
+    assert json.loads(r.output)["relations"][0]["key"] == "blocked_by"
+    # unlink (order-independent)
+    r = invoke("ticket", "unlink", "SOLO-2", "SOLO-1", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["relations"] == []
+
+
+def test_link_self_link_rejected_via_cli(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "a")
+    r = invoke("ticket", "link", "SOLO-1", "blocks", "SOLO-1", "--json")
+    assert r.exit_code == 1
+    assert json.loads(r.output)["error"]["code"] == "validation"
+
+
+def test_unlink_type_filter_via_cli(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "a")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "b")
+    invoke("ticket", "link", "SOLO-1", "blocks", "SOLO-2")
+    invoke("ticket", "link", "SOLO-1", "related", "SOLO-2")
+    r = invoke("ticket", "unlink", "SOLO-1", "SOLO-2", "--type", "blocks", "--json")
+    assert r.exit_code == 0, r.output
+    keys = {rel["key"] for rel in json.loads(r.output)["relations"]}
+    assert keys == {"related"}
+
+
+def test_unlink_direction_preserves_opposing_link_via_cli(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "a")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "b")
+    invoke("ticket", "link", "SOLO-1", "blocks", "SOLO-2")  # SOLO-1 -> SOLO-2
+    invoke("ticket", "link", "SOLO-2", "blocks", "SOLO-1")  # SOLO-2 -> SOLO-1
+    # Remove only SOLO-1's outgoing blocks; the opposing link must survive.
+    r = invoke("ticket", "unlink", "SOLO-1", "SOLO-2", "--type", "blocks",
+               "--direction", "out", "--json")
+    assert r.exit_code == 0, r.output
+    keys = {rel["key"] for rel in json.loads(r.output)["relations"]}
+    assert keys == {"blocked_by"}
+
+
+def test_human_show_renders_relations(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "Alpha")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "Beta")
+    invoke("ticket", "link", "SOLO-1", "blocks", "SOLO-2")
+    r = invoke("ticket", "show", "SOLO-1")
+    assert r.exit_code == 0
+    assert "Relations" in r.output
+    assert "SOLO-2" in r.output
+
+
 def test_criteria_roundtrip_via_cli(wired):
     invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
     invoke("ticket", "create", "--project", "SOLO", "--title", "x")

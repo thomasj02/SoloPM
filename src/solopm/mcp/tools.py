@@ -159,3 +159,19 @@ class SoloPMTools:
     @_safe
     def remove_criterion(self, ticket_id: str, criterion_id: str) -> dict:
         return self.svc.remove_criterion(ticket_id, criterion_id, actor=self.agent).to_dict()
+
+    @_safe
+    def link_ticket(self, ticket_id: str, type: str, other_id: str) -> dict:
+        return self.svc.link_tickets(ticket_id, type, other_id, actor=self.agent).to_dict()
+
+    @_safe
+    def unlink_ticket(
+        self,
+        ticket_id: str,
+        other_id: str,
+        type: str | None = None,
+        direction: str | None = None,
+    ) -> dict:
+        return self.svc.unlink_tickets(
+            ticket_id, other_id, type=type, direction=direction, actor=self.agent
+        ).to_dict()

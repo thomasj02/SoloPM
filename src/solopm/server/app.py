@@ -33,6 +33,7 @@ from .schemas import (
     CommentCreate,
     CriterionCreate,
     CriterionPatch,
+    LinkCreate,
     MoveRequest,
     ReviewMemoryCreate,
     ReviewMemoryPatch,
@@ -347,6 +348,32 @@ def create_app(
         actor: str = Depends(get_actor),
     ) -> dict:
         return svc.remove_criterion(ticket_id, criterion_id, actor=actor).to_dict()
+
+    # --- ticket relationships (SOLO-10) -------------------------------------
+
+    @app.post("/api/tickets/{ticket_id}/links", status_code=201)
+    def link_ticket(
+        ticket_id: str,
+        payload: LinkCreate,
+        svc: Service = Depends(get_service),
+        actor: str = Depends(get_actor),
+    ) -> dict:
+        return svc.link_tickets(
+            ticket_id, payload.type, payload.other, actor=actor
+        ).to_dict()
+
+    @app.delete("/api/tickets/{ticket_id}/links/{other_id}")
+    def unlink_ticket(
+        ticket_id: str,
+        other_id: str,
+        type: str | None = None,
+        direction: str | None = None,
+        svc: Service = Depends(get_service),
+        actor: str = Depends(get_actor),
+    ) -> dict:
+        return svc.unlink_tickets(
+            ticket_id, other_id, type=type, direction=direction, actor=actor
+        ).to_dict()
 
     # --- static web app (mounted last so /api wins) -------------------------
 
