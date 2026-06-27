@@ -7,6 +7,7 @@ import type {
   Project,
   ProjectCreate,
   ProjectPatch,
+  ProjectStatus,
   RadarReport,
   ReviewMemoryItem,
   State,
@@ -81,6 +82,8 @@ export const api = {
   projects: () => request<{ projects: Project[] }>("GET", "/projects"),
   createProject: (body: ProjectCreate) => request<Project>("POST", "/projects", body),
   project: (key: string) => request<Project>("GET", `/projects/${enc(key)}`),
+  projectStatus: (key: string) =>
+    request<ProjectStatus>("GET", `/projects/${enc(key)}/status`),
   patchProject: (key: string, body: ProjectPatch) =>
     request<Project>("PATCH", `/projects/${enc(key)}`, body),
 

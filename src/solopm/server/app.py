@@ -152,6 +152,11 @@ def create_app(
     def get_project(key: str, svc: Service = Depends(get_service)) -> dict:
         return svc.get_project(key).to_dict()
 
+    @app.get("/api/projects/{key}/status")
+    def project_status(key: str, svc: Service = Depends(get_service)) -> dict:
+        # Live git/PR health for the board header: open PR count + unpushed commit count.
+        return svc.project_status(key)
+
     @app.patch("/api/projects/{key}")
     def patch_project(
         key: str,
