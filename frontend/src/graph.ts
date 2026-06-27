@@ -175,6 +175,7 @@ async function reload(): Promise<void> {
     q.project = state.currentProject;
   }
   const token = ++reloadToken;
+  data = null; // drop the previous graph so a failed load can't be resurrected by a chip/Fit
   try {
     const result = await api.graph(q);
     if (token !== reloadToken) return; // a newer open/reload superseded this request

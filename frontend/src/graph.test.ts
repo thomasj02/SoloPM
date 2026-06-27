@@ -100,6 +100,19 @@ describe("dependency graph render", () => {
     expect(graphMock).toHaveBeenCalledWith(expect.objectContaining({ around: "DEMO-1", depth: 2 }));
   });
 
+  it("does not resurrect a stale graph after a failed reload", async () => {
+    await openGraph({ project: "DEMO" });
+    expect(document.querySelectorAll(".graph__node").length).toBe(4);
+    graphMock.mockRejectedValueOnce(new Error("boom"));
+    document.querySelector<HTMLButtonElement>(".chip--active-only")?.click(); // triggers a failing reload
+    await new Promise((r) => setTimeout(r, 0));
+    expect(document.querySelector(".graph__center.tp__error")).toBeTruthy(); // error view shown
+    expect(document.querySelectorAll(".graph__node").length).toBe(0);
+    // a later type-chip toggle must not re-render the old (now-cleared) graph
+    document.querySelector<HTMLButtonElement>('.chip[data-type="blocks"]')?.click();
+    expect(document.querySelectorAll(".graph__node").length).toBe(0);
+  });
+
   it("drops a stale response when a newer request supersedes it", async () => {
     let resolveStale!: (g: Graph) => void;
     const stale = new Promise<Graph>((r) => {
