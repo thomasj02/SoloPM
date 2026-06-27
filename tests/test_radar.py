@@ -151,6 +151,24 @@ def test_queued_done_ticket_still_reported(tmp_path):
     assert by_branch["solo-2-b"] is None
 
 
+def test_active_ticket_wins_a_branch_shared_with_a_done_ticket(tmp_path):
+    # Branch names aren't unique until a PR pins them: a branch reused by live work must
+    # stay in the radar even when an older done ticket also recorded it.
+    gh = FakeRadarGit(
+        [Worktree("/wt/a", "solo-1-a"), Worktree("/wt/b", "solo-2-b")],
+        {"/wt/a": {"src/y.py"}, "/wt/b": {"src/y.py"}},
+    )
+    svc = _svc(tmp_path, gh)
+    stale = svc.create_ticket(project="SOLO", title="stale")
+    _drive_to(svc, stale.id, "done", branch="solo-1-a")  # done, no PR → inactive on solo-1-a
+    live = svc.create_ticket(project="SOLO", title="live")
+    svc.move_ticket(live.id, "in-progress", branch="solo-1-a", actor="human")  # reuses solo-1-a
+    ov = svc.compute_radar("SOLO")["overlaps"][0]
+    by_branch = {ov["a"]["branch"]: ov["a"]["ticket"], ov["b"]["branch"]: ov["b"]["ticket"]}
+    assert by_branch["solo-1-a"] == live.id  # the active ticket wins the shared branch
+    assert by_branch["solo-2-b"] is None
+
+
 def test_real_adapter_parses_worktrees_and_changed_files(monkeypatch):
     from solopm.core.github import GitHub
 

@@ -706,6 +706,10 @@ class Service:
                     by_branch[t.branch] = t.id
                 else:
                     inactive_branches.add(t.branch)
+            # An active ticket wins a shared branch: branch names aren't unique until a PR
+            # pins them, so a branch reused by live work must not be skipped just because an
+            # older done/cancelled/backlogged ticket also recorded it.
+            inactive_branches -= set(by_branch)
             entries: list[dict] = []
             try:
                 for wt in self.github.list_worktrees(proj.repo):
