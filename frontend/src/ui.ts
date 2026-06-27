@@ -17,10 +17,10 @@ export type ToastKind = "info" | "success" | "error";
 
 /**
  * Show a toast. It stays visible until the user dismisses it (clicks ×) or the
- * returned dismiss fn is called. Pass a non-zero `timeout` (ms) to opt a
- * specific toast into auto-dismiss.
+ * returned dismiss fn is called — toasts never auto-dismiss, so the user always
+ * has time to read them.
  */
-export function toast(message: string, kind: ToastKind = "info", timeout = 0): () => void {
+export function toast(message: string, kind: ToastKind = "info"): () => void {
   const node = el("div", { class: `toast toast--${kind}`, role: "status" });
   const dismiss = () => {
     node.classList.add("toast--out");
@@ -31,7 +31,6 @@ export function toast(message: string, kind: ToastKind = "info", timeout = 0): (
     el("button", { class: "toast__close", title: "Dismiss", "aria-label": "Dismiss", onClick: dismiss }, "×"),
   );
   host().append(node);
-  if (timeout) setTimeout(dismiss, timeout);
   return dismiss;
 }
 

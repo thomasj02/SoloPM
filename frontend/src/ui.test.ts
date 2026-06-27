@@ -35,6 +35,13 @@ describe("toast persistence", () => {
     expect(toastNodes().length).toBe(1);
   });
 
+  it("toast() has no auto-dismiss escape hatch — it persists regardless", () => {
+    vi.useFakeTimers();
+    toast("no timeout", "info");
+    vi.advanceTimersByTime(60_000);
+    expect(toastNodes().length).toBe(1);
+  });
+
   it("removes the toast when the close button is clicked", () => {
     vi.useFakeTimers();
     toast("dismiss me");
