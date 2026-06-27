@@ -18,6 +18,10 @@ class FakeRadarGit:
     def worktree_changed_files(self, worktree_path: str, base: str) -> set[str]:
         return set(self._files.get(worktree_path, set()))
 
+    def find_pr(self, repo: str, branch: str):
+        # No PR to merge/close: lets a → done transition short-circuit in tests.
+        return None
+
 
 def _svc(tmp_path, github, repo="/repo", db="solopm.db"):
     store = Store(tmp_path / db)
@@ -75,6 +79,45 @@ def test_overlap_annotated_with_active_ticket(tmp_path):
     ov = svc.compute_radar("SOLO")["overlaps"][0]
     by_branch = {ov["a"]["branch"]: ov["a"]["ticket"], ov["b"]["branch"]: ov["b"]["ticket"]}
     assert by_branch["solo-1-a"] == t.id  # mapped to the active ticket
+    assert by_branch["solo-2-b"] is None  # unmapped branch still reported
+
+
+def _drive_to(svc, ticket_id, target, *, branch):
+    """Walk a ticket from in-progress up to ``target`` along the legal path."""
+    svc.move_ticket(ticket_id, "in-progress", branch=branch, actor="human")
+    path = ["in-ai-review", "in-human-review", "done"]
+    for state in path:
+        svc.move_ticket(ticket_id, state, actor="human")
+        if state == target:
+            break
+
+
+def test_done_ticket_worktree_excluded(tmp_path):
+    # A merged ticket whose worktree lingers must not raise a conflict against active work.
+    gh = FakeRadarGit(
+        [Worktree("/wt/a", "solo-1-a"), Worktree("/wt/b", "solo-2-b")],
+        {"/wt/a": {"src/y.py"}, "/wt/b": {"src/y.py"}},
+    )
+    svc = _svc(tmp_path, gh)
+    active = svc.create_ticket(project="SOLO", title="active")
+    svc.move_ticket(active.id, "in-progress", branch="solo-1-a", actor="human")
+    merged = svc.create_ticket(project="SOLO", title="merged")
+    _drive_to(svc, merged.id, "done", branch="solo-2-b")
+    assert svc.compute_radar("SOLO")["overlaps"] == []
+
+
+def test_in_human_review_ticket_is_active(tmp_path):
+    # "Ready for human review" still counts as active work for the radar.
+    gh = FakeRadarGit(
+        [Worktree("/wt/a", "solo-1-a"), Worktree("/wt/b", "solo-2-b")],
+        {"/wt/a": {"src/y.py"}, "/wt/b": {"src/y.py"}},
+    )
+    svc = _svc(tmp_path, gh)
+    t = svc.create_ticket(project="SOLO", title="under review")
+    _drive_to(svc, t.id, "in-human-review", branch="solo-1-a")
+    ov = svc.compute_radar("SOLO")["overlaps"][0]
+    by_branch = {ov["a"]["branch"]: ov["a"]["ticket"], ov["b"]["branch"]: ov["b"]["ticket"]}
+    assert by_branch["solo-1-a"] == t.id  # in-human-review is annotated as active
     assert by_branch["solo-2-b"] is None  # unmapped branch still reported
 
 

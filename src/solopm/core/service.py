@@ -669,7 +669,7 @@ class Service:
 
     # --- overlap / conflict radar -------------------------------------------
 
-    _RADAR_ACTIVE_STATES = frozenset({"in-progress", "in-ai-review"})
+    _RADAR_ACTIVE_STATES = frozenset({"in-progress", "in-ai-review", "in-human-review"})
 
     def compute_radar(self, project: str | None = None) -> dict:
         """Warn (don't block) when active worktrees touch the same files.
@@ -677,23 +677,35 @@ class Service:
         Reads each project repo's live worktrees straight from git, computes each one's
         changed-file set vs. the master branch (committed + uncommitted), and reports every
         pair whose sets intersect. A branch is annotated with the active ticket that records
-        it; unmapped branches are still reported. A no-op without a git client / repo, so it
-        degrades gracefully rather than erroring.
+        it; branches whose ticket has gone inactive (done/merged, cancelled, or back in the
+        backlog) are skipped so a lingering worktree can't conflict against live work, while
+        genuinely unmapped branches (no ticket at all) are still reported. A no-op without a
+        git client / repo, so it degrades gracefully rather than erroring.
         """
         projects = [self.get_project(project)] if project else self.list_projects()
         overlaps: list[dict] = []
         for proj in projects:
             if self.github is None or not proj.repo:
                 continue
-            by_branch = {
-                t.branch: t.id
-                for t in self.list_tickets(project=proj.key)
-                if t.branch and t.state in self._RADAR_ACTIVE_STATES
-            }
+            # A branch is mapped to its ticket only while that ticket is active. Branches
+            # whose ticket has gone inactive (done/merged, cancelled, or sent back to the
+            # backlog) are recorded separately so their lingering worktrees can be skipped —
+            # a merged ticket's leftover worktree must not raise a conflict against live work.
+            by_branch: dict[str, str] = {}
+            inactive_branches: set[str] = set()
+            for t in self.list_tickets(project=proj.key):
+                if not t.branch:
+                    continue
+                if t.state in self._RADAR_ACTIVE_STATES:
+                    by_branch[t.branch] = t.id
+                else:
+                    inactive_branches.add(t.branch)
             entries: list[dict] = []
             try:
                 for wt in self.github.list_worktrees(proj.repo):
                     if not wt.branch or wt.branch == proj.master_branch:
+                        continue
+                    if wt.branch in inactive_branches:
                         continue
                     files = self.github.worktree_changed_files(wt.path, proj.master_branch)
                     if files:
