@@ -249,7 +249,7 @@ def _comments(svc, tid):
 
 def test_done_appends_merge_confirmation_comment(tmp_path):
     # [SOLO-11] On done with a recorded PR, a confirmation comment naming the PR #,
-    # URL, squash sha, base branch, and branch deletion is appended.
+    # URL, squash sha, base branch, and the (retained) branch is appended.
     gh = FakeGitHub()
     svc = _svc(tmp_path, github=gh)
     tid, _ = _to_ai_review(svc)  # PR #17 on branch solo-9-feature
@@ -263,8 +263,10 @@ def test_done_appends_merge_confirmation_comment(tmp_path):
     assert "/pull/17" in note  # the PR URL
     assert "1a2b3c4d5e6f" in note  # the squash commit sha
     assert "main" in note  # the base branch
-    assert "solo-9-feature" in note  # the deleted branch
-    assert "deleted" in note.lower()
+    assert "solo-9-feature" in note  # the branch, retained for its worktree
+    # [SOLO-18] The local branch is left in place for its worktree, never claimed deleted.
+    assert "left in place" in note.lower()
+    assert "deleted" not in note.lower()
 
 
 def test_merge_confirmation_comment_attributed_to_actor(tmp_path):
@@ -569,22 +571,24 @@ def _gh_with_branch_fake(
     return fake_run
 
 
-def test_merge_pr_branch_delete_failure_is_nonfatal(tmp_path, monkeypatch, caplog):
-    # [SOLO-16 c1/c4] The squash-merge lands; a failing local branch delete must NOT abort —
-    # report merged with branch_deleted=False, and warn (don't raise).
+def test_merge_pr_remote_delete_failure_is_nonfatal(tmp_path, monkeypatch, caplog):
+    # [SOLO-16 c1/c4 + SOLO-18] The squash-merge lands; a failing *remote* branch delete must
+    # NOT abort — report merged with branch_deleted=False, and warn (don't raise). The local
+    # branch is never touched on → done (it's held by the worktree).
     import logging
 
     from solopm.core.github import GitHub
 
     gh = GitHub()
     calls = []
-    monkeypatch.setattr(gh, "_run", _gh_with_branch_fake(local_delete_rc=1, record=calls))
+    monkeypatch.setattr(gh, "_run", _gh_with_branch_fake(remote_delete_rc=1, record=calls))
     with caplog.at_level(logging.WARNING):
         result = gh.merge_pr("/repo", 17, branch="solo-16-x")
     assert result == MergeResult("merged", "abc123", branch_deleted=False)
     assert ["gh", "pr", "merge", "17", "--squash"] in calls
     assert not any("--delete-branch" in a for a in calls)
-    assert any("solo-16-x" in rec.message for rec in caplog.records)  # warned
+    assert not any(a[:2] == ["git", "branch"] for a in calls)  # local branch never deleted
+    assert any("solo-16-x" in rec.message for rec in caplog.records)  # warned on remote failure
 
 
 def test_merge_pr_skips_local_delete_for_worktree_branch(tmp_path, monkeypatch):
@@ -602,17 +606,20 @@ def test_merge_pr_skips_local_delete_for_worktree_branch(tmp_path, monkeypatch):
     assert not any(a[:2] == ["git", "branch"] for a in calls)  # local delete skipped
 
 
-def test_merge_pr_deletes_branch_when_not_in_worktree(tmp_path, monkeypatch):
-    # [SOLO-16] The happy path still cleans up: branch not checked out anywhere → deleted,
-    # branch_deleted=True.
+def test_merge_pr_never_deletes_local_branch_on_done(tmp_path, monkeypatch):
+    # [SOLO-18] The → done merge must NEVER delete the local branch: it's checked out in the
+    # developer's worktree, which SoloPM leaves in place. Even with NO worktree reported (the
+    # detection can be unreliable), no `git branch -D` is attempted and branch_deleted is
+    # False. The remote branch is still cleaned up — it never conflicts with the worktree.
     from solopm.core.github import GitHub
 
     gh = GitHub()
     calls = []
-    monkeypatch.setattr(gh, "_run", _gh_with_branch_fake(record=calls))
-    result = gh.merge_pr("/repo", 17, branch="solo-16-x")
-    assert result == MergeResult("merged", "abc123", branch_deleted=True)
-    assert ["git", "branch", "-D", "solo-16-x"] in calls
+    monkeypatch.setattr(gh, "_run", _gh_with_branch_fake(record=calls))  # no worktree reported
+    result = gh.merge_pr("/repo", 17, branch="solo-18-x")
+    assert result == MergeResult("merged", "abc123", branch_deleted=False)
+    assert not any(a[:2] == ["git", "branch"] for a in calls)  # local delete never attempted
+    assert any(a[:2] == ["git", "push"] for a in calls)  # remote cleanup still happens
 
 
 def test_close_pr_idempotent_against_already_closed(tmp_path, monkeypatch):
@@ -706,15 +713,18 @@ def test_merge_pr_remote_delete_failure_reports_not_deleted(tmp_path, monkeypatc
 def test_local_branch_already_gone_counts_as_deleted(tmp_path, monkeypatch):
     # [SOLO-16 gpt-review P3] A `git branch -D` on an already-absent local branch (a cleanup
     # retry, or it was deleted manually) exits non-zero with "branch not found". That is a
-    # clean state, so report the branch deleted rather than falsely "retained".
+    # clean state, so report the branch deleted rather than falsely "retained". Exercised via
+    # close_pr (→ cancelled), the path that still deletes the local branch — → done never does
+    # (SOLO-18).
     from solopm.core.github import GitHub
 
     gh = GitHub()
     monkeypatch.setattr(gh, "_run", _gh_with_branch_fake(
+        pre_state="OPEN",
         local_delete_rc=1,
         local_delete_stderr="error: branch 'solo-16-x' not found.",
     ))
-    result = gh.merge_pr("/repo", 17, branch="solo-16-x")
+    result = gh.close_pr("/repo", 17, branch="solo-16-x")
     assert result.branch_deleted is True
 
 
@@ -760,19 +770,22 @@ def test_cleanup_skipped_when_head_unconfirmed(tmp_path):
     assert gh.merge_branch is None  # but no branch handed to cleanup
 
 
-def test_merge_pr_remote_already_gone_counts_as_deleted(tmp_path, monkeypatch):
+def test_remote_branch_already_gone_counts_as_deleted(tmp_path, monkeypatch):
     # [SOLO-16 gpt-review P2] When the remote branch is already absent (e.g. repo-level
     # auto-delete-on-merge removed it), `git push --delete` exits non-zero with "remote ref
-    # does not exist". That is not a failure — the branch IS gone, so report deleted.
+    # does not exist". That is not a failure — the branch IS gone, so report deleted. Exercised
+    # via close_pr (→ cancelled): → done keeps the local branch and never reports it deleted
+    # (SOLO-18), so the "fully deleted" outcome only arises on the cancel path.
     from solopm.core.github import GitHub
 
     gh = GitHub()
     monkeypatch.setattr(gh, "_run", _gh_with_branch_fake(
+        pre_state="OPEN",
         remote_delete_rc=1,
         remote_delete_stderr="error: unable to delete 'solo-16-x': remote ref does not exist",
         local_delete_rc=0,
     ))
-    result = gh.merge_pr("/repo", 17, branch="solo-16-x")
+    result = gh.close_pr("/repo", 17, branch="solo-16-x")
     assert result.branch_deleted is True
 
 
@@ -858,9 +871,9 @@ def test_done_reaches_done_when_branch_delete_fails(tmp_path):
     done = svc.move_ticket(tid, "done", actor="human")
     assert done.state == "done"
     assert done.pr_state == "merged"
-    # The merge note is honest about the retained branch rather than claiming deletion.
+    # [SOLO-18] The merge note is honest about the retained branch rather than claiming deletion.
     note = _comments(svc, tid)[0]
-    assert "retained" in note.lower()
+    assert "left in place" in note.lower()
     assert "deleted" not in note.lower()
 
 
