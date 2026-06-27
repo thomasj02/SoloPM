@@ -230,9 +230,12 @@ class GitHub:
         # readback. The branch is left for the queue to delete once the merge lands.
         if enqueued or state == "OPEN":
             return MergeResult("queued")
-        # Readback inconclusive and gh didn't mention a queue → assume the squash-merge landed.
-        deleted = self._delete_branch_best_effort(repo, branch)
-        return MergeResult("merged", None, deleted)
+        # Readback inconclusive and gh didn't mention a queue → optimistically report the
+        # squash-merge landed (pre-existing behaviour), but do NOT delete the branch: without
+        # a positive MERGED readback the PR may still be open (e.g. auto-merge enabled with
+        # checks pending), and deleting its head branch would break it. Cleanup only runs on
+        # a confirmed merge.
+        return MergeResult("merged", None)
 
     def _pr_json(self, repo: str, number: int, fields: str) -> dict:
         """Read ``gh pr view <n> --json <fields>`` as a dict; ``{}`` if it can't be read.

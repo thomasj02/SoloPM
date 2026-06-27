@@ -639,6 +639,23 @@ def test_close_pr_branch_delete_failure_is_nonfatal(tmp_path, monkeypatch):
     assert result.branch_deleted is False
 
 
+def test_merge_pr_inconclusive_readback_does_not_delete_branch(tmp_path, monkeypatch):
+    # [SOLO-16 gpt-review P1] `gh pr merge` exited 0 but the readback flaked (empty), and gh
+    # didn't mention a queue. We still optimistically report merged (pre-existing behaviour),
+    # but must NOT delete the branch — the PR may still be open (auto-merge pending) and
+    # deleting its head branch would break it. Cleanup only runs on a confirmed MERGED.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    calls = []
+    monkeypatch.setattr(gh, "_run", _gh_with_branch_fake(readback="{}", record=calls))
+    result = gh.merge_pr("/repo", 17, branch="solo-16-x")
+    assert result.state == "merged"
+    assert result.branch_deleted is False
+    assert not any(a[:2] == ["git", "push"] for a in calls)  # no remote delete
+    assert not any(a[:2] == ["git", "branch"] for a in calls)  # no local delete
+
+
 def test_remote_branch_delete_is_fully_qualified(tmp_path, monkeypatch):
     # [SOLO-16 gpt-review P1] A bare `git push origin --delete <name>` resolves to a same-
     # named TAG when the branch is already gone, deleting an unrelated tag (data loss). The
