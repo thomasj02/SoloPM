@@ -1,6 +1,6 @@
 """Overlap / conflict radar across concurrent worktrees (SOLO-9)."""
 
-from solopm.core.github import Worktree
+from solopm.core.github import MergeResult, PR, Worktree
 from solopm.core.service import Service
 from solopm.core.store import Store
 
@@ -17,6 +17,23 @@ class FakeRadarGit:
 
     def worktree_changed_files(self, worktree_path: str, base: str) -> set[str]:
         return set(self._files.get(worktree_path, set()))
+
+    def find_pr(self, repo: str, branch: str):
+        # No PR to merge/close: lets a → done transition short-circuit in tests.
+        return None
+
+
+class QueuedMergeRadarGit(FakeRadarGit):
+    """A → done leaves the PR merely enqueued (merge-queue-protected branch)."""
+
+    def find_pr(self, repo: str, branch: str):
+        return PR(number=99, url="http://pr/99", state="open")
+
+    def pr_head(self, repo: str, number: int):
+        return "head-sha"
+
+    def merge_pr(self, repo: str, number: int, branch=None):
+        return MergeResult(state="queued")
 
 
 def _svc(tmp_path, github, repo="/repo", db="solopm.db"):
@@ -76,6 +93,80 @@ def test_overlap_annotated_with_active_ticket(tmp_path):
     by_branch = {ov["a"]["branch"]: ov["a"]["ticket"], ov["b"]["branch"]: ov["b"]["ticket"]}
     assert by_branch["solo-1-a"] == t.id  # mapped to the active ticket
     assert by_branch["solo-2-b"] is None  # unmapped branch still reported
+
+
+def _drive_to(svc, ticket_id, target, *, branch):
+    """Walk a ticket from in-progress up to ``target`` along the legal path."""
+    svc.move_ticket(ticket_id, "in-progress", branch=branch, actor="human")
+    path = ["in-ai-review", "in-human-review", "done"]
+    for state in path:
+        svc.move_ticket(ticket_id, state, actor="human")
+        if state == target:
+            break
+
+
+def test_done_ticket_worktree_excluded(tmp_path):
+    # A merged ticket whose worktree lingers must not raise a conflict against active work.
+    gh = FakeRadarGit(
+        [Worktree("/wt/a", "solo-1-a"), Worktree("/wt/b", "solo-2-b")],
+        {"/wt/a": {"src/y.py"}, "/wt/b": {"src/y.py"}},
+    )
+    svc = _svc(tmp_path, gh)
+    active = svc.create_ticket(project="SOLO", title="active")
+    svc.move_ticket(active.id, "in-progress", branch="solo-1-a", actor="human")
+    merged = svc.create_ticket(project="SOLO", title="merged")
+    _drive_to(svc, merged.id, "done", branch="solo-2-b")
+    assert svc.compute_radar("SOLO")["overlaps"] == []
+
+
+def test_in_human_review_ticket_is_active(tmp_path):
+    # "Ready for human review" still counts as active work for the radar.
+    gh = FakeRadarGit(
+        [Worktree("/wt/a", "solo-1-a"), Worktree("/wt/b", "solo-2-b")],
+        {"/wt/a": {"src/y.py"}, "/wt/b": {"src/y.py"}},
+    )
+    svc = _svc(tmp_path, gh)
+    t = svc.create_ticket(project="SOLO", title="under review")
+    _drive_to(svc, t.id, "in-human-review", branch="solo-1-a")
+    ov = svc.compute_radar("SOLO")["overlaps"][0]
+    by_branch = {ov["a"]["branch"]: ov["a"]["ticket"], ov["b"]["branch"]: ov["b"]["ticket"]}
+    assert by_branch["solo-1-a"] == t.id  # in-human-review is annotated as active
+    assert by_branch["solo-2-b"] is None  # unmapped branch still reported
+
+
+def test_queued_done_ticket_still_reported(tmp_path):
+    # A → done whose PR only enqueued (merge queue) has not landed on master yet — its
+    # changes can still conflict, so the radar must keep reporting it during that window.
+    gh = QueuedMergeRadarGit(
+        [Worktree("/wt/a", "solo-1-a"), Worktree("/wt/b", "solo-2-b")],
+        {"/wt/a": {"src/y.py"}, "/wt/b": {"src/y.py"}},
+    )
+    svc = _svc(tmp_path, gh)
+    queued = svc.create_ticket(project="SOLO", title="queued")
+    _drive_to(svc, queued.id, "done", branch="solo-1-a")
+    assert svc.get_ticket(queued.id).pr_state == "queued"  # guard: really enqueued, not merged
+    ov = svc.compute_radar("SOLO")["overlaps"][0]
+    by_branch = {ov["a"]["branch"]: ov["a"]["ticket"], ov["b"]["branch"]: ov["b"]["ticket"]}
+    assert by_branch["solo-1-a"] == queued.id  # queued done work is still live and annotated
+    assert by_branch["solo-2-b"] is None
+
+
+def test_active_ticket_wins_a_branch_shared_with_a_done_ticket(tmp_path):
+    # Branch names aren't unique until a PR pins them: a branch reused by live work must
+    # stay in the radar even when an older done ticket also recorded it.
+    gh = FakeRadarGit(
+        [Worktree("/wt/a", "solo-1-a"), Worktree("/wt/b", "solo-2-b")],
+        {"/wt/a": {"src/y.py"}, "/wt/b": {"src/y.py"}},
+    )
+    svc = _svc(tmp_path, gh)
+    stale = svc.create_ticket(project="SOLO", title="stale")
+    _drive_to(svc, stale.id, "done", branch="solo-1-a")  # done, no PR → inactive on solo-1-a
+    live = svc.create_ticket(project="SOLO", title="live")
+    svc.move_ticket(live.id, "in-progress", branch="solo-1-a", actor="human")  # reuses solo-1-a
+    ov = svc.compute_radar("SOLO")["overlaps"][0]
+    by_branch = {ov["a"]["branch"]: ov["a"]["ticket"], ov["b"]["branch"]: ov["b"]["ticket"]}
+    assert by_branch["solo-1-a"] == live.id  # the active ticket wins the shared branch
+    assert by_branch["solo-2-b"] is None
 
 
 def test_real_adapter_parses_worktrees_and_changed_files(monkeypatch):
