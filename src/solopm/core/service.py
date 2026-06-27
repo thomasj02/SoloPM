@@ -678,25 +678,31 @@ class Service:
         changed-file set vs. the master branch (committed + uncommitted), and reports every
         pair whose sets intersect. A branch is annotated with the active ticket that records
         it; branches whose ticket has gone inactive (done/merged, cancelled, or back in the
-        backlog) are skipped so a lingering worktree can't conflict against live work, while
-        genuinely unmapped branches (no ticket at all) are still reported. A no-op without a
-        git client / repo, so it degrades gracefully rather than erroring.
+        backlog) are skipped so a lingering worktree can't conflict against live work — except
+        a → done whose PR is only enqueued (not yet landed on master), which stays live. Genuinely
+        unmapped branches (no ticket at all) are still reported. A no-op without a git client /
+        repo, so it degrades gracefully rather than erroring.
         """
         projects = [self.get_project(project)] if project else self.list_projects()
         overlaps: list[dict] = []
         for proj in projects:
             if self.github is None or not proj.repo:
                 continue
-            # A branch is mapped to its ticket only while that ticket is active. Branches
-            # whose ticket has gone inactive (done/merged, cancelled, or sent back to the
-            # backlog) are recorded separately so their lingering worktrees can be skipped —
-            # a merged ticket's leftover worktree must not raise a conflict against live work.
+            # A branch is mapped to its ticket while that ticket's changes are still live.
+            # Branches whose ticket has gone inactive (done/merged, cancelled, or sent back
+            # to the backlog) are recorded separately so their lingering worktrees can be
+            # skipped — a merged ticket's leftover worktree must not raise a conflict against
+            # live work. A → done whose PR only *enqueued* (pr_state "queued") is the
+            # exception: its changes have not landed on master yet, so it is still live and
+            # can genuinely conflict during the merge-queue window.
             by_branch: dict[str, str] = {}
             inactive_branches: set[str] = set()
             for t in self.list_tickets(project=proj.key):
                 if not t.branch:
                     continue
-                if t.state in self._RADAR_ACTIVE_STATES:
+                if t.state in self._RADAR_ACTIVE_STATES or (
+                    t.state == "done" and t.pr_state == "queued"
+                ):
                     by_branch[t.branch] = t.id
                 else:
                     inactive_branches.add(t.branch)

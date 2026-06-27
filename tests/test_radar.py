@@ -1,6 +1,6 @@
 """Overlap / conflict radar across concurrent worktrees (SOLO-9)."""
 
-from solopm.core.github import Worktree
+from solopm.core.github import MergeResult, PR, Worktree
 from solopm.core.service import Service
 from solopm.core.store import Store
 
@@ -21,6 +21,19 @@ class FakeRadarGit:
     def find_pr(self, repo: str, branch: str):
         # No PR to merge/close: lets a → done transition short-circuit in tests.
         return None
+
+
+class QueuedMergeRadarGit(FakeRadarGit):
+    """A → done leaves the PR merely enqueued (merge-queue-protected branch)."""
+
+    def find_pr(self, repo: str, branch: str):
+        return PR(number=99, url="http://pr/99", state="open")
+
+    def pr_head(self, repo: str, number: int):
+        return "head-sha"
+
+    def merge_pr(self, repo: str, number: int, branch=None):
+        return MergeResult(state="queued")
 
 
 def _svc(tmp_path, github, repo="/repo", db="solopm.db"):
@@ -119,6 +132,23 @@ def test_in_human_review_ticket_is_active(tmp_path):
     by_branch = {ov["a"]["branch"]: ov["a"]["ticket"], ov["b"]["branch"]: ov["b"]["ticket"]}
     assert by_branch["solo-1-a"] == t.id  # in-human-review is annotated as active
     assert by_branch["solo-2-b"] is None  # unmapped branch still reported
+
+
+def test_queued_done_ticket_still_reported(tmp_path):
+    # A → done whose PR only enqueued (merge queue) has not landed on master yet — its
+    # changes can still conflict, so the radar must keep reporting it during that window.
+    gh = QueuedMergeRadarGit(
+        [Worktree("/wt/a", "solo-1-a"), Worktree("/wt/b", "solo-2-b")],
+        {"/wt/a": {"src/y.py"}, "/wt/b": {"src/y.py"}},
+    )
+    svc = _svc(tmp_path, gh)
+    queued = svc.create_ticket(project="SOLO", title="queued")
+    _drive_to(svc, queued.id, "done", branch="solo-1-a")
+    assert svc.get_ticket(queued.id).pr_state == "queued"  # guard: really enqueued, not merged
+    ov = svc.compute_radar("SOLO")["overlaps"][0]
+    by_branch = {ov["a"]["branch"]: ov["a"]["ticket"], ov["b"]["branch"]: ov["b"]["ticket"]}
+    assert by_branch["solo-1-a"] == queued.id  # queued done work is still live and annotated
+    assert by_branch["solo-2-b"] is None
 
 
 def test_real_adapter_parses_worktrees_and_changed_files(monkeypatch):
