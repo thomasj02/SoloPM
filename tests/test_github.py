@@ -30,6 +30,7 @@ class FakeGitHub:
         self.merge_sha = merge_sha
         self.merge_state = merge_state  # "merged" or "queued"
         self.branch_deleted = branch_deleted
+        self.head_branch = None  # the PR head, recorded when a PR is opened/found
         self.merge_branch = None  # branch the client was last asked to clean up
         self.close_branch = None
 
@@ -44,12 +45,19 @@ class FakeGitHub:
     def find_pr(self, repo, branch):
         self._maybe_fail("find_pr")
         self.calls.append(("find", branch))
+        self.head_branch = branch  # the PR matched on this branch → it is the head
         return PR(number=self.pr_number, url=f"https://github.com/thomasj02/SoloPM/pull/{self.pr_number}", state="open")
 
     def open_or_refresh_pr(self, repo, branch, base, title, body):
         self._maybe_fail("open_or_refresh_pr")
         self.calls.append(("pr", branch, base, title))
+        self.head_branch = branch
         return PR(number=self.pr_number, url=f"https://github.com/thomasj02/SoloPM/pull/{self.pr_number}", state="open")
+
+    def pr_head(self, repo, number):
+        self._maybe_fail("pr_head")
+        self.calls.append(("head", number))
+        return self.head_branch
 
     def merge_pr(self, repo, number, branch=None):
         self._maybe_fail("merge_pr")
@@ -504,6 +512,7 @@ def _gh_with_branch_fake(
     readback='{"state": "MERGED", "mergeCommit": {"oid": "abc123"}}',
     worktree_branch=None,
     local_delete_rc=0,
+    local_delete_stderr=None,
     remote_delete_rc=0,
     remote_delete_stderr=None,
     remote_delete_raises=False,
@@ -550,7 +559,10 @@ def _gh_with_branch_fake(
             if local_delete_raises:
                 raise GitHubError("Command timed out: git branch -D")
             p.returncode = local_delete_rc
-            p.stderr = "error: used by worktree" if local_delete_rc else ""
+            if local_delete_stderr is not None:
+                p.stderr = local_delete_stderr
+            elif local_delete_rc:
+                p.stderr = "error: used by worktree"
             return p
         return p
 
@@ -689,6 +701,63 @@ def test_merge_pr_remote_delete_failure_reports_not_deleted(tmp_path, monkeypatc
     result = gh.merge_pr("/repo", 17, branch="solo-16-x")
     assert result.state == "merged"
     assert result.branch_deleted is False
+
+
+def test_local_branch_already_gone_counts_as_deleted(tmp_path, monkeypatch):
+    # [SOLO-16 gpt-review P3] A `git branch -D` on an already-absent local branch (a cleanup
+    # retry, or it was deleted manually) exits non-zero with "branch not found". That is a
+    # clean state, so report the branch deleted rather than falsely "retained".
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    monkeypatch.setattr(gh, "_run", _gh_with_branch_fake(
+        local_delete_rc=1,
+        local_delete_stderr="error: branch 'solo-16-x' not found.",
+    ))
+    result = gh.merge_pr("/repo", 17, branch="solo-16-x")
+    assert result.branch_deleted is True
+
+
+def test_pr_head_parses_head_ref_name(tmp_path, monkeypatch):
+    # [SOLO-16 gpt-review P2] pr_head resolves the PR's real head branch; an unreadable
+    # response yields None (caller then skips cleanup rather than guessing).
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+    monkeypatch.setattr(gh, "_run", lambda *a, **k: type(
+        "P", (), {"returncode": 0, "stdout": '{"headRefName": "solo-16-real-head"}', "stderr": ""})())
+    assert gh.pr_head("/repo", 17) == "solo-16-real-head"
+    monkeypatch.setattr(gh, "_run", lambda *a, **k: type(
+        "P", (), {"returncode": 1, "stdout": "", "stderr": "boom"})())
+    assert gh.pr_head("/repo", 17) is None
+
+
+def test_cleanup_uses_github_head_not_stored_branch(tmp_path):
+    # [SOLO-16 gpt-review P2] Cleanup targets the PR head resolved fresh from GitHub, never the
+    # stored ticket.branch (which could be stale on a row predating branch pinning). Simulate
+    # the stored branch diverging from GitHub's real head; the real head is what's cleaned up.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc, branch="solo-16-stored")  # ticket.branch = solo-16-stored
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    gh.head_branch = "solo-16-true-head"  # GitHub's real PR head differs from the stored value
+    svc.move_ticket(tid, "done", actor="human")
+    assert ("head", 17) in gh.calls  # head resolved from GitHub
+    assert gh.merge_branch == "solo-16-true-head"  # cleaned up the real head, not the stored branch
+    assert "solo-16-true-head" in _comments(svc, tid)[0]  # note names the real head
+
+
+def test_cleanup_skipped_when_head_unconfirmed(tmp_path):
+    # [SOLO-16 gpt-review P2] If the PR head can't be confirmed, cleanup is skipped (the client
+    # is handed no branch) rather than risk deleting an unrelated branch.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc, branch="solo-16-real")
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    gh.head_branch = None  # pr_head returns None → unconfirmed
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert done.pr_state == "merged"  # the merge still gates the transition
+    assert gh.merge_branch is None  # but no branch handed to cleanup
 
 
 def test_merge_pr_remote_already_gone_counts_as_deleted(tmp_path, monkeypatch):

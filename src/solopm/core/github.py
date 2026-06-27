@@ -104,6 +104,8 @@ class GitHubClient(Protocol):
         self, repo: str, branch: str, base: str, title: str, body: str
     ) -> PR: ...
 
+    def pr_head(self, repo: str, number: int) -> str | None: ...
+
     def merge_pr(self, repo: str, number: int, branch: str | None = None) -> MergeResult: ...
 
     def close_pr(self, repo: str, number: int, branch: str | None = None) -> CloseResult: ...
@@ -260,6 +262,15 @@ class GitHub:
         """The PR's upper-cased state (``OPEN``/``MERGED``/``CLOSED``), or ``""`` if unknown."""
         return str(self._pr_json(repo, number, "state").get("state") or "").upper()
 
+    def pr_head(self, repo: str, number: int) -> str | None:
+        """The PR's head branch name (the ref it was opened from), or ``None`` if unknown.
+
+        The authoritative source for what branch a merge/close should clean up — preferred
+        over any stored ticket field, which could have drifted from the real PR head.
+        """
+        head = self._pr_json(repo, number, "headRefName").get("headRefName")
+        return str(head) if head else None
+
     def _merge_commit_oid(self, repo: str, number: int) -> str | None:
         oid = (self._pr_json(repo, number, "state,mergeCommit").get("mergeCommit") or {}).get("oid")
         return str(oid) if oid else None
@@ -299,13 +310,27 @@ class GitHub:
             )
             return False
         local = self._run_cleanup(["git", "branch", "-D", branch], repo)
-        local_ok = local is not None and local.returncode == 0
+        local_ok = self._local_branch_gone(local)
         if not local_ok:
             logger.warning("Best-effort delete of local branch %s failed: %s", branch, _detail(local))
         # "Deleted" only when the branch is gone everywhere SoloPM can reach — otherwise the
         # confirmation note would falsely claim a cleanup that left the GitHub (or local)
         # branch behind.
         return remote_ok and local_ok
+
+    @staticmethod
+    def _local_branch_gone(proc: "subprocess.CompletedProcess | None") -> bool:
+        """Whether the local branch is gone after a ``git branch -D``.
+
+        True on success, and also when git reports the branch isn't there — an absent local
+        ref (e.g. a cleanup retry, or it was deleted manually) is a clean state, not a failure.
+        False when the command raised (``None``) or failed for any other reason.
+        """
+        if proc is None:
+            return False
+        if proc.returncode == 0:
+            return True
+        return "not found" in (proc.stderr or proc.stdout or "").lower()
 
     @staticmethod
     def _remote_branch_gone(proc: "subprocess.CompletedProcess | None") -> bool:
