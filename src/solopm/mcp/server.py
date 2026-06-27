@@ -115,6 +115,26 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
         return tools.radar(project=project)
 
     @mcp.tool()
+    def graph(
+        project: str | None = None,
+        around: str | None = None,
+        depth: int = 1,
+        active_only: bool = False,
+        types: list[str] | None = None,
+    ) -> dict:
+        """The ticket-relationship dependency graph (read-only). Pass `around` (+ `depth`)
+        for the ego-graph within N hops of a ticket, or `project` for that project's
+        relational subgraph (cross-project neighbours included; isolated tickets omitted);
+        neither = the whole store. `types` filters relation types (blocks|related|duplicate|
+        parent); `active_only` drops done/cancelled. Returns {nodes:[{id,project,title,state,
+        assignee,blocked,subtickets}], edges:[{from,to,type}] in canonical direction,
+        cycles:[[ids]] (blocks loops), scope, truncated}. Useful for topological reasoning,
+        e.g. which ticket unblocks the most work."""
+        return tools.graph(
+            project=project, around=around, depth=depth, active_only=active_only, types=types
+        )
+
+    @mcp.tool()
     def list_review_memory(project: str, status: str | None = None) -> dict:
         """List a project's review-memory items (the learning review gate), optionally
         filtered by status: candidate | active | retired."""

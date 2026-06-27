@@ -407,6 +407,47 @@ def test_review_memory_crud_via_api(client):
     assert "check X" not in client.get("/api/projects/SOLO/review-prompt").json()["prompt"]
 
 
+def test_graph_endpoint_project_scope(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "a"})
+    client.post("/api/tickets", json={"project": "SOLO", "title": "b"})
+    client.post("/api/tickets/SOLO-1/links", json={"type": "blocks", "other": "SOLO-2"})
+    r = client.get("/api/graph?project=SOLO")
+    assert r.status_code == 200
+    g = r.json()
+    assert {n["id"] for n in g["nodes"]} == {"SOLO-1", "SOLO-2"}
+    assert {(e["from"], e["to"], e["type"]) for e in g["edges"]} == {
+        ("SOLO-1", "SOLO-2", "blocks")
+    }
+    assert g["cycles"] == []
+    assert g["truncated"] is False
+
+
+def test_graph_endpoint_ego_with_type_filter(client):
+    _make_project(client)
+    for t in ("a", "b", "c"):
+        client.post("/api/tickets", json={"project": "SOLO", "title": t})
+    client.post("/api/tickets/SOLO-1/links", json={"type": "blocks", "other": "SOLO-2"})
+    client.post("/api/tickets/SOLO-1/links", json={"type": "related", "other": "SOLO-3"})
+    r = client.get("/api/graph?around=SOLO-1&depth=1&type=blocks")
+    assert r.status_code == 200
+    g = r.json()
+    assert {n["id"] for n in g["nodes"]} == {"SOLO-1", "SOLO-2"}  # related neighbour filtered out
+
+
+def test_graph_endpoint_unknown_project_404(client):
+    r = client.get("/api/graph?project=NOPE")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+def test_graph_endpoint_bad_type_400(client):
+    _make_project(client)
+    r = client.get("/api/graph?project=SOLO&type=bogus")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "validation"
+
+
 def test_radar_endpoint(client):
     _make_project(client)
     r = client.get("/api/radar?project=SOLO")

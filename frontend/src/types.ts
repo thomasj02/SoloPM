@@ -68,6 +68,45 @@ export interface RadarReport {
   overlaps: RadarOverlap[];
 }
 
+// SOLO-14: dependency-graph projection of ticket relationships.
+export interface GraphNode {
+  id: string;
+  project: string;
+  title: string;
+  state: State;
+  assignee: string;
+  blocked: boolean;
+  subtickets: { done: number; total: number };
+}
+
+export interface GraphEdge {
+  from: string;
+  to: string;
+  type: LinkType;
+}
+
+export interface Graph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  cycles: string[][];
+  scope: {
+    project: string | null;
+    around: string | null;
+    depth: number | null;
+    active_only: boolean;
+    types: string[];
+  };
+  truncated: boolean;
+}
+
+export interface GraphQuery {
+  project?: string;
+  around?: string;
+  depth?: number;
+  active_only?: boolean;
+  types?: LinkType[];
+}
+
 export interface Meta {
   version: string;
   states: State[];

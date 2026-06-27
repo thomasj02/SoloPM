@@ -167,6 +167,40 @@ def test_review_memory_via_cli(wired):
     assert json.loads(r.output)["status"] == "retired"
 
 
+def test_graph_cli_json(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "a")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "b")
+    invoke("ticket", "link", "SOLO-1", "blocks", "SOLO-2")
+    r = invoke("graph", "--project", "SOLO", "--json")
+    assert r.exit_code == 0, r.output
+    g = json.loads(r.output)
+    assert {n["id"] for n in g["nodes"]} == {"SOLO-1", "SOLO-2"}
+    assert g["edges"][0]["type"] == "blocks"
+
+
+def test_graph_cli_type_filter_json(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    for t in ("a", "b", "c"):
+        invoke("ticket", "create", "--project", "SOLO", "--title", t)
+    invoke("ticket", "link", "SOLO-1", "blocks", "SOLO-2")
+    invoke("ticket", "link", "SOLO-1", "related", "SOLO-3")
+    r = invoke("graph", "--around", "SOLO-1", "--depth", "1", "--type", "blocks", "--json")
+    assert r.exit_code == 0, r.output
+    assert {n["id"] for n in json.loads(r.output)["nodes"]} == {"SOLO-1", "SOLO-2"}
+
+
+def test_graph_cli_human_render(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "Alpha")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "Beta")
+    invoke("ticket", "link", "SOLO-1", "blocks", "SOLO-2")
+    r = invoke("graph", "--project", "SOLO")
+    assert r.exit_code == 0
+    assert "Dependency graph" in r.output
+    assert "blocks" in r.output
+
+
 def test_radar_cli(wired):
     invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
     r = invoke("radar", "--json")

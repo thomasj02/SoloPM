@@ -636,6 +636,84 @@ h4.md-h, h5.md-h, h6.md-h { font-size: 13px; }
 .md-hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 .md-empty { color: var(--faint); font-style: italic; }
 
+/* ------------------------------------------------- dependency graph (SOLO-14) */
+.tp__sectionrow { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+.graph-overlay {
+  position: fixed; inset: 0; z-index: 50;
+  display: none;
+  background: color-mix(in srgb, var(--bg) 92%, black);
+}
+.graph-overlay--open { display: block; }
+.graph { position: absolute; inset: 0; display: flex; flex-direction: column; }
+
+.graph__head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px; border-bottom: 1px solid var(--border);
+  background: var(--surface); flex: none;
+}
+.graph__title { font-size: 13px; font-weight: 600; color: var(--text); }
+.graph__filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.graph__spacer { flex: 1; }
+.graph__close { font-size: 20px; }
+
+.chip {
+  font-size: 11.5px; padding: 2px 9px; border-radius: 99px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2);
+  cursor: pointer; user-select: none;
+}
+.chip:hover { border-color: var(--border-strong); }
+.chip--off { opacity: 0.4; text-decoration: line-through; }
+.chip--blocks { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+.chip--parent { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+.chip--related { border-color: var(--border-strong); }
+.chip--duplicate { border-color: color-mix(in srgb, var(--muted) 55%, var(--border)); }
+.chip--active-only.chip--on { background: var(--accent-soft); color: var(--text); border-color: var(--accent); }
+
+.graph__body { position: relative; flex: 1; overflow: hidden; }
+.graph__center { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+.graph__svg { width: 100%; height: 100%; cursor: grab; touch-action: none; }
+.graph__svg--panning { cursor: grabbing; }
+
+.graph__node { cursor: pointer; }
+.graph__nodebox { fill: var(--surface-2); stroke: var(--border); stroke-width: 1; }
+.graph__node:hover .graph__nodebox { stroke: var(--border-strong); fill: var(--surface-3); }
+.graph__node:focus-visible .graph__nodebox { stroke: var(--accent); stroke-width: 2; }
+.graph__nodestripe { fill: var(--st-backlog); }
+.graph__nodeid { fill: var(--muted); font-size: 11px; font-family: var(--mono); }
+.graph__nodetitle { fill: var(--text); font-size: 12.5px; }
+.graph__nodemark { fill: var(--text-2); font-size: 11px; }
+.graph__node--blocked .graph__nodebox { stroke: color-mix(in srgb, var(--danger) 60%, var(--border)); }
+.graph__node--cycle .graph__nodebox { stroke: var(--danger); stroke-dasharray: 4 3; stroke-width: 1.5; }
+.graph__node--done, .graph__node--cancelled { opacity: 0.5; }
+
+.graph__node--backlog .graph__nodestripe { fill: var(--st-backlog); }
+.graph__node--todo .graph__nodestripe { fill: var(--st-todo); }
+.graph__node--in-progress .graph__nodestripe { fill: var(--st-in-progress); }
+.graph__node--in-ai-review .graph__nodestripe { fill: var(--st-in-ai-review); }
+.graph__node--in-human-review .graph__nodestripe { fill: var(--st-in-human-review); }
+.graph__node--done .graph__nodestripe { fill: var(--st-done); }
+.graph__node--cancelled .graph__nodestripe { fill: var(--st-cancelled); }
+
+.graph__edge { stroke-width: 1.6; }
+.graph__edge--blocks { stroke: color-mix(in srgb, var(--danger) 70%, var(--muted)); }
+.graph__edge--parent { stroke: var(--accent); }
+.graph__edge--related { stroke: var(--border-strong); stroke-dasharray: 2 4; }
+.graph__edge--duplicate { stroke: var(--muted); stroke-dasharray: 6 4; opacity: 0.7; }
+.graph__edge--cycle { stroke: var(--danger); stroke-width: 2.4; }
+.graph__arrow--blocks path { fill: color-mix(in srgb, var(--danger) 70%, var(--muted)); }
+.graph__arrow--parent path { fill: var(--accent); }
+.graph__arrow--duplicate path { fill: var(--muted); }
+
+.graph__banner {
+  position: absolute; left: 14px; bottom: 14px;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 12px; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 16%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  color: var(--text); font-size: 12px; max-width: 60%;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
