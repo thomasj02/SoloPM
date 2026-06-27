@@ -3,6 +3,8 @@
 
 import type {
   Activity,
+  Graph,
+  GraphQuery,
   LinkType,
   Meta,
   Project,
@@ -136,6 +138,17 @@ export const api = {
 
   radar: (project?: string) =>
     request<RadarReport>("GET", `/radar${project ? "?project=" + enc(project) : ""}`),
+
+  graph: (q: GraphQuery = {}) => {
+    const p = new URLSearchParams();
+    if (q.project) p.set("project", q.project);
+    if (q.around) p.set("around", q.around);
+    if (q.depth != null) p.set("depth", String(q.depth));
+    if (q.active_only) p.set("active_only", "true");
+    for (const t of q.types ?? []) p.append("type", t);
+    const qs = p.toString();
+    return request<Graph>("GET", `/graph${qs ? "?" + qs : ""}`);
+  },
 
   addReviewMemory: (key: string, text: string) =>
     request<ReviewMemoryItem>("POST", `/projects/${enc(key)}/review-memory`, { text }),

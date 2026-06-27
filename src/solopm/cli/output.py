@@ -10,8 +10,11 @@ from rich.table import Table
 
 from ..core.models import STATE_LABELS
 
-console = Console()
-err_console = Console(stderr=True)
+# highlight=False disables rich's automatic regex highlighting (which recolors digits,
+# so a ticket id like "SOLO-2" would be split into separate style spans). Intentional
+# ``[markup]`` styling still applies; ids/numbers render uniformly and predictably.
+console = Console(highlight=False)
+err_console = Console(stderr=True, highlight=False)
 
 # Color per state for human output.
 STATE_STYLE = {
@@ -130,6 +133,54 @@ def render_tickets(tickets: list[dict]) -> None:
             str(count) if count else "",
         )
     console.print(table)
+
+
+_GRAPH_EDGE_VERB = {
+    "blocks": "blocks",
+    "parent": "child of",  # canonical from→to is child→parent
+    "related": "related to",
+    "duplicate": "duplicate of",
+}
+
+
+def render_graph(g: dict) -> None:
+    """Human-readable dependency graph: scope + counts, cycle warnings, and edges by type."""
+    scope = g.get("scope", {})
+    nodes = g.get("nodes", [])
+    edges = g.get("edges", [])
+    if scope.get("around"):
+        where = f"around [bold]{scope['around']}[/] (depth {scope.get('depth')})"
+    elif scope.get("project"):
+        where = f"project [bold]{scope['project']}[/]"
+    else:
+        where = "all projects"
+    console.print(
+        f"[bold]Dependency graph[/] — {where} · {len(nodes)} node(s) · {len(edges)} edge(s)"
+    )
+    if g.get("truncated"):
+        console.print("[yellow]⚠ truncated — node cap reached[/]")
+    for cyc in g.get("cycles", []):
+        console.print(f"[red]⚠ blocks cycle:[/] {' → '.join(cyc)} → {cyc[0]}")
+
+    blocked = [n["id"] for n in nodes if n.get("blocked")]
+    if blocked:
+        console.print(f"[grey62]blocked:[/] {', '.join(blocked)}")
+
+    if not edges:
+        console.print("[dim]No relationships in scope.[/]")
+        return
+
+    by_type: dict[str, list[dict]] = {}
+    for e in edges:
+        by_type.setdefault(e["type"], []).append(e)
+    for typ in ("blocks", "parent", "related", "duplicate"):
+        group = by_type.get(typ)
+        if not group:
+            continue
+        verb = _GRAPH_EDGE_VERB.get(typ, typ)
+        console.print(f"  [grey62]{typ}[/]")
+        for e in group:
+            console.print(f"    [bold]{e['from']}[/] {verb} [bold]{e['to']}[/]")
 
 
 def render_ticket(t: dict) -> None:

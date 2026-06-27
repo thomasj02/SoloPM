@@ -737,18 +737,24 @@ class Store:
             return row["to_ticket"] if row else None
 
     def ticket_briefs(self, ids) -> dict[str, dict]:
-        """``id -> {title, state, project}`` for a set of ticket ids, in one query."""
+        """``id -> {title, state, project, assignee}`` for a set of ticket ids, one query."""
         ids = list(ids)
         if not ids:
             return {}
         placeholders = ",".join("?" * len(ids))
         with self._connect() as conn:
             rows = conn.execute(
-                f"SELECT id, title, state, project_key FROM tickets WHERE id IN ({placeholders})",
+                f"SELECT id, title, state, project_key, assignee FROM tickets "
+                f"WHERE id IN ({placeholders})",
                 ids,
             ).fetchall()
             return {
-                r["id"]: {"title": r["title"], "state": r["state"], "project": r["project_key"]}
+                r["id"]: {
+                    "title": r["title"],
+                    "state": r["state"],
+                    "project": r["project_key"],
+                    "assignee": r["assignee"],
+                }
                 for r in rows
             }
 

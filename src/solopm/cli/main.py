@@ -9,7 +9,7 @@ the local backend — except ``init``/``serve``, which act on the store/server d
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 from urllib.parse import urlencode
 
 import typer
@@ -146,6 +146,49 @@ def radar(
             output.console.print(f"  [bold]{a}[/] ⇄ [bold]{b}[/] — {', '.join(ov['files'])}")
 
     _run(call, lambda api: api.get(path), render)
+
+
+@app.command()
+def graph(
+    project: Annotated[
+        Optional[str], typer.Option("--project", help="Whole-project relational graph.")
+    ] = None,
+    around: Annotated[
+        Optional[str], typer.Option("--around", help="Ego-graph around this ticket id.")
+    ] = None,
+    depth: Annotated[
+        int, typer.Option("--depth", help="Ego-graph hop depth (used with --around).")
+    ] = 1,
+    type: Annotated[
+        Optional[List[str]],
+        typer.Option("--type", help="Filter relation type(s): blocks|related|duplicate|parent (repeatable)."),
+    ] = None,
+    active_only: Annotated[
+        bool, typer.Option("--active-only", help="Drop done/cancelled nodes.")
+    ] = False,
+    json_out: JsonOpt = False,
+    url: UrlOpt = None,
+) -> None:
+    """Dependency graph of ticket relationships — nodes + typed edges (blocks DAG, parent
+    trees, related/duplicate). With neither flag, uses the default project (else all projects)."""
+    call = Call(json_out, None, url)
+    # Default to the configured project (like `ticket list`) unless an ego-graph is requested.
+    if not around and not project:
+        project = config.default_project()
+    params: list[tuple[str, str]] = []
+    if project:
+        params.append(("project", project))
+    if around:
+        params.append(("around", around))
+        params.append(("depth", str(depth)))
+    if active_only:
+        params.append(("active_only", "true"))
+    for t in type or []:
+        params.append(("type", t))
+    query = urlencode(params)
+    path = "/api/graph" + (f"?{query}" if query else "")
+
+    _run(call, lambda api: api.get(path), output.render_graph)
 
 
 @app.command()

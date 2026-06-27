@@ -17,6 +17,7 @@ import { el, clearChildren } from "./util";
 import { openModal, closeTopModal, isOverlayOpen, toast, toastError, toastSuccess } from "./ui";
 import { initBoard, isDragging } from "./board";
 import { closeTicket, isTicketOpen, openTicket, pollOpenTicket } from "./ticket";
+import { openGraph, isGraphOpen, closeGraph } from "./graph";
 import type { Assignee, Project, ReviewMemoryItem, State } from "./types";
 
 const POLL_MS = 4000;
@@ -115,6 +116,7 @@ function renderTopbar(): void {
   });
 
   const refreshBtn = el("button", { class: "btn btn--ghost icon-btn", title: "Refresh (r)", "aria-label": "Refresh", onClick: () => void manualRefresh() }, "⟳");
+  const graphBtn = el("button", { class: "btn btn--ghost", title: "Dependency graph (g)", onClick: () => void openGraph({}), disabled: !state.currentProject }, "⛓ Graph");
   const newTicketBtn = el("button", { class: "btn btn--primary", title: "New ticket (c)", onClick: openCreateTicket, disabled: !state.currentProject }, "+ New ticket");
 
   radarBadge = el("button", {
@@ -142,7 +144,7 @@ function renderTopbar(): void {
       newProjectBtn,
       statusStrip,
     ]),
-    el("div", { class: "topbar__right" }, [radarBadge, searchInput, refreshBtn, newTicketBtn]),
+    el("div", { class: "topbar__right" }, [radarBadge, searchInput, refreshBtn, graphBtn, newTicketBtn]),
   );
 
   renderEmptyState();
@@ -538,8 +540,9 @@ async function openProjectSettings(): Promise<void> {
 // --- keyboard -------------------------------------------------------------
 function wireShortcuts(): void {
   document.addEventListener("keydown", (e: KeyboardEvent) => {
-    // Esc always works — close the topmost overlay, then the panel, then search.
+    // Esc always works — close the graph, then the topmost overlay, then the panel, then search.
     if (e.key === "Escape") {
+      if (isGraphOpen()) return closeGraph();
       if (closeTopModal()) return;
       if (isTicketOpen()) return closeTicket();
       if (document.activeElement === searchInput) searchInput?.blur();
@@ -547,14 +550,18 @@ function wireShortcuts(): void {
     }
 
     // Other shortcuts don't fire while typing, while a modal is up, or while the
-    // ticket detail panel is open.
-    if (isTypingTarget(e.target) || isOverlayOpen() || isTicketOpen()) return;
+    // ticket detail panel or graph view is open.
+    if (isTypingTarget(e.target) || isOverlayOpen() || isTicketOpen() || isGraphOpen()) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
 
     switch (e.key) {
       case "c":
         e.preventDefault();
         openCreateTicket();
+        break;
+      case "g":
+        e.preventDefault();
+        if (state.currentProject) void openGraph({});
         break;
       case "/":
         e.preventDefault();
@@ -581,8 +588,8 @@ function isTypingTarget(t: EventTarget | null): boolean {
 function startPolling(): void {
   stopPolling();
   pollTimer = setInterval(async () => {
-    // Skip when hidden, mid-drag, or a modal is open, to avoid clobbering.
-    if (document.hidden || isDragging() || isOverlayOpen()) return;
+    // Skip when hidden, mid-drag, or a modal/graph is open, to avoid clobbering.
+    if (document.hidden || isDragging() || isOverlayOpen() || isGraphOpen()) return;
     if (!state.currentProject) return;
     try {
       await refreshTickets({ silent: true });
