@@ -34,7 +34,8 @@ Error codes: `not_found`, `validation`, `invalid_transition`, `forbidden_transit
 - **States:** `backlog`, `todo`, `in-progress`, `in-ai-review`, `in-human-review`, `done`, `cancelled`
 - **Assignees:** `human`, `claude`, `codex`, `unassigned`
 - **Actors:** `human`, `claude`, `codex` (activity may also show `system`)
-- **Activity kinds:** `created`, `comment`, `state_change`, `assignment`, `edit`
+- **Activity kinds:** `created`, `comment`, `state_change`, `assignment`, `edit`, `criteria`, `review`, `link`, `unlink`
+- **Relation types:** `blocks`, `related`, `duplicate`, `parent` (see *Ticket relationships*)
 
 ### Legal state transitions
 
@@ -126,10 +127,15 @@ All filters optional. Ordered by project then sequence.
   "assignee": "claude", "branch": "solo-42-…", "session_active": false,
   "pr": { "number": 17, "url": "…", "state": "open" },
   "comment_count": 3,
+  "blocked": false,
+  "subtickets": { "done": 2, "total": 5 },
   "state_entered_at": "…", "time_in_state_seconds": 18240,
   "created_at": "…", "updated_at": "…"
 }
 ```
+- `blocked` is true when the ticket has an **open** (non-done/cancelled) blocker;
+  `subtickets` rolls up its children (done / total) when it is a parent. Both are derived
+  from *Ticket relationships* (below). See also `relations` on the full `<ticket>`.
 - `state_entered_at` is when the ticket entered its **current** state (set at creation,
   refreshed on every move; reorder/edit/comment/assign leave it). `time_in_state_seconds`
   is the live elapsed seconds, computed per request. Both also appear on the full
@@ -205,6 +211,57 @@ A ticket carries `acceptance_criteria` — an ordered list of `{ "id", "text", "
 Errors: `validation` (blank text / nothing to update), `not_found` (unknown ticket or
 criterion). Each change is recorded as a `criteria` activity.
 
+### Ticket relationships
+
+Tickets can reference each other (like Linear's issue relations). A link is stored once in
+a **canonical direction** and the inverse is derived for the other ticket, so a link made
+from either side shows correctly on both. Relation types (read `link <id> <type> <other>`):
+
+| `type`      | canonical storage           | `<id>` is…        | shows on `<other>` as |
+|-------------|-----------------------------|-------------------|-----------------------|
+| `blocks`    | blocker → blocked           | the blocker       | "Blocked by"          |
+| `related`   | symmetric (stable order)    | —                 | "Related"             |
+| `duplicate` | duplicate → canonical       | the duplicate     | "Duplicated by"       |
+| `parent`    | child → parent              | the **sub-ticket**| "Sub-tickets"         |
+
+So `link A parent B` sets **B as A's parent** (A is the sub-ticket). Cross-project links
+are allowed (ids resolve against the whole ticket space). Validation: no self-links;
+identical links are deduped (idempotent); a ticket may have at most one parent; parent
+cycles are rejected.
+
+- `POST /api/tickets/{id}/links` body `{ "type": "<type>", "other": "<other-id>" }` →
+  full `<ticket>` (`201`). Idempotent on an identical link. Errors: `validation`
+  (self-link, unknown type, second parent, or a cycle), `not_found` (unknown ticket),
+  `duplicate` (409 — only under a concurrent conflicting second-parent insert that races
+  past the validation check; the one-parent DB index is the backstop).
+- `DELETE /api/tickets/{id}/links/{other-id}[?type=<type>][&direction=out|in]` → full
+  `<ticket>`. Removes the link(s) between the pair; `type` narrows to one relation, otherwise
+  all links between the two are removed. `direction` pins the stored orientation relative to
+  `{id}` (`out` = `{id}` is the `from`, `in` = it is the `to`) — needed only to disambiguate a
+  pair holding *opposing* directional links (e.g. `A blocks B` and `B blocks A`), so the web's
+  per-row remove deletes exactly the relation shown. Errors: `validation` (bad `direction`),
+  `not_found` (no such link / unknown ticket).
+
+Link/unlink are each recorded as a `link` / `unlink` activity **on both tickets**. The full
+`<ticket>` carries a `relations` array (the derived per-perspective view, grouped+sorted):
+
+```json
+{
+  "type": "blocks",            // canonical link type
+  "key": "blocked_by",         // perspective group: blocks | blocked_by | related |
+                               //   duplicate_of | duplicated_by | parent | sub
+  "label": "Blocked by",       // human label for the group
+  "direction": "in",           // "out" when this ticket is the canonical `from`, else "in"
+  "ticket": { "id": "SOLO-3", "title": "…", "state": "in-progress" },
+  "created_by": "claude",
+  "created_at": "…"
+}
+```
+
+The derived board signals — `blocked` and `subtickets` on `<ticket-summary>` — come from
+these links: `blocked` ⇐ an open `blocked_by` relation; `subtickets` ⇐ the `sub` group's
+done/total. Links to a `cancelled` ticket still render (tickets are never hard-deleted).
+
 ### Overlap radar
 
 `GET /api/radar[?project=<key>]` → `{ "overlaps": [ <overlap>, … ] }`. Informational only
@@ -261,6 +318,11 @@ position. `position` itself is not exposed in the payload.
   "branch": "solo-42-add-session-attach",
   "pr": { "number": 17, "url": "https://github.com/…/pull/17", "state": "open" },
   "session": { "id": "claude-9f2a…", "active": true },
+  "relations": [
+    { "type": "blocks", "key": "blocks", "label": "Blocks", "direction": "out",
+      "ticket": { "id": "SOLO-43", "title": "…", "state": "todo" },
+      "created_by": "claude", "created_at": "…" }
+  ],
   "comments": [
     { "author": "claude", "body": "Pushed first pass.", "at": "2026-05-31T18:04:11Z" }
   ],

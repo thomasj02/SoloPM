@@ -18,12 +18,38 @@ export type ActivityKind =
   | "assignment"
   | "edit"
   | "criteria"
-  | "review";
+  | "review"
+  | "link"
+  | "unlink";
 
 export interface Criterion {
   id: string;
   text: string;
   done: boolean;
+}
+
+// SOLO-10: ticket relationships. `type` is the canonical link type; `key` is the
+// perspective group as seen from the viewing ticket (e.g. an A-blocks-B link reads as
+// key "blocks" on A and key "blocked_by" on B).
+export type LinkType = "blocks" | "related" | "duplicate" | "parent";
+
+export type RelationKey =
+  | "blocks"
+  | "blocked_by"
+  | "related"
+  | "duplicate_of"
+  | "duplicated_by"
+  | "parent"
+  | "sub";
+
+export interface Relation {
+  type: LinkType;
+  key: RelationKey;
+  label: string;
+  direction: "out" | "in";
+  ticket: { id: string; title: string; state: State };
+  created_by: string;
+  created_at: string;
 }
 
 export interface RadarParty {
@@ -119,6 +145,10 @@ export interface TicketSummary {
   pr: PR | null;
   acceptance: { done: number; total: number };
   comment_count: number;
+  // SOLO-10: derived relationship signals — an open (non-done/cancelled) blocker exists,
+  // and the sub-ticket rollup (children done / total) when this ticket is a parent.
+  blocked: boolean;
+  subtickets: { done: number; total: number };
   // SOLO-13: when the ticket entered its current state, plus the live elapsed seconds.
   state_entered_at: string;
   time_in_state_seconds: number | null;
@@ -138,6 +168,7 @@ export interface Ticket {
   pr: PR | null;
   session: Session | null;
   acceptance_criteria: Criterion[];
+  relations: Relation[];
   comments: Comment[];
   activity: Activity[];
   state_entered_at: string;

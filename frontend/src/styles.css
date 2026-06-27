@@ -342,6 +342,24 @@ body {
   white-space: nowrap;
 }
 .card__age::before { content: "🕘 "; opacity: 0.7; }
+.card__blocked, .card__subs {
+  font-size: 11px;
+  border-radius: 99px;
+  padding: 1px 7px;
+  font-variant-numeric: tabular-nums;
+}
+.card__blocked {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+}
+.card__blocked::before { content: "⛔ "; }
+.card__subs {
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.card__subs::before { content: "▣ "; opacity: 0.7; }
 
 /* ----------------------------------------------------------------- badges */
 .badge {
@@ -511,6 +529,29 @@ body {
 .tp__critaddrow { display: flex; gap: 8px; }
 .tp__critadd { flex: 1; }
 
+/* Ticket relationships (SOLO-10) */
+.tp__relgroup { display: flex; flex-direction: column; gap: 3px; }
+.tp__relgroup + .tp__relgroup { margin-top: 6px; }
+.tp__rellabel { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: capitalize; }
+.tp__rellist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.tp__rel { display: flex; align-items: center; gap: 6px; }
+.tp__relmain {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 7px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--surface-2);
+  cursor: pointer;
+}
+.tp__relmain:hover { border-color: var(--border-strong); background: var(--surface-3); }
+.tp__relid { font-size: 11.5px; color: var(--muted); flex: none; }
+.tp__reltitle { flex: 1; min-width: 0; color: var(--text-2); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tp__reldel { opacity: 0; flex: none; font-size: 16px; line-height: 1; }
+.tp__rel:hover .tp__reldel { opacity: 0.6; }
+.tp__reldel:hover { opacity: 1; }
+.tp__reladd { display: flex; gap: 8px; margin-top: 4px; }
+.tp__reltype { flex: none; }
+.tp__relinput { flex: 1; min-width: 0; }
+
 /* Review-memory curation panel (project settings) */
 .rm { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
 .rm__empty { font-size: 13px; padding: 4px 0; }
@@ -536,6 +577,8 @@ body {
 .feed__dot--state_change { background: var(--st-in-progress); }
 .feed__dot--assignment { background: var(--as-human); }
 .feed__dot--edit { background: var(--st-in-ai-review); }
+.feed__dot--link { background: var(--accent); }
+.feed__dot--unlink { background: var(--faint); }
 .feed__sysactor { color: var(--text-2); text-transform: capitalize; font-weight: 600; }
 .feed__systext { flex: 1; min-width: 0; }
 .feed__time { flex: 0 0 auto; font-size: 11.5px; }

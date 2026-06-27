@@ -121,6 +121,8 @@ pass this), `--agent <name>` (attribute the action, e.g. `claude`/`codex`; absen
 | `solopm ticket move <id> <state>` | Transition state (validated). |
 | `solopm ticket assign <id> <assignee>` | Assign `human｜claude｜codex｜unassigned`. |
 | `solopm ticket reorder <id> [--after <id>]` | Reorder within a column (drag-and-drop in the web; no state change). |
+| `solopm ticket link <id> <type> <other>` | Relate two tickets (`blocks｜related｜duplicate｜parent`); `link A parent B` ⇒ B is A's parent. |
+| `solopm ticket unlink <id> <other> [--type]` | Remove the link(s) between two tickets. |
 | `solopm review submit <id> --verdict pass\|fail [-c notes]` | Report an AI-review verdict: pass → in-human-review, fail → kick back to in-progress. |
 | `solopm ticket criteria add <id> "…"` | Add an acceptance criterion (definition-of-done checklist item). |
 | `solopm ticket criteria check <id> <cid> [--uncheck]` | Tick (or untick) a criterion. |
@@ -152,8 +154,8 @@ board.
 **Tools:** `list_projects`, `workflow_info`, `list_tickets`, `show_ticket`,
 `create_ticket`, `edit_ticket`, `comment_ticket`, `move_ticket`, `assign_ticket`,
 `submit_review`, `add_criterion`, `check_criterion`, `edit_criterion`,
-`remove_criterion`, `radar`, `list_review_memory`, `add_review_memory`,
-`update_review_memory`, `review_prompt`.
+`remove_criterion`, `link_ticket`, `unlink_ticket`, `radar`, `list_review_memory`,
+`add_review_memory`, `update_review_memory`, `review_prompt`.
 
 Register the server with your MCP client by pointing it at `uv run solopm mcp` (cwd =
 repo root) — e.g. in Claude Code, `claude mcp add solopm -- uv run solopm mcp`.
