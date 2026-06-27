@@ -1020,16 +1020,23 @@ class Service:
 
         truncated = False
         if len(node_ids) > node_limit:
-            # For an ego-graph keep the nodes nearest the root (the root, at distance 0, is
-            # never dropped); otherwise order by (project, seq).
             if around is not None:
+                # ego-graph: keep the nodes nearest the root (the root, at distance 0, never
+                # dropped).
                 order = lambda i: (dist.get(i, 1 << 30), *self._node_sort_key(i, briefs))
+            elif scope_project is not None:
+                # project scope: keep the requested project's own tickets before neighbours,
+                # so the cap can't crowd them out with cross-project nodes that sort earlier.
+                order = lambda i: (
+                    0 if briefs.get(i, {}).get("project") == scope_project else 1,
+                    *self._node_sort_key(i, briefs),
+                )
             else:
                 order = lambda i: self._node_sort_key(i, briefs)
             node_ids = set(sorted(node_ids, key=order)[:node_limit])
             truncated = True
 
-        # Edges first, so we can prune now-orphaned cross-project neighbours below.
+        # Edges among the current node set (canonical direction); rebuilt after any prune.
         edges = sorted(
             (
                 {"from": ln.from_ticket, "to": ln.to_ticket, "type": ln.type}
@@ -1039,17 +1046,22 @@ class Service:
             key=lambda e: (e["from"], e["to"], e["type"]),
         )
 
-        # Project scope: a foreign (cross-project) node only earns a place via an edge to an
-        # in-project node. If active-only filtering dropped that in-project anchor, the foreign
-        # node is left with no surviving edge — prune it (its edges are already gone, so the
-        # edge list is unaffected). In-project nodes are kept even if they end up isolated.
+        # Project scope: a foreign (cross-project) node earns its place ONLY via an edge to a
+        # surviving in-project node — not via a foreign↔foreign edge. If active-only filtering
+        # dropped its in-project anchor, prune it and rebuild the edge list so dangling
+        # foreign↔foreign edges go too. In-project nodes are kept even if they end up isolated.
         if scope_project is not None:
-            endpoints = {e["from"] for e in edges} | {e["to"] for e in edges}
-            node_ids = {
-                n
-                for n in node_ids
-                if briefs.get(n, {}).get("project") == scope_project or n in endpoints
+            in_project = {
+                n for n in node_ids if briefs.get(n, {}).get("project") == scope_project
             }
+            keep_foreign: set[str] = set()
+            for e in edges:
+                if e["from"] in in_project and e["to"] not in in_project:
+                    keep_foreign.add(e["to"])
+                elif e["to"] in in_project and e["from"] not in in_project:
+                    keep_foreign.add(e["from"])
+            node_ids = in_project | keep_foreign
+            edges = [e for e in edges if e["from"] in node_ids and e["to"] in node_ids]
 
         # Derived blocked / sub-ticket rollup from the FULL link set (view-independent).
         blocked_ids: set[str] = set()
