@@ -99,4 +99,19 @@ describe("dependency graph render", () => {
     await openGraph({ around: "DEMO-1", depth: 2 });
     expect(graphMock).toHaveBeenCalledWith(expect.objectContaining({ around: "DEMO-1", depth: 2 }));
   });
+
+  it("drops a stale response when a newer request supersedes it", async () => {
+    let resolveStale!: (g: Graph) => void;
+    const stale = new Promise<Graph>((r) => {
+      resolveStale = r;
+    });
+    graphMock.mockReturnValueOnce(stale); // first request hangs
+    graphMock.mockResolvedValueOnce({ ...FIXTURE, nodes: [FIXTURE.nodes[0]], edges: [], cycles: [] });
+    const p1 = openGraph({ around: "DEMO-1" }); // in-flight (pending)
+    const p2 = openGraph({ around: "DEMO-2" }); // supersedes, resolves now
+    await p2;
+    resolveStale(FIXTURE); // the older response lands last…
+    await p1;
+    expect(document.querySelectorAll(".graph__node").length).toBe(1); // …but is ignored
+  });
 });

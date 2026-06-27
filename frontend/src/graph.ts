@@ -39,6 +39,7 @@ let activeTypes = new Set<LinkType>(ALL_TYPES);
 let activeOnly = false;
 let depth = 2;
 let isOpen = false;
+let reloadToken = 0; // bumped per fetch; a stale (superseded) response is dropped
 const vb = { x: 0, y: 0, w: 1200, h: 800 };
 
 /** True while the graph overlay is open (used to gate shortcuts / Esc routing). */
@@ -173,11 +174,14 @@ async function reload(): Promise<void> {
   } else if (state.currentProject) {
     q.project = state.currentProject;
   }
+  const token = ++reloadToken;
   try {
-    data = await api.graph(q);
+    const result = await api.graph(q);
+    if (token !== reloadToken) return; // a newer open/reload superseded this request
+    data = result;
     render();
   } catch (err) {
-    if (!bodyEl) return;
+    if (token !== reloadToken || !bodyEl) return; // don't clobber a newer view with a stale error
     clearChildren(bodyEl);
     bodyEl.append(el("div", { class: "graph__center tp__error" }, (err as Error).message || "Failed to load graph."));
   }
