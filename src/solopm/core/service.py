@@ -913,6 +913,270 @@ class Service:
             ticket.sub_done = sub_done
             ticket.sub_total = sub_total
 
+    # --- dependency graph (SOLO-14) -----------------------------------------
+    #
+    # A read-only projection of the SOLO-10 ``ticket_links`` data into a node/edge graph.
+    # No new storage and no new relation semantics — just shaping for visualization and
+    # topological reasoning. Edges keep SOLO-10's canonical direction.
+
+    _GRAPH_NODE_LIMIT = 500
+
+    def build_graph(
+        self,
+        *,
+        project: str | None = None,
+        around: str | None = None,
+        depth: int = 1,
+        active_only: bool = False,
+        types: list[str] | None = None,
+        limit: int | None = None,
+    ) -> dict:
+        """Build a relationship graph (nodes + typed edges) over ``ticket_links``.
+
+        Scope (``around`` takes precedence over ``project``):
+          * ``around`` (+ ``depth``) — the ego-graph reachable within ``depth`` hops of a
+            ticket, following links of the selected ``types`` in either direction;
+          * ``project`` — the project's *connected* tickets (those in ≥1 link) plus their
+            linked neighbours (cross-project neighbours included, so an edge always has both
+            endpoints); isolated tickets are omitted — a relationship graph has nothing to
+            show for them;
+          * neither — the whole store's relational graph.
+
+        ``types`` restricts which relation types appear (and, for the ego-graph, which are
+        traversed). ``active_only`` drops done/cancelled nodes and their edges. Edges use
+        SOLO-10's canonical ``from``→``to`` direction. Each node carries the same derived
+        ``blocked`` / ``subtickets`` signals as the board, computed from the full link graph
+        (independent of the view filters). Cycles in the ``blocks`` sub-graph are detected
+        and returned in ``cycles`` — never fatal (SOLO-10 forbids parent cycles, not blocks).
+        """
+        type_filter: set[str] | None = None
+        if types:
+            unknown = set(types) - set(LINK_TYPES)
+            if unknown:
+                raise ValidationError(
+                    f"Unknown relation type(s) {', '.join(sorted(unknown))}: "
+                    f"expected from {', '.join(LINK_TYPES)}."
+                )
+            type_filter = set(types)
+        node_limit = self._GRAPH_NODE_LIMIT if limit is None else max(1, limit)
+
+        all_links = self.store.list_links()
+        view_links = (
+            [ln for ln in all_links if ln.type in type_filter] if type_filter else all_links
+        )
+
+        # Undirected adjacency over in-view links, for ego-graph traversal / connectivity.
+        adjacency: dict[str, set[str]] = {}
+        for ln in view_links:
+            adjacency.setdefault(ln.from_ticket, set()).add(ln.to_ticket)
+            adjacency.setdefault(ln.to_ticket, set()).add(ln.from_ticket)
+
+        scope_project: str | None = None
+        dist: dict[str, int] = {}  # BFS distance from the ego root, for distance-aware capping
+        if around is not None:
+            around = normalize_ticket_id(around)
+            self._require_ticket(around)  # NotFoundError if missing
+            if depth < 0:
+                raise ValidationError("Graph depth must be >= 0.")
+            node_ids = {around}
+            dist[around] = 0
+            frontier = {around}
+            for hop in range(1, depth + 1):
+                nxt: set[str] = set()
+                for node in frontier:
+                    nxt |= adjacency.get(node, set()) - node_ids
+                if not nxt:
+                    break
+                for m in nxt:
+                    dist[m] = hop
+                node_ids |= nxt
+                frontier = nxt
+        elif project is not None:
+            scope_project = normalize_project_key(project)
+            self.get_project(scope_project)  # NotFoundError for an unknown project
+            project_ids = {t.id for t in self.store.list_tickets(project=scope_project)}
+            node_ids = set()
+            for ln in view_links:
+                if ln.from_ticket in project_ids or ln.to_ticket in project_ids:
+                    node_ids.add(ln.from_ticket)
+                    node_ids.add(ln.to_ticket)
+        else:
+            node_ids = set(adjacency.keys())
+
+        # Resolve briefs for the node set plus any off-graph blocker/child referenced by the
+        # full (unfiltered) link set, so derived signals match the board exactly.
+        ref_ids = set(node_ids)
+        for ln in all_links:
+            if ln.type in ("blocks", "parent") and ln.to_ticket in node_ids:
+                ref_ids.add(ln.from_ticket)
+        briefs = self.store.ticket_briefs(ref_ids)
+
+        if active_only:
+            node_ids = {
+                n
+                for n in node_ids
+                if briefs.get(n, {}).get("state") not in self._CLOSED_STATES
+            }
+
+        truncated = False
+        if len(node_ids) > node_limit:
+            if around is not None:
+                # ego-graph: keep the nodes nearest the root (the root, at distance 0, never
+                # dropped).
+                order = lambda i: (dist.get(i, 1 << 30), *self._node_sort_key(i, briefs))
+            elif scope_project is not None:
+                # project scope: keep the requested project's own tickets before neighbours,
+                # so the cap can't crowd them out with cross-project nodes that sort earlier.
+                order = lambda i: (
+                    0 if briefs.get(i, {}).get("project") == scope_project else 1,
+                    *self._node_sort_key(i, briefs),
+                )
+            else:
+                order = lambda i: self._node_sort_key(i, briefs)
+            node_ids = set(sorted(node_ids, key=order)[:node_limit])
+            truncated = True
+
+        # Edges among the current node set (canonical direction); rebuilt after any prune.
+        edges = sorted(
+            (
+                {"from": ln.from_ticket, "to": ln.to_ticket, "type": ln.type}
+                for ln in view_links
+                if ln.from_ticket in node_ids and ln.to_ticket in node_ids
+            ),
+            key=lambda e: (e["from"], e["to"], e["type"]),
+        )
+
+        # Project scope: a foreign (cross-project) node earns its place ONLY via an edge to a
+        # surviving in-project node — not via a foreign↔foreign edge. If active-only filtering
+        # dropped its in-project anchor, prune it and rebuild the edge list so dangling
+        # foreign↔foreign edges go too. In-project nodes are kept even if they end up isolated.
+        if scope_project is not None:
+            in_project = {
+                n for n in node_ids if briefs.get(n, {}).get("project") == scope_project
+            }
+            keep_foreign: set[str] = set()
+            for e in edges:
+                if e["from"] in in_project and e["to"] not in in_project:
+                    keep_foreign.add(e["to"])
+                elif e["to"] in in_project and e["from"] not in in_project:
+                    keep_foreign.add(e["from"])
+            node_ids = in_project | keep_foreign
+            edges = [e for e in edges if e["from"] in node_ids and e["to"] in node_ids]
+
+        # Derived blocked / sub-ticket rollup from the FULL link set (view-independent).
+        blocked_ids: set[str] = set()
+        sub_total: dict[str, int] = {}
+        sub_done: dict[str, int] = {}
+        for ln in all_links:
+            if ln.to_ticket not in node_ids:
+                continue
+            src_state = briefs.get(ln.from_ticket, {}).get("state")
+            if ln.type == "blocks" and src_state not in self._CLOSED_STATES:
+                blocked_ids.add(ln.to_ticket)
+            elif ln.type == "parent":
+                sub_total[ln.to_ticket] = sub_total.get(ln.to_ticket, 0) + 1
+                if src_state == "done":
+                    sub_done[ln.to_ticket] = sub_done.get(ln.to_ticket, 0) + 1
+
+        nodes = []
+        for nid in sorted(node_ids, key=lambda i: self._node_sort_key(i, briefs)):
+            brief = briefs.get(nid, {})
+            state = brief.get("state", "")
+            nodes.append(
+                {
+                    "id": nid,
+                    "project": brief.get("project", ""),
+                    "title": brief.get("title", nid),
+                    "state": state,
+                    "assignee": brief.get("assignee", ""),
+                    "blocked": nid in blocked_ids and state not in self._CLOSED_STATES,
+                    "subtickets": {"done": sub_done.get(nid, 0), "total": sub_total.get(nid, 0)},
+                }
+            )
+        cycles = self._blocks_cycles(node_ids, [e for e in edges if e["type"] == "blocks"])
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "cycles": cycles,
+            "scope": {
+                "project": scope_project,
+                "around": around,
+                "depth": depth if around is not None else None,
+                "active_only": active_only,
+                "types": sorted(type_filter) if type_filter else list(LINK_TYPES),
+            },
+            "truncated": truncated,
+        }
+
+    @staticmethod
+    def _node_sort_key(node_id: str, briefs: dict) -> tuple:
+        """Deterministic node ordering: by project then sequence number."""
+        brief = briefs.get(node_id, {})
+        try:
+            seq = int(node_id.rsplit("-", 1)[-1])
+        except ValueError:
+            seq = 0
+        return (brief.get("project", ""), seq, node_id)
+
+    @staticmethod
+    def _blocks_cycles(node_ids: set[str], blocks_edges: list[dict]) -> list[list[str]]:
+        """Strongly-connected components (size > 1) of the ``blocks`` sub-graph — i.e. the
+        groups of tickets that block each other in a loop. Iterative Tarjan, so a long chain
+        can't blow the recursion stack. Returns each cycle as a sorted id list."""
+        adj: dict[str, list[str]] = {n: [] for n in node_ids}
+        for e in blocks_edges:
+            if e["from"] in adj and e["to"] in adj:
+                adj[e["from"]].append(e["to"])
+
+        index = {}
+        lowlink = {}
+        on_stack: set[str] = set()
+        stack: list[str] = []
+        counter = 0
+        sccs: list[list[str]] = []
+
+        for root in adj:
+            if root in index:
+                continue
+            work = [(root, 0)]  # (node, next-neighbour-index)
+            while work:
+                node, pi = work[-1]
+                if pi == 0:
+                    index[node] = lowlink[node] = counter
+                    counter += 1
+                    stack.append(node)
+                    on_stack.add(node)
+                recursed = False
+                neighbours = adj[node]
+                i = pi
+                while i < len(neighbours):
+                    w = neighbours[i]
+                    if w not in index:
+                        work[-1] = (node, i + 1)
+                        work.append((w, 0))
+                        recursed = True
+                        break
+                    if w in on_stack:
+                        lowlink[node] = min(lowlink[node], index[w])
+                    i += 1
+                if recursed:
+                    continue
+                if lowlink[node] == index[node]:
+                    comp = []
+                    while True:
+                        w = stack.pop()
+                        on_stack.discard(w)
+                        comp.append(w)
+                        if w == node:
+                            break
+                    if len(comp) > 1:
+                        sccs.append(sorted(comp))
+                work.pop()
+                if work:
+                    parent = work[-1][0]
+                    lowlink[parent] = min(lowlink[parent], lowlink[node])
+        return sorted(sccs)
+
     # --- overlap / conflict radar -------------------------------------------
 
     _RADAR_ACTIVE_STATES = frozenset({"in-progress", "in-ai-review", "in-human-review"})
