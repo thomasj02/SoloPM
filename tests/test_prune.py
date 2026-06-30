@@ -25,12 +25,17 @@ class FakePruneGit:
     """A minimal git fake for the prune flow: hands back branch/worktree state and records
     the destructive calls instead of running git."""
 
-    def __init__(self, branches, worktrees=(), dirty=(), fail_remove=(), fail_delete=()):
+    def __init__(
+        self, branches, worktrees=(), dirty=(), fail_remove=(), fail_delete=(),
+        pr_heads=None, tips=None,
+    ):
         self.branches = list(branches)
         self.worktrees = list(worktrees)
         self.dirty = set(dirty)
         self.fail_remove = set(fail_remove)
         self.fail_delete = set(fail_delete)
+        self.pr_heads = dict(pr_heads or {})  # pr_number -> merged head oid
+        self.tips = dict(tips or {})  # branch -> local tip oid
         self.removed: list[str] = []
         self.deleted: list[str] = []
 
@@ -52,6 +57,12 @@ class FakePruneGit:
         if branch in self.fail_delete:
             raise GitHubError("branch checked out")
         self.deleted.append(branch)
+
+    def pr_head_oid(self, repo, number):
+        return self.pr_heads.get(number)
+
+    def branch_tip(self, repo, branch):
+        return self.tips.get(branch)
 
 
 def _branch(name, *, current=False, gone=False, merged=False):
@@ -97,14 +108,13 @@ def test_prune_protects_current_and_master(tmp_path):
 
 def test_prune_done_ticket_branch_is_a_candidate(tmp_path):
     # A branch recorded on a DONE ticket counts as merged even with no git signal.
-    gh = FakePruneGit([_branch("solo-x")])
+    # done + PR merged + the branch tip still equals the merged PR head → verified.
+    gh = FakePruneGit([_branch("solo-x")], pr_heads={7: "abc123"}, tips={"solo-x": "abc123"})
     svc = _svc(tmp_path, github=gh)
     t = svc.create_ticket(project="SOLO", title="x")
-    # Mark it done with a MERGED pr directly (bypass the workflow's git side effects, which the
-    # fake doesn't model) — prune verifies the merge via the ticket's done + merged-PR state.
     svc.store.change_ticket(
-        t.id, {"state": "done", "branch": "solo-x", "pr_state": "merged"}, actor="human",
-        kind="state_change", body="done", meta={}, when="t",
+        t.id, {"state": "done", "branch": "solo-x", "pr_state": "merged", "pr_number": 7},
+        actor="human", kind="state_change", body="done", meta={}, when="t",
     )
 
     res = svc.prune_merged_branches("SOLO", apply=True)
@@ -126,6 +136,38 @@ def test_prune_done_ticket_without_merged_pr_is_not_deleted(tmp_path):
     res = svc.prune_merged_branches("SOLO", apply=True)
     assert res["pruned"] == []
     assert [s["branch"] for s in res["skipped"]] == ["solo-y"]
+    assert gh.deleted == []
+
+
+def test_prune_done_branch_advanced_after_merge_is_skipped(tmp_path):
+    """[SOLO-23 gpt-review P1] A done+merged branch whose tip advanced past the merged PR head
+    (new committed work) is NOT force-deleted."""
+    gh = FakePruneGit([_branch("solo-z")], pr_heads={9: "merged-head"}, tips={"solo-z": "new-tip"})
+    svc = _svc(tmp_path, github=gh)
+    t = svc.create_ticket(project="SOLO", title="z")
+    svc.store.change_ticket(
+        t.id, {"state": "done", "branch": "solo-z", "pr_state": "merged", "pr_number": 9},
+        actor="human", kind="state_change", body="done", meta={}, when="t",
+    )
+    res = svc.prune_merged_branches("SOLO", apply=True)
+    assert res["pruned"] == []
+    assert [s["branch"] for s in res["skipped"]] == ["solo-z"]
+    assert gh.deleted == []  # the advanced branch's new commits are not discarded
+
+
+def test_prune_done_with_queued_pr_is_not_deleted(tmp_path):
+    """[SOLO-23 gpt-review P2] A queued (merge-queued, not-yet-landed) PR doesn't authorize
+    pruning."""
+    gh = FakePruneGit([_branch("solo-q", gone=True)], pr_heads={5: "h"}, tips={"solo-q": "h"})
+    svc = _svc(tmp_path, github=gh)
+    t = svc.create_ticket(project="SOLO", title="q")
+    svc.store.change_ticket(
+        t.id, {"state": "done", "branch": "solo-q", "pr_state": "queued", "pr_number": 5},
+        actor="human", kind="state_change", body="done", meta={}, when="t",
+    )
+    res = svc.prune_merged_branches("SOLO", apply=True)
+    assert res["pruned"] == []
+    assert [s["branch"] for s in res["skipped"]] == ["solo-q"]  # only gone-upstream → unverified
     assert gh.deleted == []
 
 

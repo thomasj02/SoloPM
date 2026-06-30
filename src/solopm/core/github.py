@@ -134,6 +134,10 @@ class GitHubClient(Protocol):
 
     def delete_local_branch(self, repo: str, branch: str) -> None: ...
 
+    def pr_head_oid(self, repo: str, number: int) -> str | None: ...
+
+    def branch_tip(self, repo: str, branch: str) -> str | None: ...
+
 
 class GitHub:
     """Real client over the local ``git`` and GitHub ``gh`` CLIs."""
@@ -502,6 +506,23 @@ class GitHub:
         Raises ``GitHubError`` on failure (e.g. the branch is checked out somewhere)."""
         validate_branch_name(branch)
         self._run(["git", "branch", "-D", branch], cwd=repo)
+
+    def pr_head_oid(self, repo: str, number: int) -> str | None:
+        """The commit OID the PR's head ref pointed at (retained by GitHub even after the
+        branch is deleted on merge), or ``None``. Used to confirm a local branch hasn't been
+        advanced/reused since its PR merged before force-deleting it."""
+        oid = self._pr_json(repo, number, "headRefOid").get("headRefOid")
+        return str(oid) if oid else None
+
+    def branch_tip(self, repo: str, branch: str) -> str | None:
+        """The local branch's tip commit OID, or ``None`` if it can't be resolved."""
+        proc = self._run(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+            cwd=repo,
+            check=False,
+        )
+        out = proc.stdout.strip()
+        return out if proc.returncode == 0 and out else None
 
     def count_unpushed_commits(self, repo: str) -> int:
         """Count locally-committed work that isn't on any remote — the board's "unpushed" signal.

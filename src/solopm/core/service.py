@@ -191,11 +191,13 @@ class Service:
 
         A branch is force-deleted only when its merge is verified — either **reachable-merged**
         into the project's master (git-proven), or recorded on a **done** ticket whose **PR
-        merged** (SoloPM's authoritative record of the squash-merge). A **gone upstream** is
-        reported as context but is NOT sufficient on its own (a remote can be deleted for
-        unmerged work), so such a branch is surfaced in ``skipped`` rather than deleted — this
-        keeps ``git branch -D`` from orphaning committed-but-unmerged commits. The **current**
-        branch and **master** are always protected.
+        merged** *and* whose merged head OID still equals the branch's local tip (so a branch
+        advanced or reused after the merge is never deleted; ``queued`` PRs, which haven't
+        landed, don't qualify). A **gone upstream** is reported as context but is NOT sufficient
+        on its own (a remote can be deleted for unmerged work), so an unverified branch is
+        surfaced in ``skipped`` rather than deleted — this keeps ``git branch -D`` from
+        orphaning committed-but-unmerged commits. The **current** branch and **master** are
+        always protected.
 
         Dry-run by default — returns what *would* be pruned. With ``apply``, deletes them: a
         branch held by a *clean* worktree has the worktree removed first (``git worktree
@@ -212,13 +214,13 @@ class Service:
         if self.github is None or not project.repo:
             return result
         repo, master = project.repo, project.master_branch
-        # Branches recorded on a done ticket whose PR actually MERGED — SoloPM's authoritative
-        # record that the (squash-)merge landed. Plain `state == done` isn't enough: we must
-        # not force-delete a branch unless we can verify its work is in master.
-        done_merged_branches = {
-            t.branch
+        # Branches recorded on a done ticket whose PR actually MERGED (not just `queued`, which
+        # hasn't landed) → the PR number, so we can confirm the branch's tip still matches the
+        # merged PR head before force-deleting. Plain `state == done` isn't enough.
+        done_merged_prs = {
+            t.branch: t.pr_number
             for t in self.store.list_tickets(project=project.key)
-            if t.branch and t.state == "done" and t.pr_state in ("merged", "queued")
+            if t.branch and t.state == "done" and t.pr_state == "merged" and t.pr_number
         }
         try:
             branches = self.github.local_branches(repo, master)
@@ -232,7 +234,8 @@ class Service:
             if b.is_current or b.name == master:
                 continue  # never delete the checked-out branch or master
             reasons: list[str] = []
-            if b.name in done_merged_branches:
+            on_done_merged = b.name in done_merged_prs
+            if on_done_merged:
                 reasons.append("done")
             if b.upstream_gone:
                 reasons.append("gone-upstream")
@@ -242,11 +245,14 @@ class Service:
                 continue  # no merge signal at all — leave it alone
 
             # Force-delete (`git branch -D`) only when the merge is VERIFIED: reachable into
-            # master (git-proven), or on a done ticket whose PR merged (SoloPM's record). A
-            # gone upstream alone is NOT proof — the remote could have been deleted for
-            # *unmerged* work — so such a branch is surfaced but never force-deleted here, to
-            # avoid orphaning committed-but-unmerged commits.
-            verified = b.merged or b.name in done_merged_branches
+            # master (git-proven), or on a done ticket whose PR merged AND whose merged head OID
+            # still equals this branch's tip (so a branch advanced/reused after the merge isn't
+            # deleted). A gone upstream alone is never sufficient — the remote could have been
+            # deleted for *unmerged* work. Anything not verified is surfaced but never deleted,
+            # so committed-but-unmerged commits are never orphaned.
+            verified = b.merged
+            if not verified and on_done_merged:
+                verified = self._branch_tip_matches_pr(repo, b.name, done_merged_prs[b.name])
             if not verified:
                 result["skipped"].append(
                     {
@@ -287,6 +293,21 @@ class Service:
                 {"branch": b.name, "reasons": reasons, "worktree": wt_path}
             )
         return result
+
+    def _branch_tip_matches_pr(self, repo: str, branch: str, pr_number: int) -> bool:
+        """True when ``branch``'s local tip still equals the merged PR's head OID.
+
+        Guards against deleting a branch that was advanced or reused after its ticket merged:
+        if new commits were added (tip moved past the merged head) the OIDs differ and we won't
+        force-delete. Any lookup failure (gh/git error, unknown OID) returns ``False`` — we
+        never treat an unverifiable branch as safe.
+        """
+        try:
+            head = self.github.pr_head_oid(repo, pr_number)
+            tip = self.github.branch_tip(repo, branch)
+        except GitHubError:
+            return False
+        return bool(head and tip and head == tip)
 
     # --- tickets ------------------------------------------------------------
 
