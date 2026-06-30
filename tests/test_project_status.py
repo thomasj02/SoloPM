@@ -71,8 +71,11 @@ def test_count_unpushed_excludes_gone_upstream_branches(monkeypatch):
     assert log_args[:2] == ["git", "log"]
     assert {"--not", "--remotes"} <= set(log_args)
     assert "refs/heads/merged-cleaned" not in log_args  # the gone branch is excluded
+    # The branch refs must be POSITIVE revisions — listed BEFORE `--not` (which negates
+    # everything after it, so a branch placed after `--not` would be subtracted, not counted).
+    not_idx = log_args.index("--not")
     for b in ("refs/heads/main", "refs/heads/feature", "refs/heads/wip"):
-        assert b in log_args
+        assert b in log_args and log_args.index(b) < not_idx
 
 
 def test_count_unpushed_all_branches_gone_returns_zero_without_log(monkeypatch):
@@ -105,6 +108,55 @@ def test_count_unpushed_log_nonzero_exit_is_zero(monkeypatch):
         gh, "_run", _fake_run_map({"for-each-ref": (0, fer), "log": (128, "")})
     )
     assert gh.count_unpushed_commits("/repo") == 0
+
+
+def test_count_unpushed_real_git_end_to_end(tmp_path):
+    """Real git (no fake), so git's revision semantics are actually exercised — this is what
+    catches the `--not` arg-ordering bug a canned fake can't: a never-pushed branch's commits
+    are counted, a pushed branch's are not, and a gone-upstream (remote-deleted) branch is
+    excluded. [SOLO-22, gpt-review]"""
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+
+    def git(*args, cwd):
+        subprocess.run(
+            ["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True
+        )
+
+    remote = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(remote)], check=True, capture_output=True
+    )
+    repo = tmp_path / "work"
+    subprocess.run(["git", "clone", str(remote), str(repo)], check=True, capture_output=True)
+    git("config", "user.email", "t@example.com", cwd=repo)
+    git("config", "user.name", "Tester", cwd=repo)
+    git("config", "commit.gpgsign", "false", cwd=repo)
+
+    gh = GitHub()
+
+    # Initial commit on main, pushed → nothing unpushed.
+    git("commit", "--allow-empty", "-m", "init", cwd=repo)
+    git("push", "-u", "origin", "main", cwd=repo)
+    assert gh.count_unpushed_commits(str(repo)) == 0
+
+    # A never-pushed feature branch with 2 commits → counted (the regression the fake missed).
+    git("checkout", "-b", "feature", cwd=repo)
+    git("commit", "--allow-empty", "-m", "c1", cwd=repo)
+    git("commit", "--allow-empty", "-m", "c2", cwd=repo)
+    assert gh.count_unpushed_commits(str(repo)) == 2
+
+    # Push it → now on the remote → not counted.
+    git("push", "-u", "origin", "feature", cwd=repo)
+    assert gh.count_unpushed_commits(str(repo)) == 0
+
+    # Delete the remote branch + prune → upstream gone (the squash-merge cleanup) → excluded.
+    git("push", "origin", "--delete", "feature", cwd=repo)
+    git("fetch", "--prune", "origin", cwd=repo)
+    assert gh.count_unpushed_commits(str(repo)) == 0
 
 
 def test_run_wraps_bad_cwd_oserror_as_github_error(tmp_path):

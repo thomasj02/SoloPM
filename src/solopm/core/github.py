@@ -455,8 +455,11 @@ class GitHub:
             branches.append(name)
         if not branches:
             return 0
+        # The branch refs are POSITIVE revisions and MUST come before ``--not`` — ``--not``
+        # flips the sense of every revision that follows it, so listing the branches after it
+        # would negate them too and the query would always return nothing.
         proc = self._run(
-            ["git", "log", "--not", "--remotes", "--format=%H", *branches],
+            ["git", "log", "--format=%H", *branches, "--not", "--remotes"],
             cwd=repo,
             check=False,
         )
