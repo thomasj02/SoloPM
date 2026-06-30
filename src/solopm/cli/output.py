@@ -110,6 +110,29 @@ def render_project(p: dict) -> None:
     console.print(Panel("\n".join(lines), title="Project", expand=False))
 
 
+def render_prune(r: dict) -> None:
+    """Human view of a branch prune (SOLO-23): what was (or would be) deleted, and skips."""
+    pruned = r.get("pruned", [])
+    skipped = r.get("skipped", [])
+    applied = r.get("applied", False)
+    if not pruned and not skipped:
+        console.print("[green]✓[/] No merged local branches to prune.")
+        return
+    if pruned:
+        verb = "Deleted" if applied else "Would delete"
+        console.print(f"[bold]{verb} {len(pruned)} branch(es):[/]")
+        for p in pruned:
+            reasons = ", ".join(p.get("reasons", []))
+            wt = f" [grey62](+ worktree {p['worktree']})[/]" if p.get("worktree") else ""
+            console.print(f"  [bold]{p['branch']}[/] [grey62]({reasons})[/]{wt}")
+    if skipped:
+        console.print(f"[yellow]Skipped {len(skipped)}:[/]")
+        for s in skipped:
+            console.print(f"  [bold]{s['branch']}[/] [grey62]— {s.get('reason', '')}[/]")
+    if pruned and not applied:
+        console.print("[grey62]Dry run — re-run with [bold]--apply[/] to delete.[/]")
+
+
 def render_tickets(tickets: list[dict]) -> None:
     if not tickets:
         console.print("[grey50]No tickets match.[/]")

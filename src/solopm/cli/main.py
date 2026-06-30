@@ -316,6 +316,25 @@ def project_delete(
     _run(call, lambda api: api.delete(path), render)
 
 
+@project_app.command("prune")
+def project_prune(
+    key: Annotated[str, typer.Argument(help="Project key.")],
+    apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Actually delete (default: a dry-run that only lists candidates)."),
+    ] = False,
+    json_out: JsonOpt = False,
+    url: UrlOpt = None,
+) -> None:
+    """Prune local branches whose work is merged (recorded on a done ticket, gone upstream, or
+    merged into master). Dry-run by default; --apply deletes them — removing a clean git
+    worktree first and skipping any worktree with uncommitted changes. Never touches the
+    current branch or master."""
+    call = Call(json_out, None, url)
+    path = f"/api/projects/{quote(key, safe='')}/prune"
+    _run(call, lambda api: api.post(path, json={"apply": apply}), output.render_prune)
+
+
 @project_app.command("set")
 def project_set(
     key: Annotated[str, typer.Argument(help="Project key.")],

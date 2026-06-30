@@ -84,3 +84,24 @@ describe("api tags (SOLO-21)", () => {
     expect(fetchMock.mock.calls[0][0]).toBe("/api/tickets?project=SOLO&tag=bug&tag=frontend");
   });
 });
+
+describe("api.prune (SOLO-23)", () => {
+  it("POSTs a dry-run by default", async () => {
+    const fetchMock = stubFetch({ project: "SOLO", applied: false, pruned: [], skipped: [] });
+
+    const res = await api.prune("SOLO");
+    expect(res.applied).toBe(false);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/projects/SOLO/prune");
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ apply: false });
+  });
+
+  it("passes apply=true", async () => {
+    const fetchMock = stubFetch({ project: "SOLO", applied: true, pruned: [], skipped: [] });
+
+    await api.prune("SOLO", true);
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(JSON.parse(init.body as string)).toEqual({ apply: true });
+  });
+});

@@ -94,6 +94,17 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
         return tools.delete_project(key, force=force)
 
     @mcp.tool()
+    def prune_merged_branches(project: str, apply: bool = False) -> dict:
+        """Clean up the project repo's local branches whose work is merged — recorded on a
+        DONE ticket, with a gone upstream (remote deleted on merge), or reachable-merged into
+        master. The current branch and master are never touched. Dry-run by default (lists
+        what WOULD be pruned); pass apply=true to delete: a branch in a clean git worktree has
+        the worktree removed first, while a worktree with uncommitted changes is skipped. No-op
+        without a repo / git. Returns {project, applied, pruned:[{branch,reasons,worktree}],
+        skipped:[{branch,reason}]}."""
+        return tools.prune_merged_branches(project, apply=apply)
+
+    @mcp.tool()
     def workflow_info() -> dict:
         """The SoloPM workflow: valid states, labels, transitions, assignees, and the
         actor rules (only the human may close a ticket to 'done')."""

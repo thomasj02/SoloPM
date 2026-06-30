@@ -11,6 +11,7 @@ import {
   loadProjects,
   setProject,
   refreshTickets,
+  refreshStatus,
   setFilter,
 } from "./store";
 import { api, ApiError } from "./api";
@@ -19,7 +20,7 @@ import { openModal, closeTopModal, isOverlayOpen, toast, toastError, toastSucces
 import { initBoard, isDragging } from "./board";
 import { closeTicket, isTicketOpen, openTicket, pollOpenTicket } from "./ticket";
 import { openGraph, isGraphOpen, closeGraph } from "./graph";
-import type { Assignee, Project, ReviewMemoryItem, State } from "./types";
+import type { Assignee, Project, PruneResult, ReviewMemoryItem, State } from "./types";
 
 const POLL_MS = 4000;
 let searchInput: HTMLInputElement | null = null;
@@ -533,6 +534,77 @@ function confirmDeleteProject(project: Project, onDeleted: () => void | Promise<
   });
 }
 
+/** Prune merged local branches (SOLO-23): runs a dry-run, shows the candidates + skips, and
+ * (if any) offers a destructive confirm to actually delete them. */
+async function confirmPruneBranches(key: string): Promise<void> {
+  let dry: PruneResult;
+  try {
+    dry = await api.prune(key, false);
+  } catch (err) {
+    toastError((err as ApiError).message || "Couldn't scan branches.");
+    return;
+  }
+  const pruned = dry.pruned ?? [];
+  const skipped = dry.skipped ?? [];
+
+  const body = el("div", { class: "form" });
+  if (!pruned.length && !skipped.length) {
+    body.append(el("p", { class: "muted" }, "No merged local branches to prune."));
+  } else {
+    if (pruned.length) {
+      body.append(el("p", {}, `${pruned.length} merged branch${pruned.length === 1 ? "" : "es"} will be deleted:`));
+      body.append(
+        el(
+          "ul",
+          { class: "prune-list" },
+          pruned.map((p) =>
+            el("li", {}, [
+              el("span", { class: "mono" }, p.branch),
+              el("span", { class: "muted" }, ` — ${p.reasons.join(", ")}${p.worktree ? " · + worktree" : ""}`),
+            ]),
+          ),
+        ),
+      );
+    }
+    if (skipped.length) {
+      body.append(el("p", { class: "muted" }, `Skipped ${skipped.length} (e.g. a worktree with uncommitted changes):`));
+      body.append(
+        el(
+          "ul",
+          { class: "prune-list prune-list--skip" },
+          skipped.map((s) => el("li", {}, [el("span", { class: "mono" }, s.branch), ` — ${s.reason}`])),
+        ),
+      );
+    }
+  }
+  const errBox = el("div", { class: "form__err", hidden: true });
+  body.append(errBox);
+
+  const footer: HTMLElement[] = [el("button", { class: "btn btn--ghost", onClick: () => modal.close() }, "Close")];
+  if (pruned.length) {
+    const n = pruned.length;
+    const deleteBtn = el("button", { type: "button", class: "btn btn--danger-solid" }, `Delete ${n} branch${n === 1 ? "" : "es"}`);
+    const doPrune = async (): Promise<void> => {
+      errBox.hidden = true;
+      deleteBtn.disabled = true;
+      try {
+        const res = await api.prune(key, true);
+        modal.close();
+        const done = res.pruned.length;
+        toastSuccess(`Pruned ${done} branch${done === 1 ? "" : "es"}`);
+        void refreshStatus(); // branch/PR state may have changed
+      } catch (err) {
+        deleteBtn.disabled = false;
+        setFormError(errBox, (err as ApiError).message || "Prune failed.");
+      }
+    };
+    deleteBtn.addEventListener("click", () => void doPrune());
+    footer.push(deleteBtn);
+  }
+
+  const modal = openModal({ title: "Prune merged branches", body, footer, width: "520px" });
+}
+
 async function openProjectSettings(): Promise<void> {
   const key = state.currentProject;
   if (!key) {
@@ -620,6 +692,11 @@ async function openProjectSettings(): Promise<void> {
       "Review memory",
       reviewMemorySection(key, project.review_memory || []),
       "Accumulated review checklist — active items are appended to the review prompt. Candidates are captured from AI-review fails and human kickbacks; curate them here.",
+    ),
+    field(
+      "Branch cleanup",
+      el("button", { type: "button", class: "btn btn--ghost btn--sm", onClick: () => void confirmPruneBranches(key) }, "Prune merged branches…"),
+      "Delete local branches whose work is merged (done ticket / gone upstream / merged into master). Removes a clean worktree first; skips worktrees with uncommitted changes.",
     ),
     errBox,
   ]);

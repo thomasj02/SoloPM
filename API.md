@@ -108,6 +108,16 @@ its tickets, their activity, and every relationship link touching them (includin
 cross-project links to/from those tickets). Irreversible. `404 not_found` for an unknown
 project.
 
+`POST /api/projects/{key}/prune` body `{ "apply": <bool> }` (default `false`) →
+`{ "project", "applied", "pruned": [ { "branch", "reasons": [...], "worktree": <path|null> } ],
+"skipped": [ { "branch", "reason" } ] }`. Cleans up the project repo's **local** branches
+whose work is merged — recorded on a **done** ticket, with a **gone** upstream (remote branch
+deleted on merge), or **reachable-merged** into master. The current branch and master are
+never touched. Dry-run unless `apply=true`; on apply, a branch held by a **clean** git
+worktree has the worktree removed first, while a worktree with **uncommitted changes** is
+skipped (reported in `skipped`). Degrades gracefully (no `repo` / no git client / git error →
+empty `pruned`+`skipped`). `404 not_found` for an unknown project.
+
 **`<project>` shape:**
 ```json
 {

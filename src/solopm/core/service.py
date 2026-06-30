@@ -186,6 +186,88 @@ class Service:
                 unpushed = 0
         return {"open_prs": open_prs, "unpushed_commits": unpushed}
 
+    def prune_merged_branches(self, key: str, *, apply: bool = False) -> dict:
+        """Clean up local branches whose work is merged (SOLO-23).
+
+        A branch is a prune candidate when its work has shipped — by ANY of: it's recorded on
+        a **done** SoloPM ticket in this project (SoloPM's own source of truth), its **upstream
+        is gone** (remote branch deleted on merge — the squash-merge signal), or it's
+        **reachable-merged** into the project's master. The **current** branch and **master**
+        are always protected.
+
+        Dry-run by default — returns what *would* be pruned. With ``apply``, deletes them: a
+        branch held by a *clean* worktree has the worktree removed first (``git worktree
+        remove``), then the branch (``git branch -D``); a worktree with **uncommitted changes**
+        is skipped and reported so no work is discarded. Per-branch git failures are caught and
+        reported in ``skipped`` rather than aborting the whole prune.
+
+        Degrades gracefully like radar/status (no repo, no git client, or a git error → an empty
+        result, never a 500). Returns
+        ``{project, applied, pruned:[{branch, reasons, worktree}], skipped:[{branch, reason}]}``.
+        """
+        project = self.get_project(key)
+        result: dict = {"project": project.key, "applied": apply, "pruned": [], "skipped": []}
+        if self.github is None or not project.repo:
+            return result
+        repo, master = project.repo, project.master_branch
+        done_branches = {
+            t.branch
+            for t in self.store.list_tickets(project=project.key)
+            if t.branch and t.state == "done"
+        }
+        try:
+            branches = self.github.local_branches(repo, master)
+            worktrees = {
+                wt.branch: wt.path for wt in self.github.list_worktrees(repo) if wt.branch
+            }
+        except GitHubError:
+            return result
+
+        for b in branches:
+            if b.is_current or b.name == master:
+                continue  # never delete the checked-out branch or master
+            reasons: list[str] = []
+            if b.name in done_branches:
+                reasons.append("done")
+            if b.upstream_gone:
+                reasons.append("gone-upstream")
+            if b.merged:
+                reasons.append("merged")
+            if not reasons:
+                continue  # not merged — leave it alone
+
+            wt_path = worktrees.get(b.name)
+            if wt_path:
+                try:
+                    dirty = self.github.worktree_is_dirty(wt_path)
+                except GitHubError:
+                    dirty = True  # unverifiable → don't risk removing it
+                if dirty:
+                    result["skipped"].append(
+                        {"branch": b.name, "reason": f"worktree has uncommitted changes ({wt_path})"}
+                    )
+                    continue
+                if apply:
+                    try:
+                        self.github.remove_worktree(repo, wt_path)
+                    except GitHubError as exc:
+                        result["skipped"].append(
+                            {"branch": b.name, "reason": f"could not remove worktree: {exc}"}
+                        )
+                        continue
+            if apply:
+                try:
+                    self.github.delete_local_branch(repo, b.name)
+                except GitHubError as exc:
+                    result["skipped"].append(
+                        {"branch": b.name, "reason": f"delete failed: {exc}"}
+                    )
+                    continue
+            result["pruned"].append(
+                {"branch": b.name, "reasons": reasons, "worktree": wt_path}
+            )
+        return result
+
     # --- tickets ------------------------------------------------------------
 
     def create_ticket(
