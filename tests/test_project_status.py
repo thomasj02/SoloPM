@@ -29,27 +29,81 @@ def _fake_run(returncode, stdout, stderr="", record=None):
     return run
 
 
-def test_count_unpushed_commits_counts_log_lines(monkeypatch):
-    # `git log --branches --not --remotes --format=%H` prints one sha per line.
+def _fake_run_map(responses, record=None):
+    """A git fake that dispatches on the subcommand (``args[1]``), e.g. 'for-each-ref' / 'log'.
+
+    ``responses`` maps a subcommand to ``(returncode, stdout)``; unlisted subcommands return
+    ``(0, "")``. ``count_unpushed_commits`` now makes two calls, so the fixed-response fake
+    isn't enough on its own.
+    """
+    def run(args, cwd, check=True):
+        if record is not None:
+            record.append(args)
+        rc, out = responses.get(args[1], (0, ""))
+
+        class P:
+            pass
+
+        p = P()
+        p.returncode, p.stdout, p.stderr = rc, out, ""
+        return p
+
+    return run
+
+
+def test_count_unpushed_excludes_gone_upstream_branches(monkeypatch):
+    # SOLO-22: branches whose upstream is gone (squash-merged + remote deleted) are dropped;
+    # the log query runs over only the surviving branches.
     gh = GitHub()
     calls = []
-    monkeypatch.setattr(gh, "_run", _fake_run(0, "a1\nb2\nc3\n", record=calls))
+    fer = (
+        "refs/heads/main\t\n"  # in sync (empty track)
+        "refs/heads/feature\t[ahead 2]\n"  # ahead of a live upstream
+        "refs/heads/merged-cleaned\t[gone]\n"  # squash-merged + remote deleted → excluded
+        "refs/heads/wip\t\n"  # never pushed (no upstream) → counts
+    )
+    monkeypatch.setattr(
+        gh, "_run", _fake_run_map({"for-each-ref": (0, fer), "log": (0, "a1\nb2\nc3\n")}, record=calls)
+    )
     assert gh.count_unpushed_commits("/repo") == 3
-    args = calls[0]
-    assert args[:2] == ["git", "log"]
-    assert {"--branches", "--not", "--remotes"} <= set(args)
+    assert calls[0][:2] == ["git", "for-each-ref"]
+    log_args = calls[1]
+    assert log_args[:2] == ["git", "log"]
+    assert {"--not", "--remotes"} <= set(log_args)
+    assert "refs/heads/merged-cleaned" not in log_args  # the gone branch is excluded
+    for b in ("refs/heads/main", "refs/heads/feature", "refs/heads/wip"):
+        assert b in log_args
+
+
+def test_count_unpushed_all_branches_gone_returns_zero_without_log(monkeypatch):
+    gh = GitHub()
+    calls = []
+    fer = "refs/heads/a\t[gone]\nrefs/heads/b\t[gone]\n"
+    monkeypatch.setattr(gh, "_run", _fake_run_map({"for-each-ref": (0, fer)}, record=calls))
+    assert gh.count_unpushed_commits("/repo") == 0
+    assert len(calls) == 1  # nothing to count → the log query is never run
 
 
 def test_count_unpushed_commits_zero_when_no_unpushed(monkeypatch):
+    # No branches at all (detached HEAD / empty for-each-ref) → zero.
     gh = GitHub()
-    monkeypatch.setattr(gh, "_run", _fake_run(0, ""))
+    monkeypatch.setattr(gh, "_run", _fake_run_map({"for-each-ref": (0, "")}))
     assert gh.count_unpushed_commits("/repo") == 0
 
 
-def test_count_unpushed_commits_nonzero_exit_is_zero(monkeypatch):
-    # A non-git / bare / odd repo exits non-zero — report zero, don't raise.
+def test_count_unpushed_for_each_ref_nonzero_exit_is_zero(monkeypatch):
+    # A non-git / bare / odd repo exits non-zero on the first query — report zero, don't raise.
     gh = GitHub()
-    monkeypatch.setattr(gh, "_run", _fake_run(128, "", "not a git repository"))
+    monkeypatch.setattr(gh, "_run", _fake_run_map({"for-each-ref": (128, "")}))
+    assert gh.count_unpushed_commits("/repo") == 0
+
+
+def test_count_unpushed_log_nonzero_exit_is_zero(monkeypatch):
+    gh = GitHub()
+    fer = "refs/heads/main\t\n"
+    monkeypatch.setattr(
+        gh, "_run", _fake_run_map({"for-each-ref": (0, fer), "log": (128, "")})
+    )
     assert gh.count_unpushed_commits("/repo") == 0
 
 
