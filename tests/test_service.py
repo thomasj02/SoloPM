@@ -238,6 +238,22 @@ def test_force_delete_removes_dependents_on_pre_cascade_schema(tmp_path):
     assert service.create_ticket(project="SOLO", title="fresh").id == "SOLO-1"
 
 
+def test_store_create_ticket_for_missing_project_raises_not_found(service):
+    """[SOLO-20, gpt-review P2] If a project is deleted out from under an in-flight ticket
+    creation (a create/delete race now possible since projects became deletable), the store
+    must raise a clean NotFoundError — not subscript a missing seq_counter row into a 500."""
+    with pytest.raises(NotFoundError):
+        service.store.create_ticket(
+            project_key="GONE",
+            title="x",
+            description="",
+            state="backlog",
+            assignee="unassigned",
+            actor="human",
+            created_at="2026-01-01T00:00:00Z",
+        )
+
+
 # --- Ticket creation & IDs --------------------------------------------------
 
 

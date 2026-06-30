@@ -400,9 +400,17 @@ class Store:
                     "UPDATE projects SET seq_counter = seq_counter + 1 WHERE key = ?",
                     (project_key,),
                 )
-                seq = conn.execute(
+                row = conn.execute(
                     "SELECT seq_counter FROM projects WHERE key = ?", (project_key,)
-                ).fetchone()["seq_counter"]
+                ).fetchone()
+                # The project can vanish between the service's existence check and this
+                # write — a create/delete race made reachable once projects became
+                # deletable (SOLO-20). Without the project row the UPDATE hit zero rows and
+                # this SELECT is empty; raise a clean NotFoundError (→ 404) instead of
+                # subscripting None into an internal 500.
+                if row is None:
+                    raise NotFoundError(f"Project {project_key!r} not found.")
+                seq = row["seq_counter"]
                 ticket_id = f"{project_key}-{seq}"
                 # New tickets default to the end of their column (position = seq, which
                 # is monotonic), so creation order is the initial board order.
