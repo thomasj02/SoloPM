@@ -72,6 +72,19 @@ def test_project_delete_force_cascades(wired):
     assert json.loads(r.output)["projects"] == []
 
 
+def test_project_delete_key_cannot_smuggle_force(wired):
+    """[SOLO-20, gpt-review P2] A crafted key must not inject ?force=true past the --force
+    guard. The key is URL-encoded, so 'SOLO?force=true' (no --force) can't cascade-delete the
+    non-empty SOLO project."""
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "x")
+    r = invoke("project", "delete", "SOLO?force=true", "--json")  # note: no --force flag
+    assert r.exit_code == 1
+    # The real project and its ticket are untouched.
+    r = invoke("project", "list", "--json")
+    assert {p["key"] for p in json.loads(r.output)["projects"]} == {"SOLO"}
+
+
 def test_ticket_lifecycle_json(wired):
     invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
     r = invoke("ticket", "create", "--project", "SOLO", "--title", "Build it", "--json")

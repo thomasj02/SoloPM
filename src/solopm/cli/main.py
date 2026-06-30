@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, List, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import typer
 from typing_extensions import Annotated
@@ -303,7 +303,10 @@ def project_delete(
     """Delete a project. Refused if it still has tickets unless --force, which also deletes
     all of its tickets, their activity, and their relationships (irreversible)."""
     call = Call(json_out, None, url)
-    path = f"/api/projects/{key}" + ("?force=true" if force else "")
+    # Encode the key into the path segment so a crafted key (e.g. "SOLO?force=true") can't
+    # smuggle force=true past the --force guard on this destructive command — force is set
+    # ONLY by the flag below.
+    path = f"/api/projects/{quote(key, safe='')}" + ("?force=true" if force else "")
 
     def render(r: dict) -> None:
         n = r.get("tickets_deleted", 0)
