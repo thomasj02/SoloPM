@@ -212,6 +212,32 @@ def test_link_tools_registered(service, project):
     assert {"link_ticket", "unlink_ticket"} <= names
 
 
+def test_tag_and_untag_via_mcp(service, project):
+    t = tools_for(service)
+    t.create_ticket(project="SOLO", title="x")
+    out = t.tag_ticket("SOLO-1", ["Bug", "frontend"])
+    assert out["tags"] == ["bug", "frontend"]
+    # tags surface in show_ticket + the tag activity is attributed to the agent
+    shown = t.show_ticket("SOLO-1")
+    assert shown["tags"] == ["bug", "frontend"]
+    assert any(a["kind"] == "tags" and a["actor"] == "claude" for a in shown["activity"])
+    # list filter
+    t.create_ticket(project="SOLO", title="y")
+    assert {tk["id"] for tk in t.list_tickets(tags=["bug"])["tickets"]} == {"SOLO-1"}
+    # untag
+    assert t.untag_ticket("SOLO-1", "bug")["tags"] == ["frontend"]
+    # invalid tag -> structured error, not an exception
+    assert t.tag_ticket("SOLO-1", ["bad tag"])["error"]["code"] == "validation"
+
+
+def test_tag_tools_registered(service, project):
+    from solopm.mcp.server import build_server
+
+    mcp = build_server(service, agent="claude")
+    names = {tool.name for tool in asyncio.run(mcp.list_tools())}
+    assert {"tag_ticket", "untag_ticket"} <= names
+
+
 def test_criteria_via_mcp_tools(service, project):
     t = tools_for(service)
     t.create_ticket(project="SOLO", title="x")

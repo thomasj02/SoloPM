@@ -62,6 +62,10 @@ class LinkCreate(BaseModel):
     other: str  # the other ticket id
 
 
+class TagsBody(BaseModel):
+    tags: list[str]  # one or more tags to add (normalized server-side)
+
+
 class CriterionCreate(BaseModel):
     text: str
 

@@ -78,6 +78,7 @@ export interface TicketQuery {
   project?: string;
   state?: State;
   assignee?: string;
+  tags?: string[];
 }
 
 export const api = {
@@ -100,6 +101,7 @@ export const api = {
     if (q.project) params.set("project", q.project);
     if (q.state) params.set("state", q.state);
     if (q.assignee) params.set("assignee", q.assignee);
+    for (const tag of q.tags ?? []) params.append("tag", tag);
     const qs = params.toString();
     return request<{ tickets: TicketSummary[] }>("GET", `/tickets${qs ? "?" + qs : ""}`);
   },
@@ -121,6 +123,13 @@ export const api = {
       `/tickets/${enc(id)}/move`,
       after === undefined ? { state } : { state, after },
     ),
+
+  // Tags (SOLO-21). `addTags` adds one or more (server normalizes/dedupes); `removeTag`
+  // drops one. The tag is path-encoded so a crafted value can't manipulate the URL.
+  addTags: (id: string, tags: string[]) =>
+    request<Ticket>("POST", `/tickets/${enc(id)}/tags`, { tags }),
+  removeTag: (id: string, tag: string) =>
+    request<Ticket>("DELETE", `/tickets/${enc(id)}/tags/${enc(tag)}`),
 
   addCriterion: (id: string, text: string) =>
     request<Ticket>("POST", `/tickets/${enc(id)}/criteria`, { text }),

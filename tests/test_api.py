@@ -156,6 +156,48 @@ def test_delete_nonempty_project_with_force_cascades(client):
     assert client.get("/api/tickets/SOLO-1").status_code == 404
 
 
+# --- ticket tags (SOLO-21) --------------------------------------------------
+
+
+def test_add_and_remove_tags(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "x"})
+    r = client.post("/api/tickets/SOLO-1/tags", json={"tags": ["Bug", "frontend"]})
+    assert r.status_code == 201
+    assert r.json()["tags"] == ["bug", "frontend"]
+    r = client.delete("/api/tickets/SOLO-1/tags/bug")
+    assert r.status_code == 200
+    assert r.json()["tags"] == ["frontend"]
+
+
+def test_invalid_tag_400(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "x"})
+    r = client.post("/api/tickets/SOLO-1/tags", json={"tags": ["bad tag"]})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "validation"
+
+
+def test_list_tickets_filter_by_tag(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "a"})
+    client.post("/api/tickets", json={"project": "SOLO", "title": "b"})
+    client.post("/api/tickets/SOLO-1/tags", json={"tags": ["bug", "frontend"]})
+    client.post("/api/tickets/SOLO-2/tags", json={"tags": ["bug"]})
+    r = client.get("/api/tickets?tag=bug")
+    assert {t["id"] for t in r.json()["tickets"]} == {"SOLO-1", "SOLO-2"}
+    r = client.get("/api/tickets?tag=bug&tag=frontend")
+    assert {t["id"] for t in r.json()["tickets"]} == {"SOLO-1"}
+
+
+def test_ticket_summary_and_detail_include_tags(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "a"})
+    client.post("/api/tickets/SOLO-1/tags", json={"tags": ["bug"]})
+    assert client.get("/api/tickets?project=SOLO").json()["tickets"][0]["tags"] == ["bug"]
+    assert client.get("/api/tickets/SOLO-1").json()["tags"] == ["bug"]
+
+
 # --- tickets ----------------------------------------------------------------
 
 

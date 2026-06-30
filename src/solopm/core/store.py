@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     session_id     TEXT,
     session_active INTEGER NOT NULL DEFAULT 0,
     acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+    tags           TEXT NOT NULL DEFAULT '[]',
     position       REAL NOT NULL DEFAULT 0,
     state_entered_at TEXT,
     created_at     TEXT NOT NULL,
@@ -97,6 +98,7 @@ _TICKET_UPDATABLE = frozenset(
         "session_id",
         "session_active",
         "acceptance_criteria",
+        "tags",
         "position",
         "state_entered_at",
     }
@@ -162,6 +164,9 @@ class Store:
                 )
                 """
             )
+        if "tags" not in cols:
+            # SOLO-21: free-form ticket tags/labels. Existing tickets start untagged.
+            conn.execute("ALTER TABLE tickets ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
         pcols = {r["name"] for r in conn.execute("PRAGMA table_info(projects)")}
         if "review_memory" not in pcols:
             # SOLO-7: per-project review memory (the learning review gate).
@@ -215,6 +220,7 @@ class Store:
                 Criterion(id=c["id"], text=c["text"], done=bool(c["done"]))
                 for c in json.loads(row["acceptance_criteria"] or "[]")
             ],
+            tags=json.loads(row["tags"] or "[]"),
             position=row["position"],
             state_entered_at=row["state_entered_at"] or row["created_at"],
             created_at=row["created_at"],
@@ -541,6 +547,55 @@ class Store:
                 conn.execute(
                     "UPDATE tickets SET acceptance_criteria = ?, updated_at = ? WHERE id = ?",
                     (json.dumps(new_criteria), when, ticket_id),
+                )
+                cur = conn.execute(
+                    """INSERT INTO activity (ticket_id, actor, kind, body, meta, created_at)
+                       VALUES (?,?,?,?,?,?)""",
+                    (ticket_id, actor, kind, body, json.dumps(meta or {}), when),
+                )
+                new_id = cur.lastrowid
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return Activity(
+            id=new_id, ticket_id=ticket_id, actor=actor, kind=kind, body=body,
+            meta=meta or {}, created_at=when,
+        )
+
+    def mutate_tags(
+        self,
+        ticket_id: str,
+        mutate: Callable[[list[str]], tuple[list[str], str, str, dict]],
+        *,
+        actor: str,
+        when: str,
+    ) -> Activity | None:
+        """Atomically read-modify-write a ticket's tags + log one activity, like
+        :meth:`mutate_criteria`.
+
+        ``mutate(tags) -> (new_tags, kind, body, meta)`` runs INSIDE the write transaction
+        (``BEGIN IMMEDIATE``), so concurrent tag edits on the same ticket serialize. If the
+        callback returns the tag list unchanged, this is a no-op — no column write, no
+        activity, returns ``None`` — so adding an already-present tag (or removing an absent
+        one) is idempotent and doesn't spam the activity log.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT tags FROM tickets WHERE id = ?", (ticket_id,)
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError(f"Ticket {ticket_id!r} not found.")
+                old = json.loads(row["tags"] or "[]")
+                new_tags, kind, body, meta = mutate(list(old))
+                if new_tags == old:
+                    conn.execute("COMMIT")
+                    return None
+                conn.execute(
+                    "UPDATE tickets SET tags = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(new_tags), when, ticket_id),
                 )
                 cur = conn.execute(
                     """INSERT INTO activity (ticket_id, actor, kind, body, meta, created_at)

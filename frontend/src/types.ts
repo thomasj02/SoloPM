@@ -20,7 +20,8 @@ export type ActivityKind =
   | "criteria"
   | "review"
   | "link"
-  | "unlink";
+  | "unlink"
+  | "tags";
 
 export interface Criterion {
   id: string;
@@ -183,6 +184,7 @@ export interface TicketSummary {
   session_active: boolean;
   pr: PR | null;
   acceptance: { done: number; total: number };
+  tags: string[];
   comment_count: number;
   // SOLO-10: derived relationship signals — an open (non-done/cancelled) blocker exists,
   // and the sub-ticket rollup (children done / total) when this ticket is a parent.
@@ -207,6 +209,7 @@ export interface Ticket {
   pr: PR | null;
   session: Session | null;
   acceptance_criteria: Criterion[];
+  tags: string[];
   relations: Relation[];
   comments: Comment[];
   activity: Activity[];

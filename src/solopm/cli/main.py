@@ -381,22 +381,30 @@ def ticket_list(
     assignee: Annotated[
         Optional[str], typer.Option("--assignee", help="Filter by assignee.")
     ] = None,
+    tag: Annotated[
+        Optional[List[str]],
+        typer.Option("--tag", help="Filter by tag (repeatable; a ticket must carry ALL given tags)."),
+    ] = None,
     json_out: JsonOpt = False,
     url: UrlOpt = None,
 ) -> None:
     """List tickets (the board query)."""
     call = Call(json_out, None, url)
-    params = {}
+    params: list[tuple[str, str]] = []
     project = project or config.default_project()
     if project:
-        params["project"] = project
+        params.append(("project", project))
     if state:
-        params["state"] = state
+        params.append(("state", state))
     if assignee:
-        params["assignee"] = assignee
+        params.append(("assignee", assignee))
+    for tg in tag or []:
+        params.append(("tag", tg))
+    query = urlencode(params)
+    path = "/api/tickets" + (f"?{query}" if query else "")
     _run(
         call,
-        lambda api: api.get("/api/tickets", params=params),
+        lambda api: api.get(path),
         lambda r: output.render_tickets(r["tickets"]),
     )
 
@@ -591,6 +599,51 @@ def ticket_unlink(
         output.console.print(f"[green]✓[/] {ticket_id} ⇄ {other_id} unlinked")
 
     _run(call, lambda api: api.delete(path), render)
+
+
+@ticket_app.command("tag")
+def ticket_tag(
+    ticket_id: Annotated[str, typer.Argument(help="Ticket ID.")],
+    tags: Annotated[List[str], typer.Argument(help="One or more tags to add.")],
+    json_out: JsonOpt = False,
+    agent: AgentOpt = None,
+    url: UrlOpt = None,
+) -> None:
+    """Add one or more tags/labels to a ticket (normalized to lowercase)."""
+    call = Call(json_out, agent, url)
+
+    def render(t: dict) -> None:
+        shown = ", ".join(t.get("tags") or []) or "—"
+        output.console.print(f"[green]✓[/] {t['id']} tags: [bold]{shown}[/]")
+
+    _run(
+        call,
+        lambda api: api.post(f"/api/tickets/{ticket_id}/tags", json={"tags": tags}),
+        render,
+    )
+
+
+@ticket_app.command("untag")
+def ticket_untag(
+    ticket_id: Annotated[str, typer.Argument(help="Ticket ID.")],
+    tag: Annotated[str, typer.Argument(help="The tag to remove.")],
+    json_out: JsonOpt = False,
+    agent: AgentOpt = None,
+    url: UrlOpt = None,
+) -> None:
+    """Remove a tag from a ticket."""
+    call = Call(json_out, agent, url)
+
+    def render(t: dict) -> None:
+        shown = ", ".join(t.get("tags") or []) or "—"
+        output.console.print(f"[green]✓[/] {t['id']} tags: [bold]{shown}[/]")
+
+    # Encode the tag path segment so a crafted value can't manipulate the request URL.
+    _run(
+        call,
+        lambda api: api.delete(f"/api/tickets/{ticket_id}/tags/{quote(tag, safe='')}"),
+        render,
+    )
 
 
 # --- review -----------------------------------------------------------------
