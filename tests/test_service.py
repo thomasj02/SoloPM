@@ -152,7 +152,7 @@ def test_delete_project_only_removes_its_own_data(service):
 def test_store_delete_project_guard_is_atomic(service):
     """The non-empty guard, ticket count, and delete live in the store's single
     transaction (so a concurrent insert can't slip past force=False) — exercise that
-    contract directly on the store, returning the real cascaded count."""
+    contract directly on the store, returning the real deleted count."""
     service.add_project(key="SOLO", name="SoloPM")
     service.create_ticket(project="SOLO", title="a")
 
@@ -163,8 +163,79 @@ def test_store_delete_project_guard_is_atomic(service):
     with pytest.raises(NotFoundError):
         service.store.delete_project("NOPE", force=True)
 
-    assert service.store.delete_project("SOLO", force=True) == 1  # real cascaded count
+    assert service.store.delete_project("SOLO", force=True) == 1  # real deleted count
     assert service.store.get_ticket("SOLO-1") is None
+
+
+def test_force_delete_removes_dependents_on_pre_cascade_schema(tmp_path):
+    """[SOLO-20, gpt-review P1] Deletion must remove tickets/activity/links itself, not
+    lean on ON DELETE CASCADE — which only fires if the table was created with the FK.
+    A store migrated from an early SoloPM schema (tickets/activity predate the cascade FKs,
+    no ticket_links table at all) would otherwise keep orphan rows while reporting a delete,
+    and a later re-add of the same key would then collide on a duplicate ticket id.
+    """
+    import sqlite3
+
+    from solopm.core.service import Service
+    from solopm.core.store import Store
+
+    # An early schema: NO foreign-key cascades on tickets/activity, no ticket_links table.
+    old_schema = """
+    CREATE TABLE projects (
+        key TEXT PRIMARY KEY, name TEXT NOT NULL, repo TEXT,
+        master_branch TEXT NOT NULL DEFAULT 'main', branch_convention TEXT NOT NULL,
+        default_implementer TEXT NOT NULL DEFAULT 'claude', default_reviewer TEXT NOT NULL DEFAULT 'codex',
+        review_prompt TEXT NOT NULL DEFAULT '', seq_counter INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE tickets (
+        id TEXT PRIMARY KEY, project_key TEXT NOT NULL, seq INTEGER NOT NULL,
+        title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'backlog',
+        assignee TEXT NOT NULL DEFAULT 'unassigned', branch TEXT, pr_number INTEGER, pr_url TEXT,
+        pr_state TEXT, session_id TEXT, session_active INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE activity (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id TEXT NOT NULL, actor TEXT NOT NULL,
+        kind TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', meta TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+    );
+    """
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(old_schema)
+    conn.execute(
+        "INSERT INTO projects (key,name,branch_convention,seq_counter,created_at,updated_at) "
+        "VALUES ('SOLO','SoloPM','{key}-{seq}-{slug}',1,'t','t')"
+    )
+    conn.execute(
+        "INSERT INTO tickets (id,project_key,seq,title,created_at,updated_at) "
+        "VALUES ('SOLO-1','SOLO',1,'t1','t','t')"
+    )
+    conn.execute(
+        "INSERT INTO activity (ticket_id,actor,kind,body,meta,created_at) "
+        "VALUES ('SOLO-1','human','created','c','{}','t')"
+    )
+    conn.commit()
+    conn.close()
+
+    store = Store(db)
+    store.init()  # migration adds columns + the ticket_links table, but can't retrofit FKs
+    service = Service(store)
+
+    assert service.delete_project("SOLO", force=True)["tickets_deleted"] == 1
+
+    # No orphans survive (ON DELETE CASCADE would NOT have fired on this schema).
+    check = sqlite3.connect(db)
+    try:
+        assert check.execute("SELECT COUNT(*) FROM tickets").fetchone()[0] == 0
+        assert check.execute("SELECT COUNT(*) FROM activity").fetchone()[0] == 0
+    finally:
+        check.close()
+
+    # Re-adding the same key then minting a ticket no longer collides on the old SOLO-1.
+    service.add_project(key="SOLO", name="SoloPM")
+    assert service.create_ticket(project="SOLO", title="fresh").id == "SOLO-1"
 
 
 # --- Ticket creation & IDs --------------------------------------------------
