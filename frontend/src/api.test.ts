@@ -1,0 +1,58 @@
+// SOLO-20: the web client's deleteProject must hit the right URL, thread `force`
+// through as a query param, encode the key, and surface backend errors as ApiError.
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { api, ApiError } from "./api";
+
+function jsonResponse(body: unknown, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => (body === undefined ? "" : JSON.stringify(body)),
+  };
+}
+
+/** A fetch stub typed with the (input, init) params so `.mock.calls` indexes type-check. */
+function stubFetch(body: unknown, status = 200) {
+  const fetchMock = vi.fn(async (_input: string, _init?: RequestInit) =>
+    jsonResponse(body, status),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("api.deleteProject", () => {
+  it("DELETEs the project without force by default", async () => {
+    const fetchMock = stubFetch({ key: "SOLO", deleted: true, tickets_deleted: 0 });
+
+    const res = await api.deleteProject("SOLO");
+    expect(res).toEqual({ key: "SOLO", deleted: true, tickets_deleted: 0 });
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/projects/SOLO");
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "DELETE" });
+  });
+
+  it("adds ?force=true when force is set", async () => {
+    const fetchMock = stubFetch({ key: "SOLO", deleted: true, tickets_deleted: 3 });
+
+    const res = await api.deleteProject("SOLO", true);
+    expect(res.tickets_deleted).toBe(3);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/projects/SOLO?force=true");
+  });
+
+  it("encodes the project key", async () => {
+    const fetchMock = stubFetch({ key: "A B", deleted: true, tickets_deleted: 0 });
+
+    await api.deleteProject("A B");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/projects/A%20B");
+  });
+
+  it("surfaces a backend refusal as an ApiError with its code", async () => {
+    stubFetch({ error: { code: "validation", message: "has tickets" } }, 400);
+
+    await expect(api.deleteProject("SOLO")).rejects.toBeInstanceOf(ApiError);
+    await expect(api.deleteProject("SOLO")).rejects.toMatchObject({ code: "validation" });
+  });
+});

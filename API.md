@@ -98,6 +98,13 @@ field) **or** a partial object `{ "review_prompt": "..." }`. Editable fields:
 `name`, `repo`, `master_branch`, `branch_convention`, `default_implementer`,
 `default_reviewer`, `review_prompt`. Returns the updated `<project>`.
 
+`DELETE /api/projects/{key}[?force=true]` → `{ "key": "SOLO", "deleted": true,
+"tickets_deleted": <int> }`. A project that still has tickets is refused with
+`400 validation` unless `force=true`, which cascade-deletes the project together with all
+its tickets, their activity, and every relationship link touching them (including
+cross-project links to/from those tickets). Irreversible. `404 not_found` for an unknown
+project.
+
 **`<project>` shape:**
 ```json
 {

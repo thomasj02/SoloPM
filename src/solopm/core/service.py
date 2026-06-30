@@ -135,6 +135,27 @@ class Service:
     def set_project_field(self, key: str, field: str, value) -> Project:
         return self.update_project(key, {field: value})
 
+    def delete_project(self, key: str, *, force: bool = False) -> dict:
+        """Delete a project; with ``force``, everything filed under it goes too.
+
+        Refuses to delete a project that still has tickets unless ``force`` is set — a
+        guard against erasing a whole board by accident. With ``force``, the project and
+        all its tickets, their activity, and their relationship links (including
+        cross-project links to/from those tickets) are cascade-deleted.
+
+        The existence check, the non-empty guard, and the delete are performed atomically
+        by :meth:`Store.delete_project` (one transaction), so a ticket created concurrently
+        between the check and the delete can't slip past the guard. ``tickets_deleted`` is
+        the count actually removed, read inside that same transaction.
+
+        Returns ``{"key", "deleted": True, "tickets_deleted"}``. Raises ``NotFoundError``
+        for an unknown project and ``ValidationError`` for a non-empty project without
+        ``force``.
+        """
+        key = normalize_project_key(key)
+        tickets_deleted = self.store.delete_project(key, force=force)
+        return {"key": key, "deleted": True, "tickets_deleted": tickets_deleted}
+
     def project_status(self, key: str) -> dict:
         """Live git/PR health for a project: ``{open_prs, unpushed_commits}``.
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, List, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import typer
 from typing_extensions import Annotated
@@ -288,6 +288,32 @@ def project_show(
     """Show a project's full configuration."""
     call = Call(json_out, None, url)
     _run(call, lambda api: api.get(f"/api/projects/{key}"), output.render_project)
+
+
+@project_app.command("delete")
+def project_delete(
+    key: Annotated[str, typer.Argument(help="Project key.")],
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Delete even if it has tickets (cascades all of them)."),
+    ] = False,
+    json_out: JsonOpt = False,
+    url: UrlOpt = None,
+) -> None:
+    """Delete a project. Refused if it still has tickets unless --force, which also deletes
+    all of its tickets, their activity, and their relationships (irreversible)."""
+    call = Call(json_out, None, url)
+    # Encode the key into the path segment so a crafted key (e.g. "SOLO?force=true") can't
+    # smuggle force=true past the --force guard on this destructive command — force is set
+    # ONLY by the flag below.
+    path = f"/api/projects/{quote(key, safe='')}" + ("?force=true" if force else "")
+
+    def render(r: dict) -> None:
+        n = r.get("tickets_deleted", 0)
+        extra = f" and {n} ticket{'' if n == 1 else 's'}" if n else ""
+        output.console.print(f"[green]✓[/] Deleted project [bold]{r.get('key', key)}[/]{extra}")
+
+    _run(call, lambda api: api.delete(path), render)
 
 
 @project_app.command("set")
