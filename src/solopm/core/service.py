@@ -214,12 +214,19 @@ class Service:
         if self.github is None or not project.repo:
             return result
         repo, master = project.repo, project.master_branch
+        tickets = self.store.list_tickets(project=project.key)
+        # Branches backing an ACTIVE (non-terminal) ticket are in use and protected like the
+        # current branch — e.g. a freshly-created in-progress branch still equal to master has
+        # no commits yet, so `git branch --merged` would otherwise flag it as a prune candidate.
+        active_branches = {
+            t.branch for t in tickets if t.branch and t.state not in self._CLOSED_STATES
+        }
         # Branches recorded on a done ticket whose PR actually MERGED (not just `queued`, which
         # hasn't landed) → the PR number, so we can confirm the branch's tip still matches the
         # merged PR head before force-deleting. Plain `state == done` isn't enough.
         done_merged_prs = {
             t.branch: t.pr_number
-            for t in self.store.list_tickets(project=project.key)
+            for t in tickets
             if t.branch and t.state == "done" and t.pr_state == "merged" and t.pr_number
         }
         try:
@@ -231,8 +238,8 @@ class Service:
             return result
 
         for b in branches:
-            if b.is_current or b.name == master:
-                continue  # never delete the checked-out branch or master
+            if b.is_current or b.name == master or b.name in active_branches:
+                continue  # never delete the checked-out branch, master, or active-ticket work
             reasons: list[str] = []
             on_done_merged = b.name in done_merged_prs
             if on_done_merged:

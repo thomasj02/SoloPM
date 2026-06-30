@@ -96,6 +96,21 @@ def test_prune_gone_upstream_alone_is_not_force_deleted(tmp_path):
     assert gh.deleted == []  # the unmerged branch's commits are NOT discarded
 
 
+def test_prune_protects_branches_of_active_tickets(tmp_path):
+    """[SOLO-23 gpt-review] A branch backing a non-terminal ticket is never pruned, even if
+    reachable-merged (e.g. a fresh in-progress branch still equal to master, no commits yet)."""
+    gh = FakePruneGit([_branch("active-b", merged=True)])
+    svc = _svc(tmp_path, github=gh)
+    t = svc.create_ticket(project="SOLO", title="active")
+    svc.store.change_ticket(
+        t.id, {"state": "in-progress", "branch": "active-b"}, actor="claude",
+        kind="state_change", body="wip", meta={}, when="t",
+    )
+    res = svc.prune_merged_branches("SOLO", apply=True)
+    assert res["pruned"] == [] and res["skipped"] == []  # in-use → silently protected
+    assert gh.deleted == []
+
+
 def test_prune_protects_current_and_master(tmp_path):
     # The current branch and master are never candidates, even if "merged".
     gh = FakePruneGit([
