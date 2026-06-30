@@ -458,6 +458,80 @@ function reviewMemorySection(key: string, initial: ReviewMemoryItem[]): HTMLElem
   return container;
 }
 
+/** Two-step confirmation before deleting a project. When the project has tickets, the
+ * delete is gated behind typing the project key and sends force=true (cascading all of
+ * them); an empty project confirms with a single click. `onDeleted` runs after success. */
+function confirmDeleteProject(project: Project, onDeleted: () => void | Promise<void>): void {
+  const key = project.key;
+  const count = project.ticket_count;
+  const hasTickets = count > 0;
+  const errBox = el("div", { class: "form__err", hidden: true });
+
+  const deleteBtn = el("button", { type: "button", class: "btn btn--danger-solid" }, "Delete project");
+  deleteBtn.disabled = hasTickets; // gated behind the typed confirmation when tickets exist
+
+  let confirmInput: HTMLInputElement | null = null;
+  if (hasTickets) {
+    confirmInput = el("input", {
+      class: "input mono",
+      placeholder: key,
+      autocomplete: "off",
+      "aria-label": `Type ${key} to confirm`,
+    });
+    confirmInput.addEventListener("input", () => {
+      deleteBtn.disabled = confirmInput!.value.trim().toUpperCase() !== key;
+    });
+  }
+
+  const doDelete = async (): Promise<void> => {
+    errBox.hidden = true;
+    deleteBtn.disabled = true;
+    let res;
+    try {
+      res = await api.deleteProject(key, hasTickets);
+    } catch (err) {
+      // The delete itself failed — the modal is still open, so show it inline and let the
+      // user retry.
+      deleteBtn.disabled = false;
+      setFormError(errBox, (err as ApiError).message || "Failed to delete project.");
+      return;
+    }
+    // The project is gone server-side: success is final. Close the modal and confirm before
+    // refreshing, so a later refresh hiccup can't swallow the success or strand an error in
+    // a closed modal.
+    modal.close();
+    const n = res.tickets_deleted;
+    const extra = n ? ` and ${n} ticket${n === 1 ? "" : "s"}` : "";
+    toastSuccess(`Deleted project ${key}${extra}`);
+    try {
+      await onDeleted();
+    } catch (err) {
+      // The delete succeeded; only the post-delete board refresh failed. The confirm modal
+      // is already closed, so surface this as a toast (the next poll/refresh self-heals).
+      toastError((err as ApiError).message || "Project deleted, but refreshing the board failed.");
+    }
+  };
+  deleteBtn.addEventListener("click", () => void doDelete());
+
+  const warning = hasTickets
+    ? `This permanently deletes ${key} and all ${count} of its ticket${count === 1 ? "" : "s"}, ` +
+      "their history, and their relationships. This cannot be undone."
+    : `This permanently deletes project ${key}. This cannot be undone.`;
+
+  const body = el("div", { class: "form" }, [
+    el("p", { class: "modal__danger-text" }, warning),
+    hasTickets && confirmInput ? field(`Type ${key} to confirm`, confirmInput) : null,
+    errBox,
+  ]);
+
+  const modal = openModal({
+    title: `Delete project ${key}?`,
+    body,
+    footer: [el("button", { class: "btn btn--ghost", onClick: () => modal.close() }, "Cancel"), deleteBtn],
+    width: "460px",
+  });
+}
+
 async function openProjectSettings(): Promise<void> {
   const key = state.currentProject;
   if (!key) {
@@ -516,6 +590,20 @@ async function openProjectSettings(): Promise<void> {
   };
   submitBtn.addEventListener("click", () => void submit());
 
+  // Destructive action: delete the project. Lives on the left of a split footer, behind a
+  // confirmation dialog (force-gated when the project still has tickets).
+  const deleteBtn = el("button", { type: "button", class: "btn btn--danger" }, "Delete project");
+  deleteBtn.addEventListener("click", () =>
+    confirmDeleteProject(project, async () => {
+      modal.close(); // close settings once the project is gone
+      await loadProjects(); // drops the deleted project; defaults to the first remaining
+      state.radar = []; // the deleted project's overlaps/status no longer apply
+      state.status = null;
+      renderTopbar();
+      await refreshTickets();
+    }),
+  );
+
   const body = el("form", { class: "form", onSubmit: (e: Event) => { e.preventDefault(); void submit(); } }, [
     field("Name", nameInput),
     field("Repository path", repoInput, "Local path to the git repo (project ↔ repo is 1:1)."),
@@ -532,7 +620,14 @@ async function openProjectSettings(): Promise<void> {
   const modal = openModal({
     title: `${key} settings`,
     body,
-    footer: [el("button", { class: "btn btn--ghost", onClick: () => modal.close() }, "Cancel"), submitBtn],
+    footer: [
+      deleteBtn,
+      el("div", { class: "modal__foot-right" }, [
+        el("button", { class: "btn btn--ghost", onClick: () => modal.close() }, "Cancel"),
+        submitBtn,
+      ]),
+    ],
+    footerClass: "modal__foot--split",
     width: "560px",
   });
 }

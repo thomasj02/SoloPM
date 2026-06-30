@@ -117,6 +117,45 @@ def test_project_status_unknown_project_404(client):
     assert r.json()["error"]["code"] == "not_found"
 
 
+# --- project deletion (SOLO-20) ---------------------------------------------
+
+
+def test_delete_empty_project(client):
+    _make_project(client)
+    r = client.delete("/api/projects/SOLO")
+    assert r.status_code == 200
+    assert r.json() == {"key": "SOLO", "deleted": True, "tickets_deleted": 0}
+    assert client.get("/api/projects/SOLO").status_code == 404
+
+
+def test_delete_unknown_project_404(client):
+    r = client.delete("/api/projects/NOPE")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+def test_delete_nonempty_project_refused_without_force(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "x"})
+    r = client.delete("/api/projects/SOLO")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "validation"
+    # Still present and intact.
+    assert client.get("/api/projects/SOLO").status_code == 200
+
+
+def test_delete_nonempty_project_with_force_cascades(client):
+    _make_project(client)
+    client.post("/api/tickets", json={"project": "SOLO", "title": "a"})
+    client.post("/api/tickets", json={"project": "SOLO", "title": "b"})
+    r = client.delete("/api/projects/SOLO?force=true")
+    assert r.status_code == 200
+    assert r.json()["tickets_deleted"] == 2
+    assert client.get("/api/projects/SOLO").status_code == 404
+    # The tickets went with it.
+    assert client.get("/api/tickets/SOLO-1").status_code == 404
+
+
 # --- tickets ----------------------------------------------------------------
 
 

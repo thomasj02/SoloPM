@@ -46,6 +46,7 @@ Everything needed to use SoloPM as a tracker, hand-drivable today. **Build this 
 | `solopm project list` | List projects. |
 | `solopm project show <key>` | Show a project's full configuration. |
 | `solopm project set <key> <field> <value>` | Edit one config field (e.g. the review prompt, default agents, branch convention). |
+| `solopm project delete <key>` | Delete a project. Refused if it still has tickets unless `--force`, which cascade-deletes all of them (and their activity/relationships). Irreversible. |
 
 ### Tickets
 

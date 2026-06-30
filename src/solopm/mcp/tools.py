@@ -11,8 +11,14 @@ from __future__ import annotations
 import functools
 from typing import Callable
 
-from ..core.errors import SoloPMError
-from ..core.models import ASSIGNEES, STATE_LABELS, STATES
+from ..core.errors import SoloPMError, ValidationError
+from ..core.models import (
+    ASSIGNEES,
+    DEFAULT_BRANCH_CONVENTION,
+    DEFAULT_REVIEW_PROMPT,
+    STATE_LABELS,
+    STATES,
+)
 from ..core.service import Service
 from ..core.workflow import TRANSITIONS
 
@@ -51,6 +57,65 @@ class SoloPMTools:
     @_safe
     def list_projects(self) -> dict:
         return {"projects": [p.to_dict() for p in self.svc.list_projects()]}
+
+    @_safe
+    def create_project(
+        self,
+        key: str,
+        name: str,
+        repo: str | None = None,
+        master: str = "main",
+        branch_convention: str = DEFAULT_BRANCH_CONVENTION,
+        default_implementer: str = "claude",
+        default_reviewer: str = "codex",
+        review_prompt: str = DEFAULT_REVIEW_PROMPT,
+    ) -> dict:
+        return self.svc.add_project(
+            key=key,
+            name=name,
+            repo=repo,
+            master=master,
+            branch_convention=branch_convention,
+            default_implementer=default_implementer,
+            default_reviewer=default_reviewer,
+            review_prompt=review_prompt,
+        ).to_dict()
+
+    @_safe
+    def edit_project(
+        self,
+        key: str,
+        name: str | None = None,
+        repo: str | None = None,
+        master_branch: str | None = None,
+        branch_convention: str | None = None,
+        default_implementer: str | None = None,
+        default_reviewer: str | None = None,
+        review_prompt: str | None = None,
+    ) -> dict:
+        fields = {
+            k: v
+            for k, v in {
+                "name": name,
+                "repo": repo,
+                "master_branch": master_branch,
+                "branch_convention": branch_convention,
+                "default_implementer": default_implementer,
+                "default_reviewer": default_reviewer,
+                "review_prompt": review_prompt,
+            }.items()
+            if v is not None
+        }
+        if not fields:
+            raise ValidationError(
+                "Provide at least one field to edit: name, repo, master_branch, "
+                "branch_convention, default_implementer, default_reviewer, review_prompt."
+            )
+        return self.svc.update_project(key, fields).to_dict()
+
+    @_safe
+    def delete_project(self, key: str, force: bool = False) -> dict:
+        return self.svc.delete_project(key, force=force)
 
     @_safe
     def list_tickets(

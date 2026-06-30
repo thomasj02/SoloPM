@@ -47,6 +47,8 @@ export interface ModalOptions {
   title: string;
   body: ElChild | ElChild[];
   footer?: ElChild | ElChild[];
+  /** Extra class(es) for the footer element (e.g. "modal__foot--split"). */
+  footerClass?: string;
   onClose?: () => void;
   width?: string;
 }
@@ -59,7 +61,7 @@ export function isOverlayOpen(): boolean {
 }
 
 /** Open a modal dialog. `body`/`footer` accept nodes/arrays (see el()'s children). */
-export function openModal({ title, body, footer, onClose, width }: ModalOptions): ModalHandle {
+export function openModal({ title, body, footer, footerClass, onClose, width }: ModalOptions): ModalHandle {
   const previouslyFocused = document.activeElement as HTMLElement | null;
 
   const closeBtn = el("button", { class: "modal__close", title: "Close (Esc)", "aria-label": "Close" }, "×");
@@ -69,7 +71,7 @@ export function openModal({ title, body, footer, onClose, width }: ModalOptions)
     [
       el("header", { class: "modal__head" }, [el("h2", { class: "modal__title" }, title || ""), closeBtn]),
       el("div", { class: "modal__body" }, body),
-      footer ? el("footer", { class: "modal__foot" }, footer) : null,
+      footer ? el("footer", { class: `modal__foot${footerClass ? " " + footerClass : ""}` }, footer) : null,
     ],
   );
   const backdrop = el("div", { class: "modal-backdrop" }, [panel]);

@@ -7,17 +7,19 @@ attributed to the configured agent.
 
 from mcp.server.fastmcp import FastMCP
 
+from ..core.models import DEFAULT_BRANCH_CONVENTION, DEFAULT_REVIEW_PROMPT
 from ..core.service import Service
 from .tools import SoloPMTools
 
 INSTRUCTIONS = (
     "SoloPM is an AI-first Kanban tracker for solo developers. These tools let you read "
-    "and drive tickets: list projects and tickets, fetch a ticket's full context, create "
-    "and edit tickets, comment, assign, and move tickets through the workflow "
-    "(backlog → todo → in-progress → in-ai-review → in-human-review → done, plus "
-    "cancelled). Your writes are attributed to your agent identity. Call workflow_info "
-    "for the legal states and transition rules. Note: only the human may move a ticket "
-    "to 'done' — you cannot close a ticket."
+    "and drive tickets: list projects and tickets, create / edit / delete projects, fetch "
+    "a ticket's full context, create and edit tickets, comment, assign, and move tickets "
+    "through the workflow (backlog → todo → in-progress → in-ai-review → in-human-review → "
+    "done, plus cancelled). Your writes are attributed to your agent identity. Call "
+    "workflow_info for the legal states and transition rules. Note: only the human may "
+    "move a ticket to 'done' — you cannot close a ticket. Deleting a project with tickets "
+    "requires force=true (it cascade-deletes all of them)."
 )
 
 
@@ -30,6 +32,66 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
     def list_projects() -> dict:
         """List all SoloPM projects with their configuration and ticket counts."""
         return tools.list_projects()
+
+    @mcp.tool()
+    def create_project(
+        key: str,
+        name: str,
+        repo: str | None = None,
+        master: str = "main",
+        branch_convention: str = DEFAULT_BRANCH_CONVENTION,
+        default_implementer: str = "claude",
+        default_reviewer: str = "codex",
+        review_prompt: str = DEFAULT_REVIEW_PROMPT,
+    ) -> dict:
+        """Register a new project. `key` is the uppercase ticket prefix (e.g. SOLO; lowercase
+        is normalized). `repo` is an optional local git-repo path (project ↔ repo is 1:1) and
+        `master` its base branch. The branch convention, default implementer/reviewer, and
+        review prompt have sane defaults and are editable later. Returns the new project."""
+        return tools.create_project(
+            key=key,
+            name=name,
+            repo=repo,
+            master=master,
+            branch_convention=branch_convention,
+            default_implementer=default_implementer,
+            default_reviewer=default_reviewer,
+            review_prompt=review_prompt,
+        )
+
+    @mcp.tool()
+    def edit_project(
+        key: str,
+        name: str | None = None,
+        repo: str | None = None,
+        master_branch: str | None = None,
+        branch_convention: str | None = None,
+        default_implementer: str | None = None,
+        default_reviewer: str | None = None,
+        review_prompt: str | None = None,
+    ) -> dict:
+        """Update one or more of a project's config fields; pass only the fields to change
+        (omitted fields are left as-is). Editable: name, repo, master_branch,
+        branch_convention, default_implementer, default_reviewer, review_prompt. Returns the
+        updated project."""
+        return tools.edit_project(
+            key,
+            name=name,
+            repo=repo,
+            master_branch=master_branch,
+            branch_convention=branch_convention,
+            default_implementer=default_implementer,
+            default_reviewer=default_reviewer,
+            review_prompt=review_prompt,
+        )
+
+    @mcp.tool()
+    def delete_project(key: str, force: bool = False) -> dict:
+        """Delete a project. A project that still has tickets is refused unless `force=true`,
+        which cascade-deletes the project and ALL its tickets, their activity, and their
+        relationship links (including cross-project links to/from those tickets) — this is
+        irreversible. Returns {key, deleted, tickets_deleted}."""
+        return tools.delete_project(key, force=force)
 
     @mcp.tool()
     def workflow_info() -> dict:

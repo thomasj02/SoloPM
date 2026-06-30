@@ -14,7 +14,7 @@ import sqlite3
 from pathlib import Path
 from typing import Callable
 
-from .errors import DuplicateError, NotFoundError
+from .errors import DuplicateError, NotFoundError, ValidationError
 from .models import Activity, Criterion, Link, Project, ReviewMemoryItem, Ticket
 
 SCHEMA = """
@@ -317,6 +317,47 @@ class Store:
             conn.execute(
                 f"UPDATE projects SET {sets}, updated_at = ? WHERE key = ?", values
             )
+
+    def delete_project(self, key: str, *, force: bool) -> int:
+        """Atomically guard + delete a project; return how many tickets cascaded away.
+
+        The existence check, the ticket count, the non-empty guard, and the delete all run
+        inside one ``BEGIN IMMEDIATE`` transaction. That atomicity is the point: a ticket
+        inserted by a concurrent writer (another MCP agent, the web, or the CLI against the
+        same WAL store) in the window between counting and deleting would otherwise be
+        silently cascade-deleted despite ``force=False`` — a TOCTOU that defeats the very
+        guard the feature exists for. Holding the write lock from the count through the
+        delete closes that window (the codebase keeps check + mutation in one transaction
+        elsewhere, e.g. ``create_ticket``).
+
+        Raises ``NotFoundError`` for an unknown project and ``ValidationError`` for a
+        non-empty project without ``force``. With ``force`` (or an empty project), deletes
+        the project row; ``ON DELETE CASCADE`` (with ``PRAGMA foreign_keys = ON``, set per
+        connection) then removes its tickets, each ticket's activity, and every
+        ``ticket_links`` row touching one of those tickets — including cross-project links
+        whose other endpoint lives in a surviving project.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if conn.execute(
+                    "SELECT 1 FROM projects WHERE key = ?", (key,)
+                ).fetchone() is None:
+                    raise NotFoundError(f"Project {key!r} not found.")
+                count = conn.execute(
+                    "SELECT COUNT(*) AS c FROM tickets WHERE project_key = ?", (key,)
+                ).fetchone()["c"]
+                if count and not force:
+                    raise ValidationError(
+                        f"Project {key} has {count} ticket(s). Pass force=true to delete it "
+                        "along with all its tickets, activity, and relationships."
+                    )
+                conn.execute("DELETE FROM projects WHERE key = ?", (key,))
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return count
 
     # --- tickets ------------------------------------------------------------
 

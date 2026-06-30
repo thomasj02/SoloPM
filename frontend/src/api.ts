@@ -9,6 +9,7 @@ import type {
   Meta,
   Project,
   ProjectCreate,
+  ProjectDelete,
   ProjectPatch,
   ProjectStatus,
   RadarReport,
@@ -89,6 +90,10 @@ export const api = {
     request<ProjectStatus>("GET", `/projects/${enc(key)}/status`),
   patchProject: (key: string, body: ProjectPatch) =>
     request<Project>("PATCH", `/projects/${enc(key)}`, body),
+  // `force` cascade-deletes the project's tickets; without it a non-empty project is
+  // refused by the backend (ApiError code "validation").
+  deleteProject: (key: string, force = false) =>
+    request<ProjectDelete>("DELETE", `/projects/${enc(key)}${force ? "?force=true" : ""}`),
 
   tickets: (q: TicketQuery = {}) => {
     const params = new URLSearchParams();

@@ -80,6 +80,93 @@ def test_set_unknown_project_field_rejected(service):
         service.set_project_field("SOLO", "bogus", "x")
 
 
+# --- Project deletion (SOLO-20) ---------------------------------------------
+
+
+def test_delete_empty_project(service):
+    service.add_project(key="SOLO", name="SoloPM")
+    result = service.delete_project("SOLO")
+    assert result == {"key": "SOLO", "deleted": True, "tickets_deleted": 0}
+    with pytest.raises(NotFoundError):
+        service.get_project("SOLO")
+    assert service.list_projects() == []
+
+
+def test_delete_missing_project_raises(service):
+    with pytest.raises(NotFoundError):
+        service.delete_project("NOPE")
+
+
+def test_delete_project_key_is_normalized(service):
+    service.add_project(key="SOLO", name="SoloPM")
+    result = service.delete_project("solo")  # lowercase resolves to SOLO
+    assert result["key"] == "SOLO"
+    with pytest.raises(NotFoundError):
+        service.get_project("SOLO")
+
+
+def test_delete_nonempty_project_refused_without_force(service):
+    service.add_project(key="SOLO", name="SoloPM")
+    service.create_ticket(project="SOLO", title="a")
+    service.create_ticket(project="SOLO", title="b")
+    with pytest.raises(ValidationError):
+        service.delete_project("SOLO")
+    # Refusal leaves the project — and its tickets — untouched.
+    assert service.get_project("SOLO").ticket_count == 2
+    assert service.store.get_ticket("SOLO-1") is not None
+
+
+def test_delete_nonempty_project_with_force_cascades(service):
+    service.add_project(key="SOLO", name="SoloPM")
+    service.create_ticket(project="SOLO", title="a")
+    service.create_ticket(project="SOLO", title="b")
+    service.link_tickets("SOLO-1", "blocks", "SOLO-2")
+
+    result = service.delete_project("SOLO", force=True)
+    assert result == {"key": "SOLO", "deleted": True, "tickets_deleted": 2}
+    with pytest.raises(NotFoundError):
+        service.get_project("SOLO")
+    # Tickets, their activity, and their links are all cascade-deleted.
+    assert service.store.get_ticket("SOLO-1") is None
+    assert service.store.get_ticket("SOLO-2") is None
+    assert service.store.list_links() == []
+    assert service.store.max_activity_id() == 0
+
+
+def test_delete_project_only_removes_its_own_data(service):
+    service.add_project(key="SOLO", name="SoloPM")
+    service.add_project(key="BLOG", name="Blog")
+    service.create_ticket(project="SOLO", title="a")
+    service.create_ticket(project="BLOG", title="b")
+    # A cross-project link from the deleted project's ticket to a surviving one.
+    service.link_tickets("SOLO-1", "related", "BLOG-1")
+
+    service.delete_project("SOLO", force=True)
+
+    # The other project and its ticket survive; only the cross-project link is gone.
+    assert {p.key for p in service.list_projects()} == {"BLOG"}
+    assert service.store.get_ticket("BLOG-1") is not None
+    assert service.store.links_for_ticket("BLOG-1") == []
+
+
+def test_store_delete_project_guard_is_atomic(service):
+    """The non-empty guard, ticket count, and delete live in the store's single
+    transaction (so a concurrent insert can't slip past force=False) — exercise that
+    contract directly on the store, returning the real cascaded count."""
+    service.add_project(key="SOLO", name="SoloPM")
+    service.create_ticket(project="SOLO", title="a")
+
+    with pytest.raises(ValidationError):
+        service.store.delete_project("SOLO", force=False)
+    assert service.store.get_ticket("SOLO-1") is not None  # refusal rolled back
+
+    with pytest.raises(NotFoundError):
+        service.store.delete_project("NOPE", force=True)
+
+    assert service.store.delete_project("SOLO", force=True) == 1  # real cascaded count
+    assert service.store.get_ticket("SOLO-1") is None
+
+
 # --- Ticket creation & IDs --------------------------------------------------
 
 
