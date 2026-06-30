@@ -58,7 +58,8 @@ class FakePruneGit:
             raise GitHubError("branch checked out")
         self.deleted.append(branch)
 
-    def pr_head_oid(self, repo, number):
+    def pr_merged_head(self, repo, number):
+        # pr_heads only holds the heads of PRs that are actually merged on GitHub.
         return self.pr_heads.get(number)
 
     def branch_tip(self, repo, branch):
@@ -153,6 +154,23 @@ def test_prune_done_branch_advanced_after_merge_is_skipped(tmp_path):
     assert res["pruned"] == []
     assert [s["branch"] for s in res["skipped"]] == ["solo-z"]
     assert gh.deleted == []  # the advanced branch's new commits are not discarded
+
+
+def test_prune_done_branch_not_deleted_when_pr_not_live_merged(tmp_path):
+    """[SOLO-23 gpt-review] Even with a stored pr_state='merged', if the live PR isn't actually
+    merged (pr_merged_head returns None), the branch is not force-deleted."""
+    # tips has the branch but pr_heads is empty → pr_merged_head(11) is None (PR not live-merged).
+    gh = FakePruneGit([_branch("solo-w", gone=True)], pr_heads={}, tips={"solo-w": "abc"})
+    svc = _svc(tmp_path, github=gh)
+    t = svc.create_ticket(project="SOLO", title="w")
+    svc.store.change_ticket(
+        t.id, {"state": "done", "branch": "solo-w", "pr_state": "merged", "pr_number": 11},
+        actor="human", kind="state_change", body="done", meta={}, when="t",
+    )
+    res = svc.prune_merged_branches("SOLO", apply=True)
+    assert res["pruned"] == []
+    assert [s["branch"] for s in res["skipped"]] == ["solo-w"]
+    assert gh.deleted == []
 
 
 def test_prune_done_with_queued_pr_is_not_deleted(tmp_path):

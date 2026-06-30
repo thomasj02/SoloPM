@@ -295,15 +295,17 @@ class Service:
         return result
 
     def _branch_tip_matches_pr(self, repo: str, branch: str, pr_number: int) -> bool:
-        """True when ``branch``'s local tip still equals the merged PR's head OID.
+        """True when the PR is **actually merged on GitHub** and ``branch``'s local tip still
+        equals that merged head OID.
 
-        Guards against deleting a branch that was advanced or reused after its ticket merged:
-        if new commits were added (tip moved past the merged head) the OIDs differ and we won't
-        force-delete. Any lookup failure (gh/git error, unknown OID) returns ``False`` — we
-        never treat an unverifiable branch as safe.
+        Confirming the live merge (not just the stored ticket ``pr_state``) avoids deleting a
+        branch for an unlanded PR, and the tip comparison guards against a branch advanced or
+        reused after the merge (new commits move the tip past the merged head). Any lookup
+        failure or a non-merged live state returns ``False`` — we never treat an unverifiable
+        branch as safe.
         """
         try:
-            head = self.github.pr_head_oid(repo, pr_number)
+            head = self.github.pr_merged_head(repo, pr_number)
             tip = self.github.branch_tip(repo, branch)
         except GitHubError:
             return False

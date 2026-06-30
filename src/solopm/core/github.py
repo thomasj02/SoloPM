@@ -134,7 +134,7 @@ class GitHubClient(Protocol):
 
     def delete_local_branch(self, repo: str, branch: str) -> None: ...
 
-    def pr_head_oid(self, repo: str, number: int) -> str | None: ...
+    def pr_merged_head(self, repo: str, number: int) -> str | None: ...
 
     def branch_tip(self, repo: str, branch: str) -> str | None: ...
 
@@ -512,11 +512,18 @@ class GitHub:
         a git failure (e.g. the branch is checked out elsewhere)."""
         self._run(["git", "branch", "-D", "--", branch], cwd=repo)
 
-    def pr_head_oid(self, repo: str, number: int) -> str | None:
-        """The commit OID the PR's head ref pointed at (retained by GitHub even after the
-        branch is deleted on merge), or ``None``. Used to confirm a local branch hasn't been
-        advanced/reused since its PR merged before force-deleting it."""
-        oid = self._pr_json(repo, number, "headRefOid").get("headRefOid")
+    def pr_merged_head(self, repo: str, number: int) -> str | None:
+        """The head commit OID of the PR **only if it is actually MERGED on GitHub**, else
+        ``None``.
+
+        Gating on the live ``state`` matters: ``headRefOid`` is present for open/closed PRs
+        too, and a ticket's stored ``pr_state`` can read ``merged`` in edge cases (e.g. an
+        inconclusive merge readback) while the PR hasn't landed — so prune must confirm the
+        live merge before force-deleting a branch on the strength of a ticket record."""
+        info = self._pr_json(repo, number, "state,headRefOid")
+        if str(info.get("state", "")).upper() != "MERGED":
+            return None
+        oid = info.get("headRefOid")
         return str(oid) if oid else None
 
     def branch_tip(self, repo: str, branch: str) -> str | None:
