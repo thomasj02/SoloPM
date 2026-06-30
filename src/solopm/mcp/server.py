@@ -95,12 +95,13 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
 
     @mcp.tool()
     def prune_merged_branches(project: str, apply: bool = False) -> dict:
-        """Clean up the project repo's local branches whose work is merged — recorded on a
-        DONE ticket, with a gone upstream (remote deleted on merge), or reachable-merged into
-        master. The current branch and master are never touched. Dry-run by default (lists
-        what WOULD be pruned); pass apply=true to delete: a branch in a clean git worktree has
-        the worktree removed first, while a worktree with uncommitted changes is skipped. No-op
-        without a repo / git. Returns {project, applied, pruned:[{branch,reasons,worktree}],
+        """Clean up the project repo's local branches whose merge is VERIFIED — reachable-merged
+        into master, or recorded on a DONE ticket whose PR merged. A merely gone upstream is
+        reported but never force-deleted on its own (it isn't proof the work landed). The current
+        branch and master are never touched. Dry-run by default (lists what WOULD be pruned); pass
+        apply=true to delete: a verified branch in a clean git worktree has the worktree removed
+        first, while a worktree with uncommitted changes (or one that can't be removed) is skipped.
+        No-op without a repo / git. Returns {project, applied, pruned:[{branch,reasons,worktree}],
         skipped:[{branch,reason}]}."""
         return tools.prune_merged_branches(project, apply=apply)
 

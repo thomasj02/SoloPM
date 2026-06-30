@@ -696,7 +696,7 @@ async function openProjectSettings(): Promise<void> {
     field(
       "Branch cleanup",
       el("button", { type: "button", class: "btn btn--ghost btn--sm", onClick: () => void confirmPruneBranches(key) }, "Prune merged branches…"),
-      "Delete local branches whose work is merged (done ticket / gone upstream / merged into master). Removes a clean worktree first; skips worktrees with uncommitted changes.",
+      "Delete local branches whose merge is verified (reachable-merged, or a done ticket whose PR merged). Removes a clean worktree first; skips uncommitted worktrees and unverified branches.",
     ),
     errBox,
   ]);

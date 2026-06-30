@@ -58,22 +58,30 @@ def _branch(name, *, current=False, gone=False, merged=False):
     return LocalBranch(name=name, is_current=current, upstream_gone=gone, merged=merged)
 
 
-def test_prune_dry_run_lists_merged_candidates_without_deleting(tmp_path):
+def test_prune_dry_run_lists_verified_candidates_without_deleting(tmp_path):
     gh = FakePruneGit([
         _branch("main", current=True),
-        _branch("merged-ff", merged=True),
-        _branch("gone", gone=True),
-        _branch("wip"),  # unmerged → left alone
+        _branch("merged-ff", merged=True),  # reachable-merged → verified
+        _branch("gone", gone=True),  # gone-upstream ONLY → not verified → skipped
+        _branch("wip"),  # no signal → ignored
     ])
     svc = _svc(tmp_path, github=gh)
     res = svc.prune_merged_branches("SOLO")
     assert res["applied"] is False
-    assert {p["branch"] for p in res["pruned"]} == {"merged-ff", "gone"}
+    assert {p["branch"] for p in res["pruned"]} == {"merged-ff"}
+    assert {s["branch"] for s in res["skipped"]} == {"gone"}  # surfaced, not deleted
     assert gh.deleted == [] and gh.removed == []  # dry run touches nothing
-    # reasons are reported
-    by = {p["branch"]: p["reasons"] for p in res["pruned"]}
-    assert by["merged-ff"] == ["merged"]
-    assert by["gone"] == ["gone-upstream"]
+    assert next(p for p in res["pruned"] if p["branch"] == "merged-ff")["reasons"] == ["merged"]
+
+
+def test_prune_gone_upstream_alone_is_not_force_deleted(tmp_path):
+    """[SOLO-23 review] A gone upstream is not proof of a merge — never -D on it alone."""
+    gh = FakePruneGit([_branch("gone-only", gone=True)])
+    svc = _svc(tmp_path, github=gh)
+    res = svc.prune_merged_branches("SOLO", apply=True)
+    assert res["pruned"] == []
+    assert [s["branch"] for s in res["skipped"]] == ["gone-only"]
+    assert gh.deleted == []  # the unmerged branch's commits are NOT discarded
 
 
 def test_prune_protects_current_and_master(tmp_path):
@@ -92,10 +100,10 @@ def test_prune_done_ticket_branch_is_a_candidate(tmp_path):
     gh = FakePruneGit([_branch("solo-x")])
     svc = _svc(tmp_path, github=gh)
     t = svc.create_ticket(project="SOLO", title="x")
-    # Mark it done with a branch directly (bypass the workflow's git side effects, which the
-    # fake doesn't model) — prune only reads the ticket's stored state + branch.
+    # Mark it done with a MERGED pr directly (bypass the workflow's git side effects, which the
+    # fake doesn't model) — prune verifies the merge via the ticket's done + merged-PR state.
     svc.store.change_ticket(
-        t.id, {"state": "done", "branch": "solo-x"}, actor="human",
+        t.id, {"state": "done", "branch": "solo-x", "pr_state": "merged"}, actor="human",
         kind="state_change", body="done", meta={}, when="t",
     )
 
@@ -105,12 +113,28 @@ def test_prune_done_ticket_branch_is_a_candidate(tmp_path):
     assert gh.deleted == ["solo-x"]
 
 
+def test_prune_done_ticket_without_merged_pr_is_not_deleted(tmp_path):
+    """[SOLO-23 review] A done ticket whose PR did NOT merge (e.g. closed) doesn't authorize
+    a force-delete — its branch may hold unmerged work."""
+    gh = FakePruneGit([_branch("solo-y", gone=True)])
+    svc = _svc(tmp_path, github=gh)
+    t = svc.create_ticket(project="SOLO", title="y")
+    svc.store.change_ticket(
+        t.id, {"state": "done", "branch": "solo-y", "pr_state": "closed"}, actor="human",
+        kind="state_change", body="done", meta={}, when="t",
+    )
+    res = svc.prune_merged_branches("SOLO", apply=True)
+    assert res["pruned"] == []
+    assert [s["branch"] for s in res["skipped"]] == ["solo-y"]
+    assert gh.deleted == []
+
+
 def test_prune_apply_deletes_and_handles_worktrees(tmp_path):
     gh = FakePruneGit(
         branches=[
             _branch("clean-wt", merged=True),
             _branch("dirty-wt", merged=True),
-            _branch("plain", gone=True),
+            _branch("plain", merged=True),
         ],
         worktrees=[
             Worktree(path="/wt/clean", branch="clean-wt"),
@@ -131,9 +155,9 @@ def test_prune_apply_deletes_and_handles_worktrees(tmp_path):
     assert next(p for p in res["pruned"] if p["branch"] == "clean-wt")["worktree"] == "/wt/clean"
 
 
-def test_prune_per_branch_failure_is_reported_not_fatal(tmp_path):
+def test_prune_per_branch_delete_failure_is_reported_not_fatal(tmp_path):
     gh = FakePruneGit(
-        branches=[_branch("a", gone=True), _branch("b", gone=True)],
+        branches=[_branch("a", merged=True), _branch("b", merged=True)],
         fail_delete=["a"],
     )
     svc = _svc(tmp_path, github=gh)
@@ -141,6 +165,22 @@ def test_prune_per_branch_failure_is_reported_not_fatal(tmp_path):
     assert [p["branch"] for p in res["pruned"]] == ["b"]
     assert [s["branch"] for s in res["skipped"]] == ["a"]
     assert gh.deleted == ["b"]  # b still pruned despite a failing
+
+
+def test_prune_worktree_removal_failure_skips_branch_without_deleting(tmp_path):
+    """[SOLO-23 review] If the worktree can't be removed, the branch is reported skipped and
+    NOT force-deleted (which would orphan a still-checked-out branch)."""
+    gh = FakePruneGit(
+        branches=[_branch("held", merged=True), _branch("ok", merged=True)],
+        worktrees=[Worktree(path="/wt/held", branch="held")],
+        fail_remove=["/wt/held"],
+    )
+    svc = _svc(tmp_path, github=gh)
+    res = svc.prune_merged_branches("SOLO", apply=True)
+    assert [p["branch"] for p in res["pruned"]] == ["ok"]
+    assert [s["branch"] for s in res["skipped"]] == ["held"]
+    assert gh.deleted == ["ok"]  # 'held' is NOT deleted because its worktree survived
+    assert "held" not in gh.deleted
 
 
 def test_prune_no_repo_or_no_client_is_empty(tmp_path):
@@ -187,18 +227,19 @@ def _init_repo(tmp_path):
 
 
 def test_prune_real_git_signals(tmp_path):
-    """Real git: reachable-merged and gone-upstream branches are pruned; unmerged + current +
+    """Real git: only a reachable-merged branch is pruned. A gone-upstream branch with
+    UNMERGED commits is surfaced but NOT deleted (no data loss); unmerged WIP + current +
     master are kept. Dry-run changes nothing; apply deletes."""
     if shutil.which("git") is None:
         pytest.skip("git not available")
     repo = _init_repo(tmp_path)
 
-    # reachable-merged into main (no-ff merge)
+    # reachable-merged into main (no-ff merge) → verified → pruned
     _git("checkout", "-b", "feat-merged", cwd=repo)
     _git("commit", "--allow-empty", "-m", "m1", cwd=repo)
     _git("checkout", "main", cwd=repo)
     _git("merge", "--no-ff", "feat-merged", "-m", "merge", cwd=repo)
-    # gone upstream (pushed then remote-deleted)
+    # gone upstream but NEVER merged (pushed then remote-deleted) → unverified → skipped
     _git("checkout", "-b", "feat-gone", cwd=repo)
     _git("commit", "--allow-empty", "-m", "g1", cwd=repo)
     _git("push", "-u", "origin", "feat-gone", cwd=repo)
@@ -214,7 +255,8 @@ def test_prune_real_git_signals(tmp_path):
 
     dry = svc.prune_merged_branches("SOLO")
     assert dry["applied"] is False
-    assert {p["branch"] for p in dry["pruned"]} == {"feat-merged", "feat-gone"}
+    assert {p["branch"] for p in dry["pruned"]} == {"feat-merged"}
+    assert "feat-gone" in {s["branch"] for s in dry["skipped"]}  # unverified, not pruned
     # dry-run deleted nothing
     assert {"feat-merged", "feat-gone", "feat-wip", "main"} <= {
         b.name for b in gh.local_branches(str(repo), "main")
@@ -222,10 +264,11 @@ def test_prune_real_git_signals(tmp_path):
 
     applied = svc.prune_merged_branches("SOLO", apply=True)
     assert applied["applied"] is True
-    assert {p["branch"] for p in applied["pruned"]} == {"feat-merged", "feat-gone"}
+    assert {p["branch"] for p in applied["pruned"]} == {"feat-merged"}
     remaining = {b.name for b in gh.local_branches(str(repo), "main")}
-    assert "feat-merged" not in remaining and "feat-gone" not in remaining
-    assert {"main", "feat-wip"} <= remaining  # current + unmerged kept
+    assert "feat-merged" not in remaining  # the reachable-merged branch is gone
+    # the gone-upstream-but-unmerged branch + WIP + current/master all survive
+    assert {"main", "feat-wip", "feat-gone"} <= remaining
 
 
 def test_prune_real_git_worktrees(tmp_path):
@@ -262,3 +305,13 @@ def test_prune_real_git_worktrees(tmp_path):
     remaining = {b.name for b in GitHub().local_branches(str(repo), "main")}
     assert "wt-clean" not in remaining  # branch deleted
     assert "wt-dirty" in remaining  # branch kept (work not lost)
+
+
+def test_worktree_is_dirty_treats_unrunnable_status_as_dirty(tmp_path):
+    """[SOLO-23 review] When `git status` can't run cleanly (a valid dir that isn't a git
+    worktree), treat it as DIRTY so the worktree is never removed."""
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+    non_git = tmp_path / "plain-dir"
+    non_git.mkdir()
+    assert GitHub().worktree_is_dirty(str(non_git)) is True

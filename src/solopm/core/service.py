@@ -187,13 +187,15 @@ class Service:
         return {"open_prs": open_prs, "unpushed_commits": unpushed}
 
     def prune_merged_branches(self, key: str, *, apply: bool = False) -> dict:
-        """Clean up local branches whose work is merged (SOLO-23).
+        """Clean up local branches whose work is *verifiably* merged (SOLO-23).
 
-        A branch is a prune candidate when its work has shipped — by ANY of: it's recorded on
-        a **done** SoloPM ticket in this project (SoloPM's own source of truth), its **upstream
-        is gone** (remote branch deleted on merge — the squash-merge signal), or it's
-        **reachable-merged** into the project's master. The **current** branch and **master**
-        are always protected.
+        A branch is force-deleted only when its merge is verified — either **reachable-merged**
+        into the project's master (git-proven), or recorded on a **done** ticket whose **PR
+        merged** (SoloPM's authoritative record of the squash-merge). A **gone upstream** is
+        reported as context but is NOT sufficient on its own (a remote can be deleted for
+        unmerged work), so such a branch is surfaced in ``skipped`` rather than deleted — this
+        keeps ``git branch -D`` from orphaning committed-but-unmerged commits. The **current**
+        branch and **master** are always protected.
 
         Dry-run by default — returns what *would* be pruned. With ``apply``, deletes them: a
         branch held by a *clean* worktree has the worktree removed first (``git worktree
@@ -210,10 +212,13 @@ class Service:
         if self.github is None or not project.repo:
             return result
         repo, master = project.repo, project.master_branch
-        done_branches = {
+        # Branches recorded on a done ticket whose PR actually MERGED — SoloPM's authoritative
+        # record that the (squash-)merge landed. Plain `state == done` isn't enough: we must
+        # not force-delete a branch unless we can verify its work is in master.
+        done_merged_branches = {
             t.branch
             for t in self.store.list_tickets(project=project.key)
-            if t.branch and t.state == "done"
+            if t.branch and t.state == "done" and t.pr_state in ("merged", "queued")
         }
         try:
             branches = self.github.local_branches(repo, master)
@@ -227,14 +232,29 @@ class Service:
             if b.is_current or b.name == master:
                 continue  # never delete the checked-out branch or master
             reasons: list[str] = []
-            if b.name in done_branches:
+            if b.name in done_merged_branches:
                 reasons.append("done")
             if b.upstream_gone:
                 reasons.append("gone-upstream")
             if b.merged:
                 reasons.append("merged")
             if not reasons:
-                continue  # not merged — leave it alone
+                continue  # no merge signal at all — leave it alone
+
+            # Force-delete (`git branch -D`) only when the merge is VERIFIED: reachable into
+            # master (git-proven), or on a done ticket whose PR merged (SoloPM's record). A
+            # gone upstream alone is NOT proof — the remote could have been deleted for
+            # *unmerged* work — so such a branch is surfaced but never force-deleted here, to
+            # avoid orphaning committed-but-unmerged commits.
+            verified = b.merged or b.name in done_merged_branches
+            if not verified:
+                result["skipped"].append(
+                    {
+                        "branch": b.name,
+                        "reason": f"not verified merged ({', '.join(reasons)}) — delete manually if sure",
+                    }
+                )
+                continue
 
             wt_path = worktrees.get(b.name)
             if wt_path:

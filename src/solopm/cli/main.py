@@ -326,10 +326,10 @@ def project_prune(
     json_out: JsonOpt = False,
     url: UrlOpt = None,
 ) -> None:
-    """Prune local branches whose work is merged (recorded on a done ticket, gone upstream, or
-    merged into master). Dry-run by default; --apply deletes them — removing a clean git
-    worktree first and skipping any worktree with uncommitted changes. Never touches the
-    current branch or master."""
+    """Prune local branches whose merge is verified — reachable-merged into master, or on a done
+    ticket whose PR merged. (A merely gone upstream is surfaced but not deleted.) Dry-run by
+    default; --apply deletes them — removing a clean git worktree first and skipping any worktree
+    with uncommitted changes. Never touches the current branch or master."""
     call = Call(json_out, None, url)
     path = f"/api/projects/{quote(key, safe='')}/prune"
     _run(call, lambda api: api.post(path, json={"apply": apply}), output.render_prune)

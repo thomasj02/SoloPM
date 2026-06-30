@@ -47,7 +47,7 @@ Everything needed to use SoloPM as a tracker, hand-drivable today. **Build this 
 | `solopm project show <key>` | Show a project's full configuration. |
 | `solopm project set <key> <field> <value>` | Edit one config field (e.g. the review prompt, default agents, branch convention). |
 | `solopm project delete <key>` | Delete a project. Refused if it still has tickets unless `--force`, which cascade-deletes all of them (and their activity/relationships). Irreversible. |
-| `solopm project prune <key>` | Prune local branches whose work is merged (done ticket / gone upstream / merged into master). Dry-run by default; `--apply` deletes them (removing a clean worktree first, skipping worktrees with uncommitted changes). |
+| `solopm project prune <key>` | Prune local branches whose merge is verified — reachable-merged into master, or on a done ticket whose PR merged. (A merely gone upstream is surfaced but not deleted.) Dry-run by default; `--apply` deletes them (removing a clean worktree first, skipping worktrees with uncommitted changes). |
 
 ### Tickets
 
