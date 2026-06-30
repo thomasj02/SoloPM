@@ -503,9 +503,14 @@ class GitHub:
 
     def delete_local_branch(self, repo: str, branch: str) -> None:
         """Force-delete a local branch (``-D`` — squash-merged branches aren't ``-d``-deletable).
-        Raises ``GitHubError`` on failure (e.g. the branch is checked out somewhere)."""
-        validate_branch_name(branch)
-        self._run(["git", "branch", "-D", branch], cwd=repo)
+
+        The name comes from ``local_branches`` (git's own ref enumeration) and is passed as a
+        separate argv, so it can't be reinterpreted as an option (git forbids a leading ``-``
+        in a ref). We deliberately do NOT run the stricter ``validate_branch_name`` here — it
+        rejects git-valid names like ``feature+123`` and would raise outside the caller's
+        per-branch ``GitHubError`` handling, aborting the whole prune. Raises ``GitHubError`` on
+        a git failure (e.g. the branch is checked out elsewhere)."""
+        self._run(["git", "branch", "-D", "--", branch], cwd=repo)
 
     def pr_head_oid(self, repo: str, number: int) -> str | None:
         """The commit OID the PR's head ref pointed at (retained by GitHub even after the

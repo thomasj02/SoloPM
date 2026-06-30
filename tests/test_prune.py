@@ -349,6 +349,23 @@ def test_prune_real_git_worktrees(tmp_path):
     assert "wt-dirty" in remaining  # branch kept (work not lost)
 
 
+def test_prune_real_git_accepts_git_valid_branch_names(tmp_path):
+    """[SOLO-23 gpt-review P2] A branch name that's valid to git but outside SoloPM's stricter
+    branch regex (e.g. contains '+') must still be prunable — not abort with a ValidationError."""
+    if shutil.which("git") is None:
+        pytest.skip("git not available")
+    repo = _init_repo(tmp_path)
+    _git("checkout", "-b", "feat+plus", cwd=repo)
+    _git("commit", "--allow-empty", "-m", "c", cwd=repo)
+    _git("checkout", "main", cwd=repo)
+    _git("merge", "--no-ff", "feat+plus", "-m", "m", cwd=repo)
+
+    svc = _svc(tmp_path / "store", github=GitHub(), repo=str(repo))
+    res = svc.prune_merged_branches("SOLO", apply=True)
+    assert "feat+plus" in {p["branch"] for p in res["pruned"]}
+    assert "feat+plus" not in {b.name for b in GitHub().local_branches(str(repo), "main")}
+
+
 def test_worktree_is_dirty_treats_unrunnable_status_as_dirty(tmp_path):
     """[SOLO-23 review] When `git status` can't run cleanly (a valid dir that isn't a git
     worktree), treat it as DIRTY so the worktree is never removed."""
