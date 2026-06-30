@@ -104,10 +104,12 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
         project: str | None = None,
         state: str | None = None,
         assignee: str | None = None,
+        tags: list[str] | None = None,
     ) -> dict:
-        """List tickets (the board), optionally filtered by project key, state, or
-        assignee. Returns trimmed ticket summaries."""
-        return tools.list_tickets(project=project, state=state, assignee=assignee)
+        """List tickets (the board), optionally filtered by project key, state, assignee, or
+        `tags` (case-insensitive; a ticket must carry ALL given tags). Returns trimmed ticket
+        summaries (each includes its `tags`)."""
+        return tools.list_tickets(project=project, state=state, assignee=assignee, tags=tags)
 
     @mcp.tool()
     def show_ticket(ticket_id: str) -> dict:
@@ -242,6 +244,19 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
     def remove_criterion(ticket_id: str, criterion_id: str) -> dict:
         """Remove an acceptance criterion from a ticket."""
         return tools.remove_criterion(ticket_id, criterion_id)
+
+    @mcp.tool()
+    def tag_ticket(ticket_id: str, tags: list[str]) -> dict:
+        """Add one or more free-form tags/labels to a ticket. Tags are normalized to
+        lowercase (letters/digits/'-'/'_', e.g. 'bug', 'tech-debt'); the stored set is unique
+        and sorted. Adding an already-present tag is a no-op. Returns the updated ticket."""
+        return tools.tag_ticket(ticket_id, tags)
+
+    @mcp.tool()
+    def untag_ticket(ticket_id: str, tag: str) -> dict:
+        """Remove a tag from a ticket (case-insensitive). Removing an absent tag is a no-op.
+        Returns the updated ticket."""
+        return tools.untag_ticket(ticket_id, tag)
 
     @mcp.tool()
     def link_ticket(ticket_id: str, type: str, other_id: str) -> dict:

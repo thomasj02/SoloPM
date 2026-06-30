@@ -365,6 +365,23 @@ body {
 }
 .card__subs::before { content: "▣ "; opacity: 0.7; }
 
+/* Tag chips on a card (SOLO-21) — compact, wrapping, sits between title and meta. */
+.card__tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.tag-chip {
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--accent-hover);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-radius: 99px;
+  padding: 0 7px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tag-chip::before { content: "#"; opacity: 0.55; }
+
 /* ----------------------------------------------------------------- badges */
 .badge {
   display: inline-flex;
@@ -536,6 +553,37 @@ body {
 .tp__critempty { font-size: 13px; }
 .tp__critaddrow { display: flex; gap: 8px; }
 .tp__critadd { flex: 1; }
+
+/* Ticket tags (SOLO-21) — editable chips in the detail panel. */
+.tp__tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tp__tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--accent-hover);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-radius: 99px;
+  padding: 1px 4px 1px 9px;
+}
+.tp__tagtext::before { content: "#"; opacity: 0.55; }
+.tp__tagdel {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 3px;
+  border-radius: 99px;
+}
+.tp__tagdel:hover { opacity: 1; background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.tp__tagaddrow { display: flex; gap: 8px; }
+.tp__tagadd { flex: 1; }
+.feed__dot--tags { background: var(--accent); }
 
 /* Ticket relationships (SOLO-10) */
 .tp__relgroup { display: flex; flex-direction: column; gap: 3px; }

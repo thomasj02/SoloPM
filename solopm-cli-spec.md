@@ -53,12 +53,14 @@ Everything needed to use SoloPM as a tracker, hand-drivable today. **Build this 
 | Command | Description |
 |---|---|
 | `solopm ticket create` | Create a ticket. Flags: `--title` (req), `--description`/`-d`, `--project`, `--state` (default `backlog`), `--assignee`. Prints the new ID. |
-| `solopm ticket list` | The board query. Filters: `--state`, `--assignee`, `--project`. `--json` for agents. |
+| `solopm ticket list` | The board query. Filters: `--state`, `--assignee`, `--project`, `--tag` (repeatable; AND across tags). `--json` for agents. |
 | `solopm ticket show <id>` | Full ticket detail — fields, branch/PR, comments, session refs. **This is the command agents are seeded with to fetch their own context.** |
 | `solopm ticket edit <id>` | Update `--title` / `--description`. |
 | `solopm ticket comment <id>` | Append a comment. Flag: `--body`/`-b`. Used for progress notes *and* review notes. |
 | `solopm ticket move <id> <state>` | Transition state. Validates legal transitions and the actor rules from the brief (only the human may reach `done`; agents may reach `in-ai-review`/`in-human-review`). In Tier 0 this is a pure state change; Tier 1 attaches git side effects (below). |
 | `solopm ticket assign <id> <assignee>` | Assign to `human` \| `claude` \| `codex` \| `unassigned`. |
+| `solopm ticket tag <id> <tags...>` | Add one or more free-form tags/labels (normalized to lowercase). |
+| `solopm ticket untag <id> <tag>` | Remove a tag from a ticket. |
 
 With just the above, the dogfood loop works manually: you create tickets for SoloPM's own features, assign one to an agent you launch by hand, the agent runs `solopm ticket show <id> --json` to read it, posts progress with `ticket comment`, and walks the ticket through states with `ticket move`. No orchestration required yet.
 

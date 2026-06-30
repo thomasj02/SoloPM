@@ -123,8 +123,11 @@ class SoloPMTools:
         project: str | None = None,
         state: str | None = None,
         assignee: str | None = None,
+        tags: list[str] | None = None,
     ) -> dict:
-        tickets = self.svc.list_tickets(project=project, state=state, assignee=assignee)
+        tickets = self.svc.list_tickets(
+            project=project, state=state, assignee=assignee, tags=tags
+        )
         return {"tickets": [t.to_summary() for t in tickets]}
 
     @_safe
@@ -241,6 +244,14 @@ class SoloPMTools:
     @_safe
     def remove_criterion(self, ticket_id: str, criterion_id: str) -> dict:
         return self.svc.remove_criterion(ticket_id, criterion_id, actor=self.agent).to_dict()
+
+    @_safe
+    def tag_ticket(self, ticket_id: str, tags: list[str]) -> dict:
+        return self.svc.add_tags(ticket_id, tags, actor=self.agent).to_dict()
+
+    @_safe
+    def untag_ticket(self, ticket_id: str, tag: str) -> dict:
+        return self.svc.remove_tag(ticket_id, tag, actor=self.agent).to_dict()
 
     @_safe
     def link_ticket(self, ticket_id: str, type: str, other_id: str) -> dict:

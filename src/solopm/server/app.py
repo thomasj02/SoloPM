@@ -40,6 +40,7 @@ from .schemas import (
     ProjectCreate,
     ReorderRequest,
     ReviewRequest,
+    TagsBody,
     TicketCreate,
     TicketPatch,
 )
@@ -241,9 +242,11 @@ def create_app(
         project: str | None = None,
         state: str | None = None,
         assignee: str | None = None,
+        tag: list[str] | None = Query(default=None),
         svc: Service = Depends(get_service),
     ) -> dict:
-        tickets = svc.list_tickets(project=project, state=state, assignee=assignee)
+        # Repeat `tag` to AND-filter by multiple tags (e.g. ?tag=bug&tag=frontend).
+        tickets = svc.list_tickets(project=project, state=state, assignee=assignee, tags=tag)
         return {"tickets": [t.to_summary() for t in tickets]}
 
     @app.post("/api/tickets", status_code=201)
@@ -376,6 +379,26 @@ def create_app(
         actor: str = Depends(get_actor),
     ) -> dict:
         return svc.remove_criterion(ticket_id, criterion_id, actor=actor).to_dict()
+
+    # --- ticket tags (SOLO-21) ----------------------------------------------
+
+    @app.post("/api/tickets/{ticket_id}/tags", status_code=201)
+    def add_tags(
+        ticket_id: str,
+        payload: TagsBody,
+        svc: Service = Depends(get_service),
+        actor: str = Depends(get_actor),
+    ) -> dict:
+        return svc.add_tags(ticket_id, payload.tags, actor=actor).to_dict()
+
+    @app.delete("/api/tickets/{ticket_id}/tags/{tag}")
+    def remove_tag(
+        ticket_id: str,
+        tag: str,
+        svc: Service = Depends(get_service),
+        actor: str = Depends(get_actor),
+    ) -> dict:
+        return svc.remove_tag(ticket_id, tag, actor=actor).to_dict()
 
     # --- ticket relationships (SOLO-10) -------------------------------------
 

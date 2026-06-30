@@ -120,6 +120,7 @@ def render_tickets(tickets: list[dict]) -> None:
     table.add_column("State")
     table.add_column("Age", style="grey62")
     table.add_column("Assignee")
+    table.add_column("Tags", style="grey62")
     table.add_column("💬", justify="right")
     for t in tickets:
         active = " [green]●[/]" if t.get("session_active") else ""
@@ -130,6 +131,7 @@ def render_tickets(tickets: list[dict]) -> None:
             _state_label(t["state"]),
             fmt_age(t.get("time_in_state_seconds")),
             _assignee_label(t["assignee"]),
+            ", ".join(t.get("tags") or []),
             str(count) if count else "",
         )
     console.print(table)
@@ -190,6 +192,8 @@ def render_ticket(t: dict) -> None:
         f"assignee: {_assignee_label(t['assignee'])}"
     )
     body = [header, "", f"[bold]{t['title']}[/]"]
+    if t.get("tags"):
+        body += ["", f"[grey62]tags:[/] {', '.join(t['tags'])}"]
     if t.get("description"):
         body += ["", t["description"]]
     if t.get("branch"):

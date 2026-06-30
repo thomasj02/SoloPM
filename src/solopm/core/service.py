@@ -21,12 +21,15 @@ from .models import (
     LINK_TYPES,
     RELATION_GROUP_ORDER,
     STATES,
+    TAGS_MAX_COUNT,
     Activity,
     Link,
     Project,
     Relation,
     Ticket,
     normalize_project_key,
+    normalize_tag,
+    normalize_tags,
     normalize_ticket_id,
     relation_view,
 )
@@ -230,6 +233,7 @@ class Service:
         project: str | None = None,
         state: str | None = None,
         assignee: str | None = None,
+        tags: list[str] | None = None,
     ) -> list[Ticket]:
         if state is not None and state not in STATES:
             raise ValidationError(f"Unknown state {state!r}.")
@@ -241,6 +245,13 @@ class Service:
         # Group by workflow state, then by manual position within each column.
         rank = {s: i for i, s in enumerate(STATES)}
         tickets.sort(key=lambda t: (rank.get(t.state, 99), t.position, t.seq))
+        # Tag filter (SOLO-21): keep tickets carrying ALL requested tags (AND). The match is
+        # case-insensitive and lenient — blank entries are ignored and an odd filter value
+        # simply matches nothing rather than erroring (a filter, not a mutation).
+        if tags:
+            wanted = {t.strip().lower() for t in tags if t and t.strip()}
+            if wanted:
+                tickets = [t for t in tickets if wanted <= set(t.tags)]
         self._attach_relations(tickets)
         return tickets
 
@@ -734,6 +745,51 @@ class Service:
         self, ticket_id: str, criterion_id: str, done: bool = True, *, actor: str = "human"
     ) -> Ticket:
         return self.update_criterion(ticket_id, criterion_id, done=done, actor=actor)
+
+    # --- ticket tags (SOLO-21) ----------------------------------------------
+    #
+    # Tags are normalized (lowercase, validated, sorted, unique) and persisted as a JSON
+    # column. Mutations go through ``store.mutate_tags`` so the read-modify-write is atomic;
+    # adding an already-present tag or removing an absent one is an idempotent no-op (no
+    # activity), so the log only records real changes.
+
+    def add_tags(self, ticket_id: str, tags: list[str], *, actor: str = "human") -> Ticket:
+        _require_actor(actor)
+        self._require_ticket(ticket_id)  # existence check (clean not_found)
+        incoming = normalize_tags(tags)  # validates + dedupes + sorts
+        if not incoming:
+            raise ValidationError("Provide at least one tag to add.")
+
+        def mutate(current: list[str]):
+            merged = list(current)
+            added = [t for t in incoming if t not in merged]
+            if not added:
+                return current, "tags", "", {}  # all present → idempotent no-op
+            merged.extend(added)
+            if len(merged) > TAGS_MAX_COUNT:
+                raise ValidationError(f"A ticket may have at most {TAGS_MAX_COUNT} tags.")
+            plural = "s" if len(added) != 1 else ""
+            return sorted(merged), "tags", f"added tag{plural}: {', '.join(added)}", {
+                "op": "add",
+                "tags": added,
+            }
+
+        self.store.mutate_tags(ticket_id, mutate, actor=actor, when=_now())
+        return self.get_ticket(ticket_id)
+
+    def remove_tag(self, ticket_id: str, tag: str, *, actor: str = "human") -> Ticket:
+        _require_actor(actor)
+        self._require_ticket(ticket_id)
+        target = normalize_tag(tag)
+
+        def mutate(current: list[str]):
+            if target not in current:
+                return current, "tags", "", {}  # absent → idempotent no-op
+            kept = [t for t in current if t != target]
+            return kept, "tags", f"removed tag: {target}", {"op": "remove", "tag": target}
+
+        self.store.mutate_tags(ticket_id, mutate, actor=actor, when=_now())
+        return self.get_ticket(ticket_id)
 
     # --- ticket relationships (SOLO-10) -------------------------------------
     #

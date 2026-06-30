@@ -35,7 +35,22 @@ export function isDragging(): boolean {
 function matchesFilter(t: TicketSummary, q: string): boolean {
   if (!q) return true;
   const needle = q.toLowerCase();
-  return t.id.toLowerCase().includes(needle) || (t.title || "").toLowerCase().includes(needle);
+  return (
+    t.id.toLowerCase().includes(needle) ||
+    (t.title || "").toLowerCase().includes(needle) ||
+    (t.tags ?? []).some((tag) => tag.includes(needle)) // tags are already lowercase
+  );
+}
+
+/** Read-only tag chips for a card (SOLO-21). Returns null when there are no tags so the
+ * card doesn't render an empty row. Exported for unit testing the card display. */
+export function tagChips(tags: string[] | undefined): HTMLElement | null {
+  if (!tags || !tags.length) return null;
+  return el(
+    "div",
+    { class: "card__tags" },
+    tags.map((tag) => el("span", { class: "tag-chip", title: `Tag: ${tag}` }, tag)),
+  );
 }
 
 function render(): void {
@@ -126,12 +141,14 @@ function renderCard(t: TicketSummary): HTMLElement {
     dataset: { id: t.id },
   });
 
+  const chips = tagChips(t.tags);
   card.append(
     el("div", { class: "card__top" }, [
       el("span", { class: "card__id mono" }, t.id),
       t.session_active ? el("span", { class: "card__live", title: "Active agent session" }) : null,
     ]),
     el("div", { class: "card__title" }, t.title || "(untitled)"),
+    ...(chips ? [chips] : []),
     el("div", { class: "card__meta" }, [
       assigneeBadge(t.assignee),
       t.blocked ? el("span", { class: "card__blocked", title: "Blocked by an open ticket" }, "Blocked") : null,

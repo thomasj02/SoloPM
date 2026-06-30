@@ -56,3 +56,31 @@ describe("api.deleteProject", () => {
     await expect(api.deleteProject("SOLO")).rejects.toMatchObject({ code: "validation" });
   });
 });
+
+describe("api tags (SOLO-21)", () => {
+  it("addTags POSTs the tag list to the ticket's /tags", async () => {
+    const fetchMock = stubFetch({ id: "SOLO-1", tags: ["bug", "frontend"] });
+
+    const res = await api.addTags("SOLO-1", ["bug", "frontend"]);
+    expect(res.tags).toEqual(["bug", "frontend"]);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/tickets/SOLO-1/tags");
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ tags: ["bug", "frontend"] });
+  });
+
+  it("removeTag DELETEs the encoded tag path segment", async () => {
+    const fetchMock = stubFetch({ id: "SOLO-1", tags: [] });
+
+    await api.removeTag("SOLO-1", "front end");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/tickets/SOLO-1/tags/front%20end");
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "DELETE" });
+  });
+
+  it("tickets() appends repeated tag query params", async () => {
+    const fetchMock = stubFetch({ tickets: [] });
+
+    await api.tickets({ project: "SOLO", tags: ["bug", "frontend"] });
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/tickets?project=SOLO&tag=bug&tag=frontend");
+  });
+});
