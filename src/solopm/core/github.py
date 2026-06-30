@@ -420,17 +420,46 @@ class GitHub:
         return worktrees
 
     def count_unpushed_commits(self, repo: str) -> int:
-        """Count commits on local branches not present on any remote.
+        """Count locally-committed work that isn't on any remote — the board's "unpushed" signal.
 
-        ``git log --branches --not --remotes`` enumerates exactly the commits that exist
-        locally but haven't been pushed anywhere — the "committed but not yet pushed" state
-        the board surfaces. ``--format=%H`` prints one sha per line, so the count is the
-        number of non-blank lines. Best-effort: a repo with no commits (or where the query
-        otherwise exits non-zero, e.g. a bare/odd repo) reports zero rather than failing —
-        a missing ``git`` or a timeout still raises ``GitHubError`` for the caller to absorb.
+        Counts commits reachable from local branches but not from any remote-tracking branch,
+        **excluding branches whose upstream is gone** (their remote branch was deleted). SoloPM
+        squash-merges each ticket's PR and deletes the remote branch while keeping the local one
+        (SOLO-18); a plain ``git log --branches --not --remotes`` would then count those merged
+        commits forever, because the squash commit on master has a different sha so the originals
+        still look unpushed. Resolving the live branch set (``git for-each-ref`` with
+        ``%(upstream:track)``) and dropping the ``[gone]`` ones keeps the count to genuinely
+        unpushed work — branches never pushed (no upstream) or ahead of a live upstream; branches
+        whose remote still exists are already excluded by ``--not --remotes``.
+
+        Trade-off: a remote branch a user deleted by hand for *unmerged* work would also be
+        excluded — acceptable for this squash-merge workflow.
+
+        Best-effort: a non-git / bare / odd repo (or a query that exits non-zero) reports zero
+        rather than failing; a missing ``git`` or a timeout still raises ``GitHubError`` for the
+        caller to absorb.
         """
+        refs = self._run(
+            ["git", "for-each-ref", "--format=%(refname)%09%(upstream:track)", "refs/heads"],
+            cwd=repo,
+            check=False,
+        )
+        if refs.returncode != 0:
+            return 0
+        branches: list[str] = []
+        for line in refs.stdout.splitlines():
+            name, _, track = line.partition("\t")
+            name = name.strip()
+            if not name or track.strip() == "[gone]":
+                continue  # detached/blank, or merged-and-cleaned (gone upstream)
+            branches.append(name)
+        if not branches:
+            return 0
+        # The branch refs are POSITIVE revisions and MUST come before ``--not`` — ``--not``
+        # flips the sense of every revision that follows it, so listing the branches after it
+        # would negate them too and the query would always return nothing.
         proc = self._run(
-            ["git", "log", "--branches", "--not", "--remotes", "--format=%H"],
+            ["git", "log", "--format=%H", *branches, "--not", "--remotes"],
             cwd=repo,
             check=False,
         )

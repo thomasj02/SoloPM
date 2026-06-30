@@ -89,9 +89,12 @@ Actor rules layered on top:
 `GET /api/projects/{key}/status` → `{ "open_prs": <int>, "unpushed_commits": <int> }` —
 live git/PR health for the board header. `open_prs` counts the project's tickets whose
 recorded PR is still `open` (SoloPM is the system of record). `unpushed_commits` counts
-commits on local branches not on any remote (`git log --branches --not --remotes`).
-Degrades gracefully: a project with no `repo`, no git client, or an unreachable git repo
-reports `unpushed_commits: 0` rather than erroring (404 only for an unknown project).
+commits on local branches not on any remote, **excluding branches whose upstream is gone**
+(squash-merged + remote-deleted — SoloPM's merge cleanup, where the local branch is kept per
+SOLO-18); without that exclusion the merged commits would be counted forever (the squash
+commit on master has a different sha). Degrades gracefully: a project with no `repo`, no git
+client, or an unreachable git repo reports `unpushed_commits: 0` rather than erroring (404
+only for an unknown project).
 
 `PATCH /api/projects/{key}` body `{ "field": "<name>", "value": "<value>" }` (sets one
 field) **or** a partial object `{ "review_prompt": "..." }`. Editable fields:
