@@ -220,3 +220,117 @@ def test_criteria_via_mcp_tools(service, project):
     # criteria surface in show_ticket
     assert t.show_ticket("SOLO-1")["acceptance_criteria"][0]["id"] == cid
     assert t.remove_criterion("SOLO-1", cid)["acceptance_criteria"] == []
+
+
+# --- project management (SOLO-20) -------------------------------------------
+
+
+def test_create_project_via_mcp(service):
+    t = tools_for(service)
+    created = t.create_project(key="BLOG", name="Blog", repo="/code/blog", master="trunk")
+    assert created["key"] == "BLOG"
+    assert created["name"] == "Blog"
+    assert created["repo"] == "/code/blog"
+    assert created["master_branch"] == "trunk"
+    # surfaces in list_projects
+    assert "BLOG" in {p["key"] for p in t.list_projects()["projects"]}
+
+
+def test_create_project_lowercase_key_normalized(service):
+    created = tools_for(service).create_project(key="blog", name="Blog")
+    assert created["key"] == "BLOG"
+
+
+def test_create_project_duplicate_is_structured_error(service, project):
+    out = tools_for(service).create_project(key="SOLO", name="Again")
+    assert out["error"]["code"] == "duplicate"
+
+
+def test_create_project_invalid_key_is_structured_error(service):
+    out = tools_for(service).create_project(key="9bad", name="X")
+    assert out["error"]["code"] == "validation"
+
+
+def test_edit_project_via_mcp(service, project):
+    t = tools_for(service)
+    edited = t.edit_project("SOLO", name="Renamed", review_prompt="Be strict.")
+    assert edited["name"] == "Renamed"
+    assert edited["review_prompt"] == "Be strict."
+    # persisted
+    assert t.list_projects()["projects"][0]["name"] == "Renamed"
+
+
+def test_edit_project_no_fields_is_structured_error(service, project):
+    out = tools_for(service).edit_project("SOLO")
+    assert out["error"]["code"] == "validation"
+
+
+def test_edit_project_preserves_omitted_fields(service, project):
+    """A partial edit (None = omitted) must leave untouched fields alone — guards the
+    None-omission filter so a regression can't silently clobber e.g. repo."""
+    t = tools_for(service)
+    # The `project` fixture has repo="/tmp/solopm", master="main".
+    edited = t.edit_project("SOLO", review_prompt="Be strict.")
+    assert edited["review_prompt"] == "Be strict."
+    assert edited["repo"] == "/tmp/solopm"  # not nulled out
+    assert edited["master_branch"] == "main"
+    assert edited["default_reviewer"] == "codex"
+
+
+def test_edit_unknown_project_is_structured_error(service):
+    out = tools_for(service).edit_project("NOPE", name="x")
+    assert out["error"]["code"] == "not_found"
+
+
+def test_delete_empty_project_via_mcp(service, project):
+    t = tools_for(service)
+    out = t.delete_project("SOLO")
+    assert out == {"key": "SOLO", "deleted": True, "tickets_deleted": 0}
+    assert t.list_projects()["projects"] == []
+
+
+def test_delete_nonempty_project_refused_without_force(service, project):
+    t = tools_for(service)
+    t.create_ticket(project="SOLO", title="x")
+    out = t.delete_project("SOLO")
+    assert out["error"]["code"] == "validation"
+    # still there
+    assert {p["key"] for p in t.list_projects()["projects"]} == {"SOLO"}
+
+
+def test_delete_nonempty_project_with_force(service, project):
+    t = tools_for(service)
+    t.create_ticket(project="SOLO", title="x")
+    out = t.delete_project("SOLO", force=True)
+    assert out["deleted"] is True
+    assert out["tickets_deleted"] == 1
+    assert t.list_projects()["projects"] == []
+
+
+def test_delete_unknown_project_is_structured_error(service):
+    out = tools_for(service).delete_project("NOPE")
+    assert out["error"]["code"] == "not_found"
+
+
+def test_project_management_tools_registered(service):
+    from solopm.mcp.server import build_server
+
+    mcp = build_server(service, agent="claude")
+    names = {tool.name for tool in asyncio.run(mcp.list_tools())}
+    assert {"create_project", "edit_project", "delete_project"} <= names
+
+
+def test_project_management_tool_invocation(service):
+    import json
+
+    from solopm.mcp.server import build_server
+
+    mcp = build_server(service, agent="claude")
+    blocks = asyncio.run(
+        mcp.call_tool("create_project", {"key": "BLOG", "name": "Blog"})
+    )
+    payload = json.loads(blocks[0].text)
+    assert payload["key"] == "BLOG"
+    blocks = asyncio.run(mcp.call_tool("delete_project", {"key": "BLOG"}))
+    payload = json.loads(blocks[0].text)
+    assert payload == {"key": "BLOG", "deleted": True, "tickets_deleted": 0}

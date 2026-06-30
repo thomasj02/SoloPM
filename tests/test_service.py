@@ -80,6 +80,180 @@ def test_set_unknown_project_field_rejected(service):
         service.set_project_field("SOLO", "bogus", "x")
 
 
+# --- Project deletion (SOLO-20) ---------------------------------------------
+
+
+def test_delete_empty_project(service):
+    service.add_project(key="SOLO", name="SoloPM")
+    result = service.delete_project("SOLO")
+    assert result == {"key": "SOLO", "deleted": True, "tickets_deleted": 0}
+    with pytest.raises(NotFoundError):
+        service.get_project("SOLO")
+    assert service.list_projects() == []
+
+
+def test_delete_missing_project_raises(service):
+    with pytest.raises(NotFoundError):
+        service.delete_project("NOPE")
+
+
+def test_delete_project_key_is_normalized(service):
+    service.add_project(key="SOLO", name="SoloPM")
+    result = service.delete_project("solo")  # lowercase resolves to SOLO
+    assert result["key"] == "SOLO"
+    with pytest.raises(NotFoundError):
+        service.get_project("SOLO")
+
+
+def test_delete_nonempty_project_refused_without_force(service):
+    service.add_project(key="SOLO", name="SoloPM")
+    service.create_ticket(project="SOLO", title="a")
+    service.create_ticket(project="SOLO", title="b")
+    with pytest.raises(ValidationError):
+        service.delete_project("SOLO")
+    # Refusal leaves the project — and its tickets — untouched.
+    assert service.get_project("SOLO").ticket_count == 2
+    assert service.store.get_ticket("SOLO-1") is not None
+
+
+def test_delete_nonempty_project_with_force_cascades(service):
+    service.add_project(key="SOLO", name="SoloPM")
+    service.create_ticket(project="SOLO", title="a")
+    service.create_ticket(project="SOLO", title="b")
+    service.link_tickets("SOLO-1", "blocks", "SOLO-2")
+
+    result = service.delete_project("SOLO", force=True)
+    assert result == {"key": "SOLO", "deleted": True, "tickets_deleted": 2}
+    with pytest.raises(NotFoundError):
+        service.get_project("SOLO")
+    # Tickets, their activity, and their links are all cascade-deleted.
+    assert service.store.get_ticket("SOLO-1") is None
+    assert service.store.get_ticket("SOLO-2") is None
+    assert service.store.list_links() == []
+    assert service.store.max_activity_id() == 0
+
+
+def test_delete_project_only_removes_its_own_data(service):
+    service.add_project(key="SOLO", name="SoloPM")
+    service.add_project(key="BLOG", name="Blog")
+    service.create_ticket(project="SOLO", title="a")
+    service.create_ticket(project="BLOG", title="b")
+    # A cross-project link from the deleted project's ticket to a surviving one.
+    service.link_tickets("SOLO-1", "related", "BLOG-1")
+
+    service.delete_project("SOLO", force=True)
+
+    # The other project and its ticket survive; only the cross-project link is gone.
+    assert {p.key for p in service.list_projects()} == {"BLOG"}
+    assert service.store.get_ticket("BLOG-1") is not None
+    assert service.store.links_for_ticket("BLOG-1") == []
+
+
+def test_store_delete_project_guard_is_atomic(service):
+    """The non-empty guard, ticket count, and delete live in the store's single
+    transaction (so a concurrent insert can't slip past force=False) — exercise that
+    contract directly on the store, returning the real deleted count."""
+    service.add_project(key="SOLO", name="SoloPM")
+    service.create_ticket(project="SOLO", title="a")
+
+    with pytest.raises(ValidationError):
+        service.store.delete_project("SOLO", force=False)
+    assert service.store.get_ticket("SOLO-1") is not None  # refusal rolled back
+
+    with pytest.raises(NotFoundError):
+        service.store.delete_project("NOPE", force=True)
+
+    assert service.store.delete_project("SOLO", force=True) == 1  # real deleted count
+    assert service.store.get_ticket("SOLO-1") is None
+
+
+def test_force_delete_removes_dependents_on_pre_cascade_schema(tmp_path):
+    """[SOLO-20, gpt-review P1] Deletion must remove tickets/activity/links itself, not
+    lean on ON DELETE CASCADE — which only fires if the table was created with the FK.
+    A store migrated from an early SoloPM schema (tickets/activity predate the cascade FKs,
+    no ticket_links table at all) would otherwise keep orphan rows while reporting a delete,
+    and a later re-add of the same key would then collide on a duplicate ticket id.
+    """
+    import sqlite3
+
+    from solopm.core.service import Service
+    from solopm.core.store import Store
+
+    # An early schema: NO foreign-key cascades on tickets/activity, no ticket_links table.
+    old_schema = """
+    CREATE TABLE projects (
+        key TEXT PRIMARY KEY, name TEXT NOT NULL, repo TEXT,
+        master_branch TEXT NOT NULL DEFAULT 'main', branch_convention TEXT NOT NULL,
+        default_implementer TEXT NOT NULL DEFAULT 'claude', default_reviewer TEXT NOT NULL DEFAULT 'codex',
+        review_prompt TEXT NOT NULL DEFAULT '', seq_counter INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE tickets (
+        id TEXT PRIMARY KEY, project_key TEXT NOT NULL, seq INTEGER NOT NULL,
+        title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'backlog',
+        assignee TEXT NOT NULL DEFAULT 'unassigned', branch TEXT, pr_number INTEGER, pr_url TEXT,
+        pr_state TEXT, session_id TEXT, session_active INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE activity (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id TEXT NOT NULL, actor TEXT NOT NULL,
+        kind TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', meta TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+    );
+    """
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(old_schema)
+    conn.execute(
+        "INSERT INTO projects (key,name,branch_convention,seq_counter,created_at,updated_at) "
+        "VALUES ('SOLO','SoloPM','{key}-{seq}-{slug}',1,'t','t')"
+    )
+    conn.execute(
+        "INSERT INTO tickets (id,project_key,seq,title,created_at,updated_at) "
+        "VALUES ('SOLO-1','SOLO',1,'t1','t','t')"
+    )
+    conn.execute(
+        "INSERT INTO activity (ticket_id,actor,kind,body,meta,created_at) "
+        "VALUES ('SOLO-1','human','created','c','{}','t')"
+    )
+    conn.commit()
+    conn.close()
+
+    store = Store(db)
+    store.init()  # migration adds columns + the ticket_links table, but can't retrofit FKs
+    service = Service(store)
+
+    assert service.delete_project("SOLO", force=True)["tickets_deleted"] == 1
+
+    # No orphans survive (ON DELETE CASCADE would NOT have fired on this schema).
+    check = sqlite3.connect(db)
+    try:
+        assert check.execute("SELECT COUNT(*) FROM tickets").fetchone()[0] == 0
+        assert check.execute("SELECT COUNT(*) FROM activity").fetchone()[0] == 0
+    finally:
+        check.close()
+
+    # Re-adding the same key then minting a ticket no longer collides on the old SOLO-1.
+    service.add_project(key="SOLO", name="SoloPM")
+    assert service.create_ticket(project="SOLO", title="fresh").id == "SOLO-1"
+
+
+def test_store_create_ticket_for_missing_project_raises_not_found(service):
+    """[SOLO-20, gpt-review P2] If a project is deleted out from under an in-flight ticket
+    creation (a create/delete race now possible since projects became deletable), the store
+    must raise a clean NotFoundError — not subscript a missing seq_counter row into a 500."""
+    with pytest.raises(NotFoundError):
+        service.store.create_ticket(
+            project_key="GONE",
+            title="x",
+            description="",
+            state="backlog",
+            assignee="unassigned",
+            actor="human",
+            created_at="2026-01-01T00:00:00Z",
+        )
+
+
 # --- Ticket creation & IDs --------------------------------------------------
 
 

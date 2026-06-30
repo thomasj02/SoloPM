@@ -195,6 +195,14 @@ def create_app(
             raise ValidationError("No fields to update.")
         return svc.update_project(key, fields).to_dict()
 
+    @app.delete("/api/projects/{key}")
+    def delete_project(
+        key: str, force: bool = False, svc: Service = Depends(get_service)
+    ) -> dict:
+        # `force` cascade-deletes the project's tickets, activity, and links; without it a
+        # non-empty project is refused (400) so a whole board isn't erased by accident.
+        return svc.delete_project(key, force=force)
+
     # --- review memory (learning review gate) -------------------------------
 
     @app.get("/api/projects/{key}/review-memory")

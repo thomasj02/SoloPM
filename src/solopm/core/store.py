@@ -14,7 +14,7 @@ import sqlite3
 from pathlib import Path
 from typing import Callable
 
-from .errors import DuplicateError, NotFoundError
+from .errors import DuplicateError, NotFoundError, ValidationError
 from .models import Activity, Criterion, Link, Project, ReviewMemoryItem, Ticket
 
 SCHEMA = """
@@ -318,6 +318,67 @@ class Store:
                 f"UPDATE projects SET {sets}, updated_at = ? WHERE key = ?", values
             )
 
+    def delete_project(self, key: str, *, force: bool) -> int:
+        """Atomically guard + delete a project and its dependents; return the ticket count.
+
+        The existence check, the ticket count, the non-empty guard, and the deletes all run
+        inside one ``BEGIN IMMEDIATE`` transaction. That atomicity is the point: a ticket
+        inserted by a concurrent writer (another MCP agent, the web, or the CLI against the
+        same WAL store) in the window between counting and deleting would otherwise be
+        silently removed despite ``force=False`` — a TOCTOU that defeats the very guard the
+        feature exists for. Holding the write lock from the count through the delete closes
+        that window (the codebase keeps check + mutation in one transaction elsewhere, e.g.
+        ``create_ticket``).
+
+        Dependents are deleted **explicitly** (links → activity → tickets → project, the
+        FK-safe child-before-parent order) rather than trusting ``ON DELETE CASCADE``. The
+        cascade only fires if the table was *created* with the constraint, but the schema
+        uses ``CREATE TABLE IF NOT EXISTS`` and SQLite cannot retrofit a foreign key via
+        ``ALTER``/migration — so a store migrated from an early SoloPM schema (whose
+        tickets/activity tables predate the cascade FKs, and which had no ``ticket_links``
+        table at all) would otherwise keep orphan rows while this still reported a delete,
+        and a later re-add of the same key would then collide on a duplicate ticket id.
+        Deleting the rows ourselves is correct on both old and new stores. The ``ticket_links``
+        delete matches *either* endpoint, so cross-project links to/from a surviving project
+        are cleaned up too.
+
+        Raises ``NotFoundError`` for an unknown project and ``ValidationError`` for a
+        non-empty project without ``force``.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if conn.execute(
+                    "SELECT 1 FROM projects WHERE key = ?", (key,)
+                ).fetchone() is None:
+                    raise NotFoundError(f"Project {key!r} not found.")
+                count = conn.execute(
+                    "SELECT COUNT(*) AS c FROM tickets WHERE project_key = ?", (key,)
+                ).fetchone()["c"]
+                if count and not force:
+                    raise ValidationError(
+                        f"Project {key} has {count} ticket(s). Pass force=true to delete it "
+                        "along with all its tickets, activity, and relationships."
+                    )
+                conn.execute(
+                    "DELETE FROM ticket_links WHERE "
+                    "from_ticket IN (SELECT id FROM tickets WHERE project_key = ?) OR "
+                    "to_ticket   IN (SELECT id FROM tickets WHERE project_key = ?)",
+                    (key, key),
+                )
+                conn.execute(
+                    "DELETE FROM activity WHERE "
+                    "ticket_id IN (SELECT id FROM tickets WHERE project_key = ?)",
+                    (key,),
+                )
+                conn.execute("DELETE FROM tickets WHERE project_key = ?", (key,))
+                conn.execute("DELETE FROM projects WHERE key = ?", (key,))
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return count
+
     # --- tickets ------------------------------------------------------------
 
     def create_ticket(
@@ -339,9 +400,17 @@ class Store:
                     "UPDATE projects SET seq_counter = seq_counter + 1 WHERE key = ?",
                     (project_key,),
                 )
-                seq = conn.execute(
+                row = conn.execute(
                     "SELECT seq_counter FROM projects WHERE key = ?", (project_key,)
-                ).fetchone()["seq_counter"]
+                ).fetchone()
+                # The project can vanish between the service's existence check and this
+                # write — a create/delete race made reachable once projects became
+                # deletable (SOLO-20). Without the project row the UPDATE hit zero rows and
+                # this SELECT is empty; raise a clean NotFoundError (→ 404) instead of
+                # subscripting None into an internal 500.
+                if row is None:
+                    raise NotFoundError(f"Project {project_key!r} not found.")
+                seq = row["seq_counter"]
                 ticket_id = f"{project_key}-{seq}"
                 # New tickets default to the end of their column (position = seq, which
                 # is monotonic), so creation order is the initial board order.

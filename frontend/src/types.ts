@@ -235,6 +235,13 @@ export type ProjectPatch = Partial<{
   review_prompt: string;
 }>;
 
+// SOLO-20: result of deleting a project. `tickets_deleted` is how many cascaded away.
+export interface ProjectDelete {
+  key: string;
+  deleted: boolean;
+  tickets_deleted: number;
+}
+
 export interface TicketCreate {
   project: string;
   title: string;
