@@ -154,6 +154,7 @@ function renderPanel(): void {
     scroll.append(
       renderTitle(t),
       renderMetaCard(t),
+      renderTags(t),
       renderMoveActions(t),
       renderCriteria(t),
       renderRelations(t),
@@ -242,6 +243,57 @@ function renderMoveActions(t: Ticket): HTMLElement {
     el("button", { class: `btn btn--move btn--move-${s}`, onClick: () => doMove(s) }, `→ ${state.meta.state_labels[s] || s}`),
   );
   return el("div", { class: "tp__moves" }, [el("span", { class: "tp__moveslabel" }, "Move to"), ...buttons]);
+}
+
+function renderTags(t: Ticket): HTMLElement {
+  const tags = t.tags || [];
+  const list = el("div", { class: "tp__tags" });
+  if (!tags.length) list.append(el("span", { class: "muted tp__critempty" }, "No tags yet."));
+  for (const tag of tags) {
+    list.append(
+      el("span", { class: "tp__tag" }, [
+        el("span", { class: "tp__tagtext" }, tag),
+        el("button", {
+          class: "tp__tagdel",
+          title: `Remove tag ${tag}`,
+          "aria-label": `Remove tag ${tag}`,
+          onClick: () => void doRemoveTag(tag),
+        }, "×"),
+      ]),
+    );
+  }
+
+  const input = el("input", {
+    class: "input tp__tagadd",
+    placeholder: "Add tags (space/comma separated)…",
+    maxlength: 200,
+    autocomplete: "off",
+  });
+  const add = async (): Promise<void> => {
+    // Split on whitespace/commas so "bug frontend" or "bug, frontend" both add two tags.
+    const toAdd = input.value.trim().split(/[\s,]+/).filter(Boolean);
+    if (!toAdd.length) {
+      input.focus();
+      return;
+    }
+    // Don't pre-clear: a success re-renders the panel with a fresh empty input, while a
+    // failure (invalid tag, cap exceeded, or busy-skip) keeps the typed text for retry —
+    // matching the acceptance-criteria add flow.
+    await doAddTags(toAdd);
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void add();
+    }
+  });
+  const addBtn = el("button", { class: "btn btn--ghost btn--sm", onClick: () => void add() }, "Add");
+
+  return el("section", { class: "tp__section" }, [
+    el("h3", { class: "tp__sectionhead" }, `Tags (${tags.length})`),
+    list,
+    el("div", { class: "tp__tagaddrow" }, [input, addBtn]),
+  ]);
 }
 
 function renderCriteria(t: Ticket): HTMLElement {
@@ -559,6 +611,36 @@ async function doMove(s: State): Promise<void> {
     refreshTickets({ silent: true }).catch(() => {});
   } catch (err) {
     toastError((err as Error).message || "Move failed");
+  } finally {
+    busy = false;
+  }
+}
+
+async function doAddTags(tags: string[]): Promise<void> {
+  const id = currentId;
+  if (!id || busy) return;
+  busy = true;
+  try {
+    ticket = await api.addTags(id, tags);
+    renderPanel();
+    refreshTickets({ silent: true }).catch(() => {});
+  } catch (err) {
+    toastError((err as Error).message || "Add tag failed");
+  } finally {
+    busy = false;
+  }
+}
+
+async function doRemoveTag(tag: string): Promise<void> {
+  const id = currentId;
+  if (!id || busy) return;
+  busy = true;
+  try {
+    ticket = await api.removeTag(id, tag);
+    renderPanel();
+    refreshTickets({ silent: true }).catch(() => {});
+  } catch (err) {
+    toastError((err as Error).message || "Remove tag failed");
   } finally {
     busy = false;
   }

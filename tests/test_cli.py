@@ -85,6 +85,27 @@ def test_project_delete_key_cannot_smuggle_force(wired):
     assert {p["key"] for p in json.loads(r.output)["projects"]} == {"SOLO"}
 
 
+def test_ticket_tag_and_untag(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "x")
+    r = invoke("ticket", "tag", "SOLO-1", "bug", "frontend", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["tags"] == ["bug", "frontend"]
+    r = invoke("ticket", "untag", "SOLO-1", "bug", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output)["tags"] == ["frontend"]
+
+
+def test_ticket_list_filter_by_tag(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "a")
+    invoke("ticket", "create", "--project", "SOLO", "--title", "b")
+    invoke("ticket", "tag", "SOLO-1", "bug")
+    r = invoke("ticket", "list", "--project", "SOLO", "--tag", "bug", "--json")
+    assert r.exit_code == 0, r.output
+    assert {t["id"] for t in json.loads(r.output)["tickets"]} == {"SOLO-1"}
+
+
 def test_ticket_lifecycle_json(wired):
     invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
     r = invoke("ticket", "create", "--project", "SOLO", "--title", "Build it", "--json")

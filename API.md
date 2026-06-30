@@ -124,8 +124,9 @@ project.
 
 ### Tickets
 
-`GET /api/tickets?project=SOLO&state=todo&assignee=claude` → `{ "tickets": [ <ticket-summary>, ... ] }`
-All filters optional. Ordered by project then sequence.
+`GET /api/tickets?project=SOLO&state=todo&assignee=claude&tag=bug&tag=frontend` → `{ "tickets": [ <ticket-summary>, ... ] }`
+All filters optional. Repeat `tag` to filter by tags (case-insensitive; a ticket must carry
+**all** requested tags). Ordered by project then sequence.
 
 **`<ticket-summary>`:**
 ```json
@@ -133,6 +134,7 @@ All filters optional. Ordered by project then sequence.
   "id": "SOLO-42", "project": "SOLO", "title": "…", "state": "in-progress",
   "assignee": "claude", "branch": "solo-42-…", "session_active": false,
   "pr": { "number": 17, "url": "…", "state": "open" },
+  "tags": ["bug", "frontend"],
   "comment_count": 3,
   "blocked": false,
   "subtickets": { "done": 2, "total": 5 },
@@ -217,6 +219,22 @@ A ticket carries `acceptance_criteria` — an ordered list of `{ "id", "text", "
 
 Errors: `validation` (blank text / nothing to update), `not_found` (unknown ticket or
 criterion). Each change is recorded as a `criteria` activity.
+
+### Tags
+
+A ticket carries `tags` — a sorted, de-duplicated list of lowercase labels
+(`[a-z0-9][a-z0-9_-]*`, ≤32 chars each, ≤20 per ticket). `tags` appears on both
+`<ticket-summary>` and the full `<ticket>`.
+
+- `POST /api/tickets/{id}/tags` body `{ "tags": [<string>, …] }` → `<ticket>` (`201`). Adds
+  one or more tags, normalized to lowercase; already-present tags are ignored.
+- `DELETE /api/tickets/{id}/tags/{tag}` → `<ticket>`. Removes one tag (case-insensitive;
+  removing an absent tag is a no-op).
+- Filter the board with `GET /api/tickets?tag=<t>` (repeatable; AND across tags).
+
+Errors: `validation` (invalid tag, or exceeding the 20-tag cap), `not_found` (unknown
+ticket). A real add/remove is recorded as a `tags` activity (idempotent no-ops are not
+logged).
 
 ### Ticket relationships
 

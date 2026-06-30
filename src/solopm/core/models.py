@@ -49,7 +49,13 @@ ACTIVITY_KINDS: tuple[str, ...] = (
     "review",
     "link",
     "unlink",
+    "tags",
 )
+
+# Ticket tags (SOLO-21): free-form labels, normalized to lowercase. Bounded so a single
+# ticket can't accumulate an unwieldy set.
+TAG_MAX_LEN = 32
+TAGS_MAX_COUNT = 20
 
 # Ticket relationship types (SOLO-10). Each has a defined canonical storage direction
 # (the link is stored from→to once and the inverse is derived for the other ticket):
@@ -257,6 +263,7 @@ class Ticket:
     session_id: str | None = None
     session_active: bool = False
     acceptance_criteria: list[Criterion] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)  # SOLO-21: normalized, sorted, unique
     position: float = 0.0  # within-column ordering; internal, not serialized to the API
     # When the ticket entered its CURRENT state. Set at creation and refreshed on every
     # transition (SOLO-13); a denormalized copy of the latest state-change timestamp so
@@ -323,6 +330,7 @@ class Ticket:
             "session_active": self.session_active,
             "pr": self.pr_dict(),
             "acceptance": self.acceptance_progress(),
+            "tags": list(self.tags),
             "comment_count": self.comment_count,
             "blocked": self.blocked,
             "subtickets": {"done": self.sub_done, "total": self.sub_total},
@@ -350,6 +358,7 @@ class Ticket:
             "pr": self.pr_dict(),
             "session": self.session_dict(),
             "acceptance_criteria": [c.to_dict() for c in self.acceptance_criteria],
+            "tags": list(self.tags),
             "relations": [r.to_dict() for r in self.relations],
             "comments": comments,
             "activity": [a.to_dict() for a in self.activity],
@@ -387,6 +396,52 @@ def normalize_project_key(key: str) -> str:
             "letters and digits (e.g. SOLO, BLOG7)."
         )
     return candidate
+
+
+_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def normalize_tag(raw: str) -> str:
+    """Lowercase, trim, and validate a single tag (SOLO-21).
+
+    A tag is lowercase letters/digits/``-``/``_``, starting with a letter or digit, at most
+    :data:`TAG_MAX_LEN` chars. Raises :class:`ValidationError` otherwise.
+    """
+    tag = (raw or "").strip().lower()
+    if not tag:
+        from .errors import ValidationError
+
+        raise ValidationError("A tag cannot be empty.")
+    if len(tag) > TAG_MAX_LEN:
+        from .errors import ValidationError
+
+        raise ValidationError(f"Tag {raw!r} is too long (max {TAG_MAX_LEN} characters).")
+    if not _TAG_RE.match(tag):
+        from .errors import ValidationError
+
+        raise ValidationError(
+            f"Invalid tag {raw!r}: use lowercase letters, digits, '-' and '_' "
+            "(starting with a letter or digit), e.g. 'bug' or 'tech-debt'."
+        )
+    return tag
+
+
+def normalize_tags(raws) -> list[str]:
+    """Normalize a collection of tags to a sorted, de-duplicated list (case-insensitive).
+
+    Each tag is run through :func:`normalize_tag`; the result is bounded by
+    :data:`TAGS_MAX_COUNT`. Raises :class:`ValidationError` on an invalid tag or overflow.
+    """
+    seen: list[str] = []
+    for raw in raws or []:
+        tag = normalize_tag(raw)
+        if tag not in seen:
+            seen.append(tag)
+    if len(seen) > TAGS_MAX_COUNT:
+        from .errors import ValidationError
+
+        raise ValidationError(f"A ticket may have at most {TAGS_MAX_COUNT} tags.")
+    return sorted(seen)
 
 
 _TICKET_ID_RE = re.compile(r"^([A-Za-z][A-Za-z0-9]*)-(\d+)$")
