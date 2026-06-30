@@ -6,6 +6,7 @@ import "./styles.css";
 import {
   state,
   on,
+  emit,
   loadMeta,
   loadProjects,
   setProject,
@@ -596,9 +597,14 @@ async function openProjectSettings(): Promise<void> {
   deleteBtn.addEventListener("click", () =>
     confirmDeleteProject(project, async () => {
       modal.close(); // close settings once the project is gone
-      await loadProjects(); // drops the deleted project; defaults to the first remaining
-      state.radar = []; // the deleted project's overlaps/status no longer apply
+      // Drop the deleted project's board data up front and clear the board, so its cards
+      // can't linger under the fallback project's header — while refreshTickets() runs, or
+      // indefinitely if that refresh fails.
+      state.tickets = [];
+      state.radar = [];
       state.status = null;
+      emit("tickets");
+      await loadProjects(); // drops the deleted project; defaults to the first remaining
       renderTopbar();
       await refreshTickets();
     }),
