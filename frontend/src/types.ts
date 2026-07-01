@@ -245,6 +245,25 @@ export interface ProjectDelete {
   tickets_deleted: number;
 }
 
+// SOLO-23: result of pruning merged local branches.
+export interface PruneEntry {
+  branch: string;
+  reasons: string[];
+  worktree: string | null;
+}
+
+export interface PruneSkip {
+  branch: string;
+  reason: string;
+}
+
+export interface PruneResult {
+  project: string;
+  applied: boolean;
+  pruned: PruneEntry[];
+  skipped: PruneSkip[];
+}
+
 export interface TicketCreate {
   project: string;
   title: string;

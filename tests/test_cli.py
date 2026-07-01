@@ -85,6 +85,16 @@ def test_project_delete_key_cannot_smuggle_force(wired):
     assert {p["key"] for p in json.loads(r.output)["projects"]} == {"SOLO"}
 
 
+def test_project_prune_dry_run_and_apply(wired):
+    invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
+    # No GitHub client in the wired app → empty result; verifies the command + apply flag.
+    r = invoke("project", "prune", "SOLO", "--json")
+    assert r.exit_code == 0, r.output
+    assert json.loads(r.output) == {"project": "SOLO", "applied": False, "pruned": [], "skipped": []}
+    r = invoke("project", "prune", "SOLO", "--apply", "--json")
+    assert json.loads(r.output)["applied"] is True
+
+
 def test_ticket_tag_and_untag(wired):
     invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
     invoke("ticket", "create", "--project", "SOLO", "--title", "x")

@@ -156,6 +156,23 @@ def test_delete_nonempty_project_with_force_cascades(client):
     assert client.get("/api/tickets/SOLO-1").status_code == 404
 
 
+def test_prune_endpoint_dry_run_and_apply(client):
+    # The test app has no GitHub client → prune degrades to an empty result; the endpoint
+    # wiring + apply flag are exercised.
+    _make_project(client)
+    r = client.post("/api/projects/SOLO/prune")
+    assert r.status_code == 200
+    assert r.json() == {"project": "SOLO", "applied": False, "pruned": [], "skipped": []}
+    r = client.post("/api/projects/SOLO/prune", json={"apply": True})
+    assert r.json()["applied"] is True
+
+
+def test_prune_unknown_project_404(client):
+    r = client.post("/api/projects/NOPE/prune")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
 # --- ticket tags (SOLO-21) --------------------------------------------------
 
 

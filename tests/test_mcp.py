@@ -338,6 +338,25 @@ def test_delete_unknown_project_is_structured_error(service):
     assert out["error"]["code"] == "not_found"
 
 
+def test_prune_merged_branches_via_mcp(service, project):
+    t = tools_for(service)
+    # The service fixture has no GitHub client, so prune degrades to an empty result — but the
+    # plumbing (and the apply passthrough) is exercised end-to-end.
+    assert t.prune_merged_branches("SOLO") == {
+        "project": "SOLO", "applied": False, "pruned": [], "skipped": []
+    }
+    assert t.prune_merged_branches("SOLO", apply=True)["applied"] is True
+    assert t.prune_merged_branches("NOPE")["error"]["code"] == "not_found"
+
+
+def test_prune_tool_registered(service, project):
+    from solopm.mcp.server import build_server
+
+    mcp = build_server(service, agent="claude")
+    names = {tool.name for tool in asyncio.run(mcp.list_tools())}
+    assert "prune_merged_branches" in names
+
+
 def test_project_management_tools_registered(service):
     from solopm.mcp.server import build_server
 

@@ -38,6 +38,7 @@ from .schemas import (
     ReviewMemoryCreate,
     ReviewMemoryPatch,
     ProjectCreate,
+    PruneRequest,
     ReorderRequest,
     ReviewRequest,
     TagsBody,
@@ -203,6 +204,15 @@ def create_app(
         # `force` cascade-deletes the project's tickets, activity, and links; without it a
         # non-empty project is refused (400) so a whole board isn't erased by accident.
         return svc.delete_project(key, force=force)
+
+    @app.post("/api/projects/{key}/prune")
+    def prune_branches(
+        key: str,
+        payload: PruneRequest = PruneRequest(),
+        svc: Service = Depends(get_service),
+    ) -> dict:
+        # Clean up local branches whose work is merged. Dry-run unless `apply`.
+        return svc.prune_merged_branches(key, apply=payload.apply)
 
     # --- review memory (learning review gate) -------------------------------
 
