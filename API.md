@@ -108,6 +108,19 @@ its tickets, their activity, and every relationship link touching them (includin
 cross-project links to/from those tickets). Irreversible. `404 not_found` for an unknown
 project.
 
+`POST /api/projects/{key}/prune` body `{ "apply": <bool> }` (default `false`) →
+`{ "project", "applied", "pruned": [ { "branch", "reasons": [...], "worktree": <path|null> } ],
+"skipped": [ { "branch", "reason" } ] }`. Cleans up the project repo's **local** branches
+whose merge is **verified** — either **reachable-merged** into master (git-proven) or recorded
+on a **done** ticket whose **PR merged** (SoloPM's squash-merge record). A merely **gone**
+upstream is reported as context but is *not* sufficient on its own (a remote can be deleted for
+unmerged work), so such a branch is surfaced under `skipped` — never force-deleted — to avoid
+orphaning committed-but-unmerged commits. The current branch and master are never touched.
+Dry-run unless `apply=true`; on apply, a verified branch held by a **clean** git worktree has
+the worktree removed first, while a worktree with **uncommitted changes** (or one that can't be
+removed) is skipped. Degrades gracefully (no `repo` / no git client / git error → empty result).
+`404 not_found` for an unknown project.
+
 **`<project>` shape:**
 ```json
 {

@@ -12,6 +12,7 @@ import type {
   ProjectDelete,
   ProjectPatch,
   ProjectStatus,
+  PruneResult,
   RadarReport,
   ReviewMemoryItem,
   State,
@@ -95,6 +96,10 @@ export const api = {
   // refused by the backend (ApiError code "validation").
   deleteProject: (key: string, force = false) =>
     request<ProjectDelete>("DELETE", `/projects/${enc(key)}${force ? "?force=true" : ""}`),
+  // SOLO-23: prune merged local branches. `apply=false` (default) is a dry-run that just
+  // lists candidates; `apply=true` deletes them.
+  prune: (key: string, apply = false) =>
+    request<PruneResult>("POST", `/projects/${enc(key)}/prune`, { apply }),
 
   tickets: (q: TicketQuery = {}) => {
     const params = new URLSearchParams();

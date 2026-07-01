@@ -66,6 +66,10 @@ class TagsBody(BaseModel):
     tags: list[str]  # one or more tags to add (normalized server-side)
 
 
+class PruneRequest(BaseModel):
+    apply: bool = False  # dry-run unless true
+
+
 class CriterionCreate(BaseModel):
     text: str
 

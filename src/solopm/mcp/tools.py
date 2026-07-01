@@ -118,6 +118,10 @@ class SoloPMTools:
         return self.svc.delete_project(key, force=force)
 
     @_safe
+    def prune_merged_branches(self, project: str, apply: bool = False) -> dict:
+        return self.svc.prune_merged_branches(project, apply=apply)
+
+    @_safe
     def list_tickets(
         self,
         project: str | None = None,

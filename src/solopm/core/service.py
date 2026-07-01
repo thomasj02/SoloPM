@@ -186,6 +186,138 @@ class Service:
                 unpushed = 0
         return {"open_prs": open_prs, "unpushed_commits": unpushed}
 
+    def prune_merged_branches(self, key: str, *, apply: bool = False) -> dict:
+        """Clean up local branches whose work is *verifiably* merged (SOLO-23).
+
+        A branch is force-deleted only when its merge is verified — either **reachable-merged**
+        into the project's master (git-proven), or recorded on a **done** ticket whose **PR
+        merged** *and* whose merged head OID still equals the branch's local tip (so a branch
+        advanced or reused after the merge is never deleted; ``queued`` PRs, which haven't
+        landed, don't qualify). A **gone upstream** is reported as context but is NOT sufficient
+        on its own (a remote can be deleted for unmerged work), so an unverified branch is
+        surfaced in ``skipped`` rather than deleted — this keeps ``git branch -D`` from
+        orphaning committed-but-unmerged commits. The **current** branch and **master** are
+        always protected.
+
+        Dry-run by default — returns what *would* be pruned. With ``apply``, deletes them: a
+        branch held by a *clean* worktree has the worktree removed first (``git worktree
+        remove``), then the branch (``git branch -D``); a worktree with **uncommitted changes**
+        is skipped and reported so no work is discarded. Per-branch git failures are caught and
+        reported in ``skipped`` rather than aborting the whole prune.
+
+        Degrades gracefully like radar/status (no repo, no git client, or a git error → an empty
+        result, never a 500). Returns
+        ``{project, applied, pruned:[{branch, reasons, worktree}], skipped:[{branch, reason}]}``.
+        """
+        project = self.get_project(key)
+        result: dict = {"project": project.key, "applied": apply, "pruned": [], "skipped": []}
+        if self.github is None or not project.repo:
+            return result
+        repo, master = project.repo, project.master_branch
+        tickets = self.store.list_tickets(project=project.key)
+        # Branches backing an ACTIVE (non-terminal) ticket are in use and protected like the
+        # current branch — e.g. a freshly-created in-progress branch still equal to master has
+        # no commits yet, so `git branch --merged` would otherwise flag it as a prune candidate.
+        active_branches = {
+            t.branch for t in tickets if t.branch and t.state not in self._CLOSED_STATES
+        }
+        # Branches recorded on a done ticket whose PR actually MERGED (not just `queued`, which
+        # hasn't landed) → the PR number, so we can confirm the branch's tip still matches the
+        # merged PR head before force-deleting. Plain `state == done` isn't enough.
+        done_merged_prs = {
+            t.branch: t.pr_number
+            for t in tickets
+            if t.branch and t.state == "done" and t.pr_state == "merged" and t.pr_number
+        }
+        try:
+            branches = self.github.local_branches(repo, master)
+            worktrees = {
+                wt.branch: wt.path for wt in self.github.list_worktrees(repo) if wt.branch
+            }
+        except GitHubError:
+            return result
+
+        for b in branches:
+            if b.is_current or b.name == master or b.name in active_branches:
+                continue  # never delete the checked-out branch, master, or active-ticket work
+            reasons: list[str] = []
+            on_done_merged = b.name in done_merged_prs
+            if on_done_merged:
+                reasons.append("done")
+            if b.upstream_gone:
+                reasons.append("gone-upstream")
+            if b.merged:
+                reasons.append("merged")
+            if not reasons:
+                continue  # no merge signal at all — leave it alone
+
+            # Force-delete (`git branch -D`) only when the merge is VERIFIED: reachable into
+            # master (git-proven), or on a done ticket whose PR merged AND whose merged head OID
+            # still equals this branch's tip (so a branch advanced/reused after the merge isn't
+            # deleted). A gone upstream alone is never sufficient — the remote could have been
+            # deleted for *unmerged* work. Anything not verified is surfaced but never deleted,
+            # so committed-but-unmerged commits are never orphaned.
+            verified = b.merged
+            if not verified and on_done_merged:
+                verified = self._branch_tip_matches_pr(repo, b.name, done_merged_prs[b.name])
+            if not verified:
+                result["skipped"].append(
+                    {
+                        "branch": b.name,
+                        "reason": f"not verified merged ({', '.join(reasons)}) — delete manually if sure",
+                    }
+                )
+                continue
+
+            wt_path = worktrees.get(b.name)
+            if wt_path:
+                try:
+                    dirty = self.github.worktree_is_dirty(wt_path)
+                except GitHubError:
+                    dirty = True  # unverifiable → don't risk removing it
+                if dirty:
+                    result["skipped"].append(
+                        {"branch": b.name, "reason": f"worktree has uncommitted changes ({wt_path})"}
+                    )
+                    continue
+                if apply:
+                    try:
+                        self.github.remove_worktree(repo, wt_path)
+                    except GitHubError as exc:
+                        result["skipped"].append(
+                            {"branch": b.name, "reason": f"could not remove worktree: {exc}"}
+                        )
+                        continue
+            if apply:
+                try:
+                    self.github.delete_local_branch(repo, b.name)
+                except GitHubError as exc:
+                    result["skipped"].append(
+                        {"branch": b.name, "reason": f"delete failed: {exc}"}
+                    )
+                    continue
+            result["pruned"].append(
+                {"branch": b.name, "reasons": reasons, "worktree": wt_path}
+            )
+        return result
+
+    def _branch_tip_matches_pr(self, repo: str, branch: str, pr_number: int) -> bool:
+        """True when the PR is **actually merged on GitHub** and ``branch``'s local tip still
+        equals that merged head OID.
+
+        Confirming the live merge (not just the stored ticket ``pr_state``) avoids deleting a
+        branch for an unlanded PR, and the tip comparison guards against a branch advanced or
+        reused after the merge (new commits move the tip past the merged head). Any lookup
+        failure or a non-merged live state returns ``False`` — we never treat an unverifiable
+        branch as safe.
+        """
+        try:
+            head = self.github.pr_merged_head(repo, pr_number)
+            tip = self.github.branch_tip(repo, branch)
+        except GitHubError:
+            return False
+        return bool(head and tip and head == tip)
+
     # --- tickets ------------------------------------------------------------
 
     def create_ticket(

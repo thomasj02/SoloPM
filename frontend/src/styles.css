@@ -474,6 +474,11 @@ body {
 .modal__foot--split .modal__foot-right { display: flex; gap: 8px; }
 .modal__danger-text { color: var(--danger); }
 
+/* Prune-merged-branches dialog list (SOLO-23). */
+.prune-list { margin: 4px 0 6px; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.prune-list .mono { font-size: 12px; }
+.prune-list--skip { color: var(--muted); }
+
 /* ------------------------------------------------------------------ forms */
 .form { display: flex; flex-direction: column; gap: 13px; }
 .form__row { display: flex; gap: 12px; }
