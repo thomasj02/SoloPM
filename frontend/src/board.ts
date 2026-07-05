@@ -16,9 +16,11 @@ interface Dragging {
 let boardEl: HTMLElement | null = null;
 let dragging: Dragging | null = null;
 let movePending = false; // true while an optimistic move POST is in flight
+let lastSignature: string | null = null; // what the board currently shows (SOLO-24)
 
 export function initBoard(root: HTMLElement): void {
   boardEl = el("div", { class: "board", id: "board" });
+  lastSignature = null; // a fresh (empty) board always needs its first render
   root.append(boardEl);
   // Re-render on any data/enum/filter change.
   on("tickets", render);
@@ -53,8 +55,57 @@ export function tagChips(tags: string[] | undefined): HTMLElement | null {
   );
 }
 
+/**
+ * Signature of everything the board renders, so the 4s poll can skip the full DOM
+ * rebuild when nothing visible changed (SOLO-24). Ages use the *rendered* compact
+ * form — the server recomputes `time_in_state_seconds` on every request, so the raw
+ * value churns on every poll while the "12m" badge it feeds rarely does.
+ * Keep the per-ticket fields in sync with what renderColumn/renderCard read.
+ */
+function renderSignature(): string {
+  if (!state.currentProject) return "no-project";
+  if (state.ticketsError) return `error:${state.ticketsError.message}`;
+  return JSON.stringify({
+    project: state.currentProject,
+    filter: state.filter,
+    columns: state.meta.states.map((s) => [s, state.meta.state_labels[s] || s]),
+    tickets: state.tickets.map((t) => [
+      t.id,
+      t.state,
+      t.title,
+      t.assignee,
+      t.tags,
+      t.session_active,
+      t.blocked,
+      t.subtickets?.done,
+      t.subtickets?.total,
+      t.pr?.number,
+      t.pr?.state,
+      t.comment_count,
+      compactDuration(t.time_in_state_seconds),
+      t.state_entered_at,
+    ]),
+  });
+}
+
 function render(): void {
   if (!boardEl) return;
+
+  // The poll emits "tickets" every 4s whether or not anything changed; rebuilding then
+  // tears down the scrollable lists (and hover/focus state) for no visual gain.
+  const signature = renderSignature();
+  if (signature === lastSignature) return;
+  lastSignature = signature;
+
+  // A real rebuild replaces every column's scrollable .col__list, which would snap the
+  // columns back to the top — capture the offsets now and restore them after (SOLO-24).
+  const scrollTops = new Map<string, number>();
+  boardEl.querySelectorAll<HTMLElement>(".col").forEach((col) => {
+    const list = col.querySelector<HTMLElement>(".col__list");
+    if (col.dataset.state && list?.scrollTop) scrollTops.set(col.dataset.state, list.scrollTop);
+  });
+  const scrollLeft = boardEl.scrollLeft;
+
   clearChildren(boardEl);
   if (!state.currentProject) return; // onboarding overlay handles the empty case
 
@@ -82,6 +133,16 @@ function render(): void {
   for (const s of state.meta.states) {
     boardEl.append(renderColumn(s, buckets.get(s) ?? []));
   }
+
+  // Restore after the full rebuild so the browser clamps against the final layout
+  // (a shrunken list just lands at its new bottom instead of overshooting).
+  boardEl.querySelectorAll<HTMLElement>(".col").forEach((col) => {
+    const top = col.dataset.state ? scrollTops.get(col.dataset.state) : undefined;
+    if (!top) return;
+    const list = col.querySelector<HTMLElement>(".col__list");
+    if (list) list.scrollTop = top;
+  });
+  if (scrollLeft) boardEl.scrollLeft = scrollLeft;
 }
 
 function renderColumn(stateId: State, items: TicketSummary[]): HTMLElement {
