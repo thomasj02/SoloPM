@@ -165,7 +165,8 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
         push it and open/refresh the PR. `after` optionally places the ticket within the
         target column: the id of the ticket it should sit directly below (must already be
         in that column). Omit `after` to land at the bottom; to put it at the top, follow
-        up with reorder_ticket."""
+        up with reorder_ticket. If the ticket is already in `state`, an explicit `after`
+        simply repositions it (same as reorder_ticket)."""
         return tools.move_ticket(ticket_id, state=state, branch=branch, after=after)
 
     @mcp.tool()

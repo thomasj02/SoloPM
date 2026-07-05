@@ -435,6 +435,17 @@ def test_move_ticket_without_after_still_lands_at_bottom(service, project):
     assert _column(t, "todo") == ["SOLO-1", "SOLO-2", "SOLO-3"]
 
 
+def test_move_ticket_same_state_with_after_repositions(service, project):
+    """move_ticket must not silently drop an explicit hint when the ticket is already
+    in the target state — it repositions instead (and the hint is validated)."""
+    t = tools_for(service)
+    for name in ("a", "b", "c"):
+        t.create_ticket(project="SOLO", title=name)
+    t.move_ticket("SOLO-1", "backlog", after="SOLO-2")
+    assert _column(t, "backlog") == ["SOLO-2", "SOLO-1", "SOLO-3"]
+    assert t.move_ticket("SOLO-1", "backlog", after="SOLO-99")["error"]["code"] == "not_found"
+
+
 def test_reorder_tool_registered_and_invocable(service, project):
     import json
 
@@ -466,3 +477,24 @@ def test_move_tool_accepts_after_over_the_wire(service, project):
         mcp.call_tool("move_ticket", {"ticket_id": "SOLO-3", "state": "todo", "after": "SOLO-1"})
     )
     assert _column(t, "todo") == ["SOLO-1", "SOLO-3", "SOLO-2"]
+
+
+def test_explicit_null_after_over_the_wire(service, project):
+    """MCP clients may serialize an optional param as an explicit JSON null. That must
+    keep meaning "no placement hint" (bottom) for move_ticket — indistinguishable from
+    omitted — while for reorder_ticket null/omitted means top. Pins the generated
+    schema accepting null (a later `after: str` tightening would break null-sending
+    clients while every other test stayed green)."""
+    from solopm.mcp.server import build_server
+
+    mcp = build_server(service, agent="claude")
+    t = tools_for(service)
+    t.create_ticket(project="SOLO", title="x", state="todo")  # SOLO-1
+    t.create_ticket(project="SOLO", title="y", state="todo")  # SOLO-2
+    t.create_ticket(project="SOLO", title="z")  # SOLO-3, backlog
+    asyncio.run(
+        mcp.call_tool("move_ticket", {"ticket_id": "SOLO-3", "state": "todo", "after": None})
+    )
+    assert _column(t, "todo") == ["SOLO-1", "SOLO-2", "SOLO-3"]
+    asyncio.run(mcp.call_tool("reorder_ticket", {"ticket_id": "SOLO-3", "after": None}))
+    assert _column(t, "todo") == ["SOLO-3", "SOLO-1", "SOLO-2"]

@@ -137,6 +137,35 @@ def test_move_after_must_be_in_target_column(service, project):
         service.move_ticket("SOLO-1", "in-progress", after="SOLO-2")  # SOLO-2 is in todo
 
 
+def test_move_same_state_with_after_repositions(service, project):
+    """A same-state move with an explicit hint is a reorder, not a silent no-op (SOLO-25)."""
+    _seed(service, 3)
+    service.move_ticket("SOLO-1", "backlog", after="SOLO-2")
+    assert ordered(service, "backlog") == ["SOLO-2", "SOLO-1", "SOLO-3"]
+
+
+def test_move_same_state_with_after_none_goes_to_top(service, project):
+    _seed(service, 3)
+    service.move_ticket("SOLO-3", "backlog", after=None)
+    assert ordered(service, "backlog") == ["SOLO-3", "SOLO-1", "SOLO-2"]
+
+
+def test_move_same_state_with_after_keeps_state_metadata(service, project):
+    """Repositioning must not masquerade as a state change: no activity, no age reset."""
+    _seed(service, 2)
+    before = service.get_ticket("SOLO-1")
+    service.move_ticket("SOLO-1", "backlog", after="SOLO-2")
+    t = service.get_ticket("SOLO-1")
+    assert t.state_entered_at == before.state_entered_at
+    assert not any(a.kind == "state_change" for a in t.activity)
+
+
+def test_move_same_state_with_unknown_after_raises(service, project):
+    _seed(service, 1)
+    with pytest.raises(NotFoundError):
+        service.move_ticket("SOLO-1", "backlog", after="SOLO-99")
+
+
 def test_move_still_validates_transition_and_actor(service, project):
     from solopm.core.errors import ForbiddenTransitionError, InvalidTransitionError
 
