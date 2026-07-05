@@ -379,3 +379,90 @@ def test_project_management_tool_invocation(service):
     blocks = asyncio.run(mcp.call_tool("delete_project", {"key": "BLOG"}))
     payload = json.loads(blocks[0].text)
     assert payload == {"key": "BLOG", "deleted": True, "tickets_deleted": 0}
+
+
+# --- within-column reorder (SOLO-25) -----------------------------------------
+
+
+def _column(t, state, project="SOLO"):
+    """Ticket ids in a column, in the order agents see them (list_tickets is
+    position-sorted, so the MCP output order IS the board order)."""
+    return [tk["id"] for tk in t.list_tickets(project=project, state=state)["tickets"]]
+
+
+def test_reorder_ticket_to_top_via_mcp(service, project):
+    t = tools_for(service)
+    for name in ("a", "b", "c"):
+        t.create_ticket(project="SOLO", title=name)
+    out = t.reorder_ticket("SOLO-3")  # after omitted -> top of column
+    assert out["id"] == "SOLO-3"
+    assert _column(t, "backlog") == ["SOLO-3", "SOLO-1", "SOLO-2"]
+
+
+def test_reorder_ticket_after_specific_via_mcp(service, project):
+    t = tools_for(service)
+    for name in ("a", "b", "c"):
+        t.create_ticket(project="SOLO", title=name)
+    t.reorder_ticket("SOLO-1", after="SOLO-2")
+    assert _column(t, "backlog") == ["SOLO-2", "SOLO-1", "SOLO-3"]
+
+
+def test_reorder_errors_returned_as_structured_dict(service, project):
+    t = tools_for(service)
+    t.create_ticket(project="SOLO", title="a")
+    t.create_ticket(project="SOLO", title="b", state="todo")
+    assert t.reorder_ticket("SOLO-1", after="SOLO-999")["error"]["code"] == "not_found"
+    # `after` must live in the same column
+    assert t.reorder_ticket("SOLO-1", after="SOLO-2")["error"]["code"] == "validation"
+
+
+def test_move_ticket_with_after_positions_in_target_column(service, project):
+    t = tools_for(service)
+    t.create_ticket(project="SOLO", title="x", state="todo")  # SOLO-1
+    t.create_ticket(project="SOLO", title="y", state="todo")  # SOLO-2
+    t.create_ticket(project="SOLO", title="z")  # SOLO-3, backlog
+    moved = t.move_ticket("SOLO-3", "todo", after="SOLO-1")
+    assert moved["state"] == "todo"
+    assert _column(t, "todo") == ["SOLO-1", "SOLO-3", "SOLO-2"]
+
+
+def test_move_ticket_without_after_still_lands_at_bottom(service, project):
+    t = tools_for(service)
+    t.create_ticket(project="SOLO", title="x", state="todo")
+    t.create_ticket(project="SOLO", title="y", state="todo")
+    t.create_ticket(project="SOLO", title="z")
+    t.move_ticket("SOLO-3", "todo")
+    assert _column(t, "todo") == ["SOLO-1", "SOLO-2", "SOLO-3"]
+
+
+def test_reorder_tool_registered_and_invocable(service, project):
+    import json
+
+    from solopm.mcp.server import build_server
+
+    mcp = build_server(service, agent="claude")
+    names = {tool.name for tool in asyncio.run(mcp.list_tools())}
+    assert "reorder_ticket" in names
+
+    t = tools_for(service)
+    t.create_ticket(project="SOLO", title="a")
+    t.create_ticket(project="SOLO", title="b")
+    blocks = asyncio.run(mcp.call_tool("reorder_ticket", {"ticket_id": "SOLO-2"}))
+    assert json.loads(blocks[0].text)["id"] == "SOLO-2"
+    assert _column(t, "backlog") == ["SOLO-2", "SOLO-1"]
+    asyncio.run(mcp.call_tool("reorder_ticket", {"ticket_id": "SOLO-2", "after": "SOLO-1"}))
+    assert _column(t, "backlog") == ["SOLO-1", "SOLO-2"]
+
+
+def test_move_tool_accepts_after_over_the_wire(service, project):
+    from solopm.mcp.server import build_server
+
+    mcp = build_server(service, agent="claude")
+    t = tools_for(service)
+    t.create_ticket(project="SOLO", title="x", state="todo")  # SOLO-1
+    t.create_ticket(project="SOLO", title="y", state="todo")  # SOLO-2
+    t.create_ticket(project="SOLO", title="z")  # SOLO-3, backlog
+    asyncio.run(
+        mcp.call_tool("move_ticket", {"ticket_id": "SOLO-3", "state": "todo", "after": "SOLO-1"})
+    )
+    assert _column(t, "todo") == ["SOLO-1", "SOLO-3", "SOLO-2"]
