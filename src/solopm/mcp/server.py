@@ -14,9 +14,10 @@ from .tools import SoloPMTools
 INSTRUCTIONS = (
     "SoloPM is an AI-first Kanban tracker for solo developers. These tools let you read "
     "and drive tickets: list projects and tickets, create / edit / delete projects, fetch "
-    "a ticket's full context, create and edit tickets, comment, assign, and move tickets "
+    "a ticket's full context, create and edit tickets, comment, assign, move tickets "
     "through the workflow (backlog → todo → in-progress → in-ai-review → in-human-review → "
-    "done, plus cancelled). Your writes are attributed to your agent identity. Call "
+    "done, plus cancelled), and reorder them within a column. Your writes are attributed "
+    "to your agent identity. Call "
     "workflow_info for the legal states and transition rules. Note: only the human may "
     "move a ticket to 'done' — you cannot close a ticket. Deleting a project with tickets "
     "requires force=true (it cascade-deletes all of them)."
@@ -155,12 +156,26 @@ def build_server(service: Service, agent: str = "claude") -> FastMCP:
         return tools.comment_ticket(ticket_id, body=body)
 
     @mcp.tool()
-    def move_ticket(ticket_id: str, state: str, branch: str | None = None) -> dict:
+    def move_ticket(
+        ticket_id: str, state: str, branch: str | None = None, after: str | None = None
+    ) -> dict:
         """Transition a ticket to a new state (validated against the workflow). Only the
         human may move a ticket to 'done'. When self-transitioning to 'in-ai-review',
         pass `branch` to record your committed branch and (if GitHub automation is on)
-        push it and open/refresh the PR."""
-        return tools.move_ticket(ticket_id, state=state, branch=branch)
+        push it and open/refresh the PR. `after` optionally places the ticket within the
+        target column: the id of the ticket it should sit directly below (must already be
+        in that column). Omit `after` to land at the bottom; to put it at the top, follow
+        up with reorder_ticket. If the ticket is already in `state`, an explicit `after`
+        simply repositions it (same as reorder_ticket)."""
+        return tools.move_ticket(ticket_id, state=state, branch=branch, after=after)
+
+    @mcp.tool()
+    def reorder_ticket(ticket_id: str, after: str | None = None) -> dict:
+        """Reposition a ticket within its current column — e.g. to rank a backlog by
+        priority. Cosmetic: no state change and no activity logged. `after` is the id of
+        the ticket it should sit directly below (must be in the same column); omit it to
+        move the ticket to the top. Returns the updated ticket."""
+        return tools.reorder_ticket(ticket_id, after=after)
 
     @mcp.tool()
     def assign_ticket(ticket_id: str, assignee: str) -> dict:

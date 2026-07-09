@@ -169,10 +169,23 @@ class SoloPMTools:
         return self.svc.comment_ticket(ticket_id, body=body, actor=self.agent).to_dict()
 
     @_safe
-    def move_ticket(self, ticket_id: str, state: str, branch: str | None = None) -> dict:
+    def move_ticket(
+        self, ticket_id: str, state: str, branch: str | None = None, after: str | None = None
+    ) -> dict:
+        # Over MCP an omitted argument and an explicit null both arrive as None, so None
+        # here must keep meaning "no placement hint" (service default: bottom of column).
+        # The service's after=None (top) is reachable via reorder_ticket instead.
+        if after is None:
+            return self.svc.move_ticket(
+                ticket_id, state, branch=branch, actor=self.agent
+            ).to_dict()
         return self.svc.move_ticket(
-            ticket_id, state, branch=branch, actor=self.agent
+            ticket_id, state, after=after, branch=branch, actor=self.agent
         ).to_dict()
+
+    @_safe
+    def reorder_ticket(self, ticket_id: str, after: str | None = None) -> dict:
+        return self.svc.reorder_ticket(ticket_id, after=after, actor=self.agent).to_dict()
 
     @_safe
     def assign_ticket(self, ticket_id: str, assignee: str) -> dict:

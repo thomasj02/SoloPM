@@ -152,11 +152,13 @@ workflow and actor rules hold identically — an agent still **cannot** move a t
 that's the same SQLite file the web app reads, an agent's MCP writes show up live on the
 board.
 
-**Tools:** `list_projects`, `workflow_info`, `list_tickets`, `show_ticket`,
-`create_ticket`, `edit_ticket`, `comment_ticket`, `move_ticket`, `assign_ticket`,
-`submit_review`, `add_criterion`, `check_criterion`, `edit_criterion`,
-`remove_criterion`, `link_ticket`, `unlink_ticket`, `radar`, `graph`, `list_review_memory`,
-`add_review_memory`, `update_review_memory`, `review_prompt`.
+**Tools:** `list_projects`, `create_project`, `edit_project`, `delete_project`,
+`workflow_info`, `list_tickets`, `show_ticket`, `create_ticket`, `edit_ticket`,
+`comment_ticket`, `move_ticket`, `reorder_ticket`, `assign_ticket`, `submit_review`,
+`add_criterion`, `check_criterion`, `edit_criterion`, `remove_criterion`,
+`tag_ticket`, `untag_ticket`, `link_ticket`, `unlink_ticket`, `radar`, `graph`,
+`prune_merged_branches`, `list_review_memory`, `add_review_memory`,
+`update_review_memory`, `review_prompt`.
 
 Register the server with your MCP client by pointing it at `uv run solopm mcp` (cwd =
 repo root) — e.g. in Claude Code, `claude mcp add solopm -- uv run solopm mcp`.

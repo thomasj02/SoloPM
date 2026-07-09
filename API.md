@@ -52,7 +52,9 @@ cancelled        → (terminal)
 Actor rules layered on top:
 - Only `human` may transition a ticket **into `done`** (agents cannot close a ticket).
 - Any actor may transition into `cancelled`.
-- Moving a ticket to the state it is already in is an idempotent no-op (200, no activity logged).
+- Moving a ticket to the state it is already in is an idempotent no-op (200, no activity
+  logged) — unless the request carries an explicit `after` hint, which repositions the
+  ticket within its column (equivalent to a reorder; still no activity logged).
 
 ---
 
@@ -185,6 +187,9 @@ position hint controls where the ticket lands in the **target** column:
 - `after` **omitted** → bottom of the column;
 - `after: null` → top of the column;
 - `after: "<id>"` → directly below that ticket (which must already be in the target column).
+
+If the ticket is already in `state`, an explicit `after` (including `null`) repositions
+it within the column exactly like `/reorder`; with `after` omitted the move is a no-op.
 
 The optional `branch` records the SoloPM branch on the ticket (used when an agent
 self-transitions to `in-ai-review` after committing its work).
