@@ -498,8 +498,11 @@ class Service:
 
         ``after`` is the position hint (see :meth:`_position_in_column`): omit it to land
         at the bottom, pass ``None`` for the top, or a ticket id to drop directly below
-        that card. ``branch`` records the SoloPM branch when an agent self-transitions to
-        ``in-ai-review``. State-transition and actor rules are enforced regardless.
+        that card. A move to the ticket's current state is a no-op — except with an
+        explicit ``after``, which delegates to :meth:`reorder_ticket` instead of being
+        silently dropped. ``branch`` records the SoloPM branch when an agent
+        self-transitions to ``in-ai-review``. State-transition and actor rules are
+        enforced regardless.
 
         If GitHub automation is configured and the ticket has a SoloPM branch, the
         transition drives the PR: → in-ai-review pushes + opens/refreshes the PR;
@@ -509,7 +512,11 @@ class Service:
         _require_actor(actor)
         ticket = self.get_ticket(ticket_id)
         if workflow.is_noop(ticket.state, state):
-            return ticket
+            if after is _UNSET:
+                return ticket
+            # A same-state move with an explicit placement hint is a reorder —
+            # returning early would silently drop (and never validate) the hint.
+            return self.reorder_ticket(ticket_id, after=after, actor=actor)
         workflow.validate_transition(ticket.state, state, actor=actor)
         if branch:
             validate_branch_name(branch)
