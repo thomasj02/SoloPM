@@ -790,7 +790,12 @@ class Service:
                 raise ValidationError(
                     f"Criterion {cid} result verdict must be 'pass' or 'fail', got {verdict!r}."
                 )
-            clean.append({"criterion_id": cid, "verdict": verdict, "note": r.get("note")})
+            note = r.get("note")
+            if note is not None and not isinstance(note, str):
+                # The HTTP API's schema rejects this (422 validation); reject it here
+                # too so the two MCP modes can't fork on malformed input.
+                raise ValidationError(f"Criterion {cid} result 'note' must be a string.")
+            clean.append({"criterion_id": cid, "verdict": verdict, "note": note})
         return clean
 
     # --- acceptance criteria ------------------------------------------------

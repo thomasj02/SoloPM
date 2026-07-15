@@ -80,9 +80,11 @@ def create_app(
 
     # SoloPM is local-first; reject requests bearing a foreign Host header to close the
     # DNS-rebinding vector against the unauthenticated local API. Tests pass ["*"].
+    # Remote clients (solopm mcp --url, a remote CLI) reach the server by a name it
+    # can't infer — SOLOPM_ALLOWED_HOSTS extends the list without dropping the guard.
     if allowed_hosts is None:
         allowed_hosts = sorted(
-            {"127.0.0.1", "localhost", "::1", config.server_host()}
+            {"127.0.0.1", "localhost", "::1", config.server_host(), *config.extra_allowed_hosts()}
         )
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 

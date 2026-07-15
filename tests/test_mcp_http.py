@@ -8,6 +8,7 @@ attribution — proven by driving the same operation sequence through both and c
 import inspect
 import re
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
@@ -159,6 +160,83 @@ def test_unreachable_backend_is_a_structured_error():
     assert "solopm serve" in out["error"]["message"]
 
 
+def _mock_tools(handler):
+    """HttpSoloPMTools over a canned httpx transport — for hostile-backend behavior."""
+    client = httpx.Client(base_url="http://mock", transport=httpx.MockTransport(handler))
+    return HttpSoloPMTools(Api("http://mock", agent="claude", client=client))
+
+
+def test_non_json_success_body_is_a_structured_error():
+    """A 200 from something that isn't the SoloPM API (proxy splash page, wrong port)
+    must not escape as a raw JSONDecodeError."""
+    t = _mock_tools(lambda req: httpx.Response(200, text="<html>welcome</html>"))
+    out = t.list_projects()
+    assert out["error"]["code"] == "invalid_response"
+
+
+def test_string_valued_error_payload_is_a_structured_error():
+    """A gateway answering {"error": "unauthorized"} (error not a dict) must not raise."""
+    t = _mock_tools(lambda req: httpx.Response(502, json={"error": "unauthorized"}))
+    out = t.list_projects()
+    assert out["error"]["code"] == "http_error"
+    assert "unauthorized" in out["error"]["message"]
+
+
+def test_redirect_is_a_structured_error_not_an_empty_success():
+    """A 302 (SSO portal, http->https redirect) must not surface as a successful {}."""
+    t = _mock_tools(
+        lambda req: httpx.Response(302, headers={"location": "https://sso.corp/login"})
+    )
+    out = t.list_projects()
+    assert out["error"]["code"] == "http_error"
+    assert "302" in out["error"]["message"]
+
+
+def test_path_segment_smuggling_is_neutralized(http_tools):
+    """Review-memory m3: a crafted key must not smuggle query params through the path."""
+    http_tools.create_project(key="SOLO", name="SoloPM")
+    http_tools.create_ticket(project="SOLO", title="x")
+    out = http_tools.delete_project("SOLO?force=true")
+    assert "error" in out, out
+    # the project (and its ticket) must have survived the attempt
+    assert [p["key"] for p in http_tools.list_projects()["projects"]] == ["SOLO"]
+    assert http_tools.show_ticket("SOLO-1")["id"] == "SOLO-1"
+
+
+def test_slash_or_empty_path_values_are_validation_errors(http_tools):
+    """'/' can't survive the ASGI decode round-trip and '' changes the route — both are
+    rejected client-side as domain validation errors, not router-level {"detail": ...}."""
+    http_tools.create_project(key="SOLO", name="SoloPM")
+    http_tools.create_ticket(project="SOLO", title="x")
+    assert http_tools.untag_ticket("SOLO-1", "a/b")["error"]["code"] == "validation"
+    assert http_tools.show_ticket("")["error"]["code"] == "validation"
+    assert http_tools.delete_project("A/B")["error"]["code"] == "validation"
+
+
+def test_non_string_review_note_is_validation_in_both_modes(tmp_path):
+    """A non-string criteria note must not fork state: HTTP 422s (code 'validation'),
+    so in-process must reject it with the same code rather than recording it."""
+
+    def drive(t):
+        t.create_project(key="SOLO", name="SoloPM")
+        t.create_ticket(project="SOLO", title="x")
+        t.add_criterion("SOLO-1", "c")
+        t.move_ticket("SOLO-1", "in-progress")
+        t.move_ticket("SOLO-1", "in-ai-review")
+        return t.submit_review(
+            "SOLO-1",
+            "pass",
+            criteria_results=[{"criterion_id": "c1", "verdict": "pass", "note": 123}],
+        )
+
+    store = Store(tmp_path / "note-local.db")
+    store.init()
+    local = drive(SoloPMTools(Service(store), agent="claude"))
+    remote = drive(_http_tools(tmp_path, name="note-remote.db"))
+    assert local["error"]["code"] == "validation"
+    assert remote["error"]["code"] == "validation"
+
+
 def test_unknown_agent_is_rejected_by_the_backend(tmp_path):
     t = _http_tools(tmp_path, agent="gemini")
     # project writes are unattributed — the header is ignored there
@@ -210,6 +288,8 @@ def _drive(t) -> list:
     r.append(t.list_tickets(project="PAR", state="todo"))
     r.append(t.add_criterion("PAR-1", "does the thing"))
     r.append(t.check_criterion("PAR-1", "c1", done=True))
+    r.append(t.check_criterion("PAR-1", "c1", done=False))
+    r.append(t.check_criterion("PAR-1", "c1", done=True))
     r.append(t.edit_criterion("PAR-1", "c1", "does the whole thing"))
     r.append(t.link_ticket("PAR-1", "blocks", "PAR-2"))
     r.append(t.link_ticket("PAR-3", "parent", "PAR-1"))
@@ -221,10 +301,20 @@ def _drive(t) -> list:
     r.append(t.list_review_memory("PAR"))
     r.append(t.update_review_memory("PAR", "m1", status="retired"))
     r.append(t.review_prompt("PAR", record_hit=True))
+    r.append(t.edit_project("PAR", name="Parity!", master_branch="trunk"))
+    r.append(t.add_criterion("PAR-1", "wire check"))
     r.append(t.move_ticket("PAR-1", "in-ai-review", branch="PAR-1-a"))
-    r.append(t.submit_review("PAR-1", "fail", comment="needs work"))
+    r.append(
+        t.submit_review(
+            "PAR-1",
+            "fail",
+            comment="needs work",
+            criteria_results=[{"criterion_id": "c2", "verdict": "fail", "note": "tighten"}],
+        )
+    )
     r.append(t.move_ticket("PAR-1", "in-ai-review"))
     r.append(t.submit_review("PAR-1", "pass", comment="ok"))
+    r.append(t.show_ticket("PAR-1"))
     r.append(t.radar(project="PAR"))
     r.append(t.prune_merged_branches("PAR"))
     r.append(t.workflow_info())
@@ -321,3 +411,35 @@ def test_mcp_url_with_unknown_agent_fails_fast(monkeypatch):
     )
     assert r.exit_code != 0
     assert "gemini" in (r.output + str(r.exception or ""))
+
+
+def test_mcp_url_agent_is_normalized_before_sending(monkeypatch):
+    """The backend's get_actor strips/lowercases the header — the CLI must send the value
+    it validated, or ' CODEX ' passes the fail-fast and then breaks as a header value."""
+    captured = {}
+
+    class FakeServer:
+        def run(self):
+            pass
+
+    def fake_build_server(service=None, agent="claude", *, tools=None):
+        captured["tools"] = tools
+        return FakeServer()
+
+    monkeypatch.setattr("solopm.mcp.server.build_server", fake_build_server)
+    r = runner.invoke(
+        cli_main.app, ["mcp", "--url", "http://example.test:8787", "--agent", " CODEX "]
+    )
+    assert r.exit_code == 0, r.output
+    assert captured["tools"].api.agent == "codex"
+
+
+def test_mcp_empty_url_is_rejected_not_silently_local(monkeypatch):
+    """`--url ""` (e.g. an unset shell var) must error, not quietly open the local store."""
+    monkeypatch.setattr(
+        "solopm.core.store.Store",
+        lambda *a, **k: pytest.fail("an empty --url must not fall back to the local store"),
+    )
+    for empty in ("", "   "):
+        r = runner.invoke(cli_main.app, ["mcp", "--url", empty])
+        assert r.exit_code != 0

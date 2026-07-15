@@ -51,6 +51,16 @@ def base_url() -> str:
     return f"http://{server_host()}:{server_port()}"
 
 
+def extra_allowed_hosts() -> list[str]:
+    """Extra Host-header values the server accepts (comma-separated env var).
+
+    Needed when remote clients reach the backend by a name/IP the server can't infer
+    (e.g. ``solopm mcp --url http://workstation:8787`` sends ``Host: workstation``).
+    """
+    raw = os.environ.get("SOLOPM_ALLOWED_HOSTS", "")
+    return [h.strip() for h in raw.split(",") if h.strip()]
+
+
 def default_project() -> str | None:
     """Project key inferred from the environment (set inside a session worktree)."""
     return os.environ.get("SOLOPM_PROJECT") or None

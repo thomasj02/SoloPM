@@ -181,8 +181,15 @@ claude mcp add solopm -s user -- solopm mcp --url http://workstation:8787
 
 Notes: HTTP mode is only entered via the explicit `--url` flag (the `SOLOPM_URL` env
 var never flips the MCP server to HTTP); the backend must be reachable from the remote
-machine (`solopm serve` binds `127.0.0.1` by default — set `SOLOPM_HOST` or tunnel the
-port); repo-filesystem tools (`radar`, `prune_merged_branches`, PR automation on
+machine — `solopm serve` binds `127.0.0.1` by default, so set `SOLOPM_HOST` (or tunnel
+the port) **and** list the name(s) remote clients dial in `SOLOPM_ALLOWED_HOSTS`
+(comma-separated), since the Host-header guard rejects unknown hosts:
+
+```bash
+SOLOPM_HOST=0.0.0.0 SOLOPM_ALLOWED_HOSTS=workstation,192.168.68.78 solopm serve
+```
+
+Repo-filesystem tools (`radar`, `prune_merged_branches`, PR automation on
 `move_ticket`) execute on the backend's machine, which is where the repos live; and
 `--channel` requires the local store, so it can't be combined with `--url` (the API has
 no activity feed to poll — yet).
@@ -255,6 +262,7 @@ so the web client is type-checked against the backend's shapes.
 | `SOLOPM_HOME` | Directory holding the store | `~/.solopm` |
 | `SOLOPM_DB` | Full path to the SQLite file | `$SOLOPM_HOME/solopm.db` |
 | `SOLOPM_HOST` / `SOLOPM_PORT` | Server bind address | `127.0.0.1` / `8787` |
+| `SOLOPM_ALLOWED_HOSTS` | Extra Host-header values the server accepts (comma-separated) — for remote clients | — |
 | `SOLOPM_URL` | CLI → backend base URL | `http://$HOST:$PORT` |
 | `SOLOPM_PROJECT` | Default project key for the CLI | — |
 

@@ -76,6 +76,22 @@ def test_create_project_accepts_full_config(client):
     assert body["review_prompt"] == "Be ruthless."
 
 
+def test_allowed_hosts_env_extends_trusted_hosts(tmp_path, monkeypatch):
+    """SOLO-26: a remote `solopm mcp --url http://workstation:8787` sends Host:
+    workstation — SOLOPM_ALLOWED_HOSTS must let it through TrustedHostMiddleware
+    while unknown hosts stay rejected (the DNS-rebinding guard)."""
+    monkeypatch.setenv("SOLOPM_ALLOWED_HOSTS", "workstation, lanbox")
+    store = Store(tmp_path / "hosts.db")
+    store.init()
+    app = create_app(Service(store))  # default allowed-hosts derivation
+    ok = TestClient(app, base_url="http://workstation")
+    assert ok.get("/api/health").status_code == 200
+    also_ok = TestClient(app, base_url="http://127.0.0.1")
+    assert also_ok.get("/api/health").status_code == 200
+    evil = TestClient(app, base_url="http://rebind.attacker.example")
+    assert evil.get("/api/health").status_code == 400
+
+
 def test_duplicate_project_409(client):
     _make_project(client)
     r = _make_project(client)

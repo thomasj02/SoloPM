@@ -34,8 +34,16 @@ def _safe(fn: Callable) -> Callable:
 
 
 def _seg(value: str) -> str:
-    """Percent-encode a path segment so a crafted id can't smuggle query params."""
-    return quote(str(value), safe="")
+    """Percent-encode a path segment so a crafted id can't smuggle query params.
+
+    '/' can't survive the round-trip (ASGI decodes %2F before the router splits the
+    path) and an empty segment changes the route, so both are rejected up front as
+    domain validation errors instead of leaking router-level ``{"detail": ...}`` bodies.
+    """
+    value = str(value)
+    if not value or "/" in value:
+        raise ValidationError(f"Invalid path value {value!r}.")
+    return quote(value, safe="")
 
 
 def _compact(mapping: dict) -> dict:
