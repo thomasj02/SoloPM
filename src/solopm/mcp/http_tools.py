@@ -39,9 +39,11 @@ def _seg(value: str) -> str:
     '/' can't survive the round-trip (ASGI decodes %2F before the router splits the
     path) and an empty segment changes the route, so both are rejected up front as
     domain validation errors instead of leaking router-level ``{"detail": ...}`` bodies.
+    '.' and '..' are unreserved (quote passes them through) and httpx dot-normalizes
+    the path — show_ticket('.') would hit GET /api/tickets and "succeed" with the list.
     """
     value = str(value)
-    if not value or "/" in value:
+    if not value or "/" in value or value in (".", ".."):
         raise ValidationError(f"Invalid path value {value!r}.")
     return quote(value, safe="")
 

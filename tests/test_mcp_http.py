@@ -211,6 +211,11 @@ def test_slash_or_empty_path_values_are_validation_errors(http_tools):
     assert http_tools.untag_ticket("SOLO-1", "a/b")["error"]["code"] == "validation"
     assert http_tools.show_ticket("")["error"]["code"] == "validation"
     assert http_tools.delete_project("A/B")["error"]["code"] == "validation"
+    # '.'/'..' are unreserved (quote passes them) and httpx normalizes the path, so
+    # show_ticket('.') would otherwise hit GET /api/tickets and "succeed" with the list
+    assert http_tools.show_ticket(".")["error"]["code"] == "validation"
+    assert http_tools.show_ticket("..")["error"]["code"] == "validation"
+    assert http_tools.delete_project("..")["error"]["code"] == "validation"
 
 
 def test_non_string_review_note_is_validation_in_both_modes(tmp_path):

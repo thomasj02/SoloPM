@@ -180,10 +180,21 @@ claude mcp add solopm -s user -- solopm mcp --url http://workstation:8787
 ```
 
 Notes: HTTP mode is only entered via the explicit `--url` flag (the `SOLOPM_URL` env
-var never flips the MCP server to HTTP); the backend must be reachable from the remote
-machine — `solopm serve` binds `127.0.0.1` by default, so set `SOLOPM_HOST` (or tunnel
-the port) **and** list the name(s) remote clients dial in `SOLOPM_ALLOWED_HOSTS`
-(comma-separated), since the Host-header guard rejects unknown hosts:
+var never flips the MCP server to HTTP), and the backend must be reachable from the
+remote machine. **The API has no authentication** (SoloPM is single-user and
+local-first), so the recommended transport is an SSH tunnel — the backend keeps its
+default loopback bind and SSH provides the auth:
+
+```bash
+ssh -N -L 8787:127.0.0.1:8787 workstation &   # on the remote machine
+claude mcp add solopm -s user -- solopm mcp --url http://127.0.0.1:8787
+```
+
+Alternatively, on a **fully trusted network only**, bind the backend directly: set
+`SOLOPM_HOST` and list the name(s) remote clients dial in `SOLOPM_ALLOWED_HOSTS`
+(comma-separated; the Host-header guard rejects unknown hosts — it stops DNS
+rebinding, **not** direct access, so anyone who can reach the port can read and write
+the tracker, including as `human`):
 
 ```bash
 SOLOPM_HOST=0.0.0.0 SOLOPM_ALLOWED_HOSTS=workstation,192.168.68.78 solopm serve
