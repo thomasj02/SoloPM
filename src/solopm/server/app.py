@@ -168,6 +168,10 @@ def create_app(
             name=payload.name,
             repo=payload.repo,
             master=payload.master,
+            branch_convention=payload.branch_convention,
+            default_implementer=payload.default_implementer,
+            default_reviewer=payload.default_reviewer,
+            review_prompt=payload.review_prompt,
         )
         return project.to_dict()
 

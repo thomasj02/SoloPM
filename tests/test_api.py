@@ -51,6 +51,31 @@ def test_create_project_lowercase_key_normalized(client):
     assert r.json()["key"] == "BLOG"
 
 
+def test_create_project_accepts_full_config(client):
+    """SOLO-26: creation carries the whole config in one atomic POST (the HTTP-backed
+    MCP adapter relies on this — no follow-up PATCH)."""
+    r = client.post(
+        "/api/projects",
+        json={
+            "key": "FULL",
+            "name": "Full Config",
+            "repo": "/tmp/full",
+            "master": "dev",
+            "branch_convention": "{key}_{seq}",
+            "default_implementer": "codex",
+            "default_reviewer": "claude",
+            "review_prompt": "Be ruthless.",
+        },
+    )
+    assert r.status_code == 201
+    body = r.json()
+    assert body["master_branch"] == "dev"
+    assert body["branch_convention"] == "{key}_{seq}"
+    assert body["default_implementer"] == "codex"
+    assert body["default_reviewer"] == "claude"
+    assert body["review_prompt"] == "Be ruthless."
+
+
 def test_duplicate_project_409(client):
     _make_project(client)
     r = _make_project(client)

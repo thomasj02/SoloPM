@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from ..core.models import DEFAULT_BRANCH_CONVENTION, DEFAULT_REVIEW_PROMPT
+
 
 class ProjectCreate(BaseModel):
     key: str
     name: str
     repo: str | None = None
     master: str = "main"
+    branch_convention: str = DEFAULT_BRANCH_CONVENTION
+    default_implementer: str = "claude"
+    default_reviewer: str = "codex"
+    review_prompt: str = DEFAULT_REVIEW_PROMPT
 
 
 class TicketCreate(BaseModel):

@@ -164,6 +164,29 @@ Register the server with your MCP client by pointing it at `uv run solopm mcp` (
 repo root) — e.g. in Claude Code, `claude mcp add solopm -- uv run solopm mcp`.
 Registering it at user scope makes SoloPM available across all your projects.
 
+### HTTP mode (remote machines)
+
+`solopm mcp --url http://host:8787` runs the same MCP server against a **remote**
+backend instead of opening the local store: every tool call becomes a request to the
+HTTP API served by `solopm serve`, so business rules stay server-side and results and
+errors are identical to local mode (writes are attributed via the `X-SoloPM-Actor`
+header, so `--agent` must be one of the API's actors: `human`, `claude`, `codex`).
+Use it to give an agent on another machine access to the same board — e.g. on that
+machine:
+
+```bash
+pipx install solopm   # or any install that puts `solopm` on PATH
+claude mcp add solopm -s user -- solopm mcp --url http://workstation:8787
+```
+
+Notes: HTTP mode is only entered via the explicit `--url` flag (the `SOLOPM_URL` env
+var never flips the MCP server to HTTP); the backend must be reachable from the remote
+machine (`solopm serve` binds `127.0.0.1` by default — set `SOLOPM_HOST` or tunnel the
+port); repo-filesystem tools (`radar`, `prune_merged_branches`, PR automation on
+`move_ticket`) execute on the backend's machine, which is where the repos live; and
+`--channel` requires the local store, so it can't be combined with `--url` (the API has
+no activity feed to poll — yet).
+
 ### Channel mode (proactive notifications)
 
 `solopm mcp --channel` runs the MCP server as a Claude Code **channel** (a

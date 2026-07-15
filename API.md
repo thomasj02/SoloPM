@@ -84,6 +84,9 @@ Actor rules layered on top:
 ```
 - `key` (required, uppercased, `[A-Z][A-Z0-9]*`), `name` (required), `repo` (optional),
   `master` (optional, default `main`). Returns `201` with `<project>`.
+- Also accepted (optional, so creation is atomic — the HTTP-backed MCP mode sends the
+  full config in one POST): `branch_convention`, `default_implementer`,
+  `default_reviewer`, `review_prompt` — same defaults as `<project>` documents below.
 - Duplicate key → `409 duplicate`.
 
 `GET /api/projects/{key}` → `<project>` (404 if missing).
