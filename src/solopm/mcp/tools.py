@@ -34,6 +34,21 @@ def _safe(fn: Callable) -> Callable:
     return wrapper
 
 
+def workflow_info() -> dict:
+    """Static workflow facts — shared verbatim by the in-process and HTTP-backed tools."""
+    return {
+        "states": list(STATES),
+        "state_labels": STATE_LABELS,
+        "assignees": list(ASSIGNEES),
+        "transitions": {s: list(t) for s, t in TRANSITIONS.items()},
+        "rules": (
+            "Only the human may move a ticket to 'done' (agents cannot close a "
+            "ticket). Agents may reach 'in-ai-review' and 'in-human-review'. "
+            "'cancelled' is reachable from any non-terminal state."
+        ),
+    }
+
+
 class SoloPMTools:
     """Agent-facing operations. Writes are attributed to ``agent`` (default ``claude``)."""
 
@@ -42,17 +57,7 @@ class SoloPMTools:
         self.agent = agent
 
     def workflow_info(self) -> dict:
-        return {
-            "states": list(STATES),
-            "state_labels": STATE_LABELS,
-            "assignees": list(ASSIGNEES),
-            "transitions": {s: list(t) for s, t in TRANSITIONS.items()},
-            "rules": (
-                "Only the human may move a ticket to 'done' (agents cannot close a "
-                "ticket). Agents may reach 'in-ai-review' and 'in-human-review'. "
-                "'cancelled' is reachable from any non-terminal state."
-            ),
-        }
+        return workflow_info()
 
     @_safe
     def list_projects(self) -> dict:

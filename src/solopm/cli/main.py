@@ -229,10 +229,46 @@ def mcp_cmd(
     poll: Annotated[
         float, typer.Option("--poll", help="Channel poll interval, seconds.")
     ] = 3.0,
+    url: Annotated[
+        Optional[str],
+        typer.Option(
+            "--url",
+            help="Drive a remote backend over its HTTP API (e.g. http://host:8787) "
+            "instead of opening the local store. Deliberately not read from "
+            "SOLOPM_URL — HTTP mode is always an explicit choice.",
+        ),
+    ] = None,
 ) -> None:
     """Run the SoloPM MCP server (stdio) so an AI agent can drive SoloPM as MCP tools."""
     # Imported lazily so the rest of the CLI works without the optional `mcp` dependency.
     # NOTE: stdio is the MCP transport — nothing may be printed to stdout here.
+    if url is not None:
+        from ..core.models import ACTORS
+        from ..mcp.http_tools import HttpSoloPMTools
+        from ..mcp.server import build_server
+
+        if not url.strip():
+            raise typer.BadParameter(
+                "--url must not be empty (an unset shell variable?) — HTTP mode is "
+                "an explicit choice and never falls back to the local store."
+            )
+        if channel:
+            raise typer.BadParameter(
+                "--channel needs direct store access (the HTTP API has no activity "
+                "feed to poll yet) — run channel mode on the backend's machine, or "
+                "drop --url."
+            )
+        # Send the value we validated: the backend's get_actor strips/lowercases the
+        # header, and a padded value wouldn't even be a legal header.
+        actor = agent.strip().lower()
+        if actor not in ACTORS:
+            raise typer.BadParameter(
+                f"--agent {agent!r} would be rejected by the backend: the HTTP API "
+                f"attributes writes to one of {', '.join(ACTORS)}."
+            )
+        build_server(agent=actor, tools=HttpSoloPMTools(Api(url, agent=actor))).run()
+        return
+
     from ..core.github import GitHub
     from ..core.service import Service
     from ..core.store import Store

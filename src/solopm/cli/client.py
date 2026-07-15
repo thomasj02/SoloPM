@@ -30,7 +30,11 @@ class Api:
     def __init__(self, base_url: str, *, agent: str | None = None, client: httpx.Client | None = None):
         self.base_url = base_url.rstrip("/")
         self.agent = agent
-        self._client = client or httpx.Client(base_url=self.base_url, timeout=30.0)
+        # Generous read timeout: some endpoints shell out to git/gh (move with PR
+        # automation, prune); connect stays snappy so a dead backend fails fast.
+        self._client = client or httpx.Client(
+            base_url=self.base_url, timeout=httpx.Timeout(300.0, connect=5.0)
+        )
 
     def _headers(self) -> dict:
         if self.agent:
@@ -49,9 +53,11 @@ class Api:
         except httpx.HTTPError as exc:
             raise ApiError("transport", f"Request failed: {exc}") from exc
 
-        if resp.status_code >= 400:
+        # >= 300 (not just >= 400): the API never redirects, so a 3xx means we're
+        # talking to something else (SSO portal, http->https hop) — surface it.
+        if resp.status_code >= 300:
             payload = _safe_json(resp)
-            if isinstance(payload, dict) and "error" in payload:
+            if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
                 err = payload["error"]
                 raise ApiError(
                     err.get("code", "error"),
@@ -62,7 +68,15 @@ class Api:
 
         if resp.status_code == 204 or not resp.content:
             return {}
-        return resp.json()
+        try:
+            return resp.json()
+        except Exception as exc:
+            raise ApiError(
+                "invalid_response",
+                f"The server at {self.base_url} returned a non-JSON response — "
+                "is that really the SoloPM API?",
+                status=resp.status_code,
+            ) from exc
 
     def get(self, path: str, **kwargs) -> Any:
         return self._request("GET", path, **kwargs)

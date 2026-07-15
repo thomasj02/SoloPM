@@ -5,11 +5,16 @@ which operates the same canonical service the CLI and web app use. Writes are
 attributed to the configured agent.
 """
 
+from typing import TYPE_CHECKING
+
 from mcp.server.fastmcp import FastMCP
 
 from ..core.models import DEFAULT_BRANCH_CONVENTION, DEFAULT_REVIEW_PROMPT
 from ..core.service import Service
 from .tools import SoloPMTools
+
+if TYPE_CHECKING:
+    from .http_tools import HttpSoloPMTools
 
 INSTRUCTIONS = (
     "SoloPM is an AI-first Kanban tracker for solo developers. These tools let you read "
@@ -24,9 +29,22 @@ INSTRUCTIONS = (
 )
 
 
-def build_server(service: Service, agent: str = "claude") -> FastMCP:
-    """Build a FastMCP server exposing SoloPM's operations, attributed to ``agent``."""
-    tools = SoloPMTools(service, agent=agent)
+def build_server(
+    service: Service | None = None,
+    agent: str = "claude",
+    *,
+    tools: "SoloPMTools | HttpSoloPMTools | None" = None,
+) -> FastMCP:
+    """Build a FastMCP server exposing SoloPM's operations, attributed to ``agent``.
+
+    Pass a ``service`` for the classic in-process store, or ``tools`` to supply the
+    backend explicitly (e.g. :class:`~solopm.mcp.http_tools.HttpSoloPMTools` driving a
+    remote backend over HTTP — its writes are attributed by its own ``Api`` agent).
+    """
+    if tools is None:
+        if service is None:
+            raise ValueError("build_server() needs a service or an explicit tools backend.")
+        tools = SoloPMTools(service, agent=agent)
     mcp = FastMCP("solopm", instructions=INSTRUCTIONS)
 
     @mcp.tool()

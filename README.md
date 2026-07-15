@@ -164,6 +164,47 @@ Register the server with your MCP client by pointing it at `uv run solopm mcp` (
 repo root) — e.g. in Claude Code, `claude mcp add solopm -- uv run solopm mcp`.
 Registering it at user scope makes SoloPM available across all your projects.
 
+### HTTP mode (remote machines)
+
+`solopm mcp --url http://host:8787` runs the same MCP server against a **remote**
+backend instead of opening the local store: every tool call becomes a request to the
+HTTP API served by `solopm serve`, so business rules stay server-side and results and
+errors are identical to local mode (writes are attributed via the `X-SoloPM-Actor`
+header, so `--agent` must be one of the API's actors: `human`, `claude`, `codex`).
+Use it to give an agent on another machine access to the same board — e.g. on that
+machine:
+
+```bash
+pipx install solopm   # or any install that puts `solopm` on PATH
+claude mcp add solopm -s user -- solopm mcp --url http://workstation:8787
+```
+
+Notes: HTTP mode is only entered via the explicit `--url` flag (the `SOLOPM_URL` env
+var never flips the MCP server to HTTP), and the backend must be reachable from the
+remote machine. **The API has no authentication** (SoloPM is single-user and
+local-first), so the recommended transport is an SSH tunnel — the backend keeps its
+default loopback bind and SSH provides the auth:
+
+```bash
+ssh -N -L 8787:127.0.0.1:8787 workstation &   # on the remote machine
+claude mcp add solopm -s user -- solopm mcp --url http://127.0.0.1:8787
+```
+
+Alternatively, on a **fully trusted network only**, bind the backend directly: set
+`SOLOPM_HOST` and list the name(s) remote clients dial in `SOLOPM_ALLOWED_HOSTS`
+(comma-separated; the Host-header guard rejects unknown hosts — it stops DNS
+rebinding, **not** direct access, so anyone who can reach the port can read and write
+the tracker, including as `human`):
+
+```bash
+SOLOPM_HOST=0.0.0.0 SOLOPM_ALLOWED_HOSTS=workstation,192.168.1.50 solopm serve
+```
+
+Repo-filesystem tools (`radar`, `prune_merged_branches`, PR automation on
+`move_ticket`) execute on the backend's machine, which is where the repos live; and
+`--channel` requires the local store, so it can't be combined with `--url` (the API has
+no activity feed to poll — yet).
+
 ### Channel mode (proactive notifications)
 
 `solopm mcp --channel` runs the MCP server as a Claude Code **channel** (a
@@ -232,6 +273,7 @@ so the web client is type-checked against the backend's shapes.
 | `SOLOPM_HOME` | Directory holding the store | `~/.solopm` |
 | `SOLOPM_DB` | Full path to the SQLite file | `$SOLOPM_HOME/solopm.db` |
 | `SOLOPM_HOST` / `SOLOPM_PORT` | Server bind address | `127.0.0.1` / `8787` |
+| `SOLOPM_ALLOWED_HOSTS` | Extra Host-header values the server accepts (comma-separated) — for remote clients | — |
 | `SOLOPM_URL` | CLI → backend base URL | `http://$HOST:$PORT` |
 | `SOLOPM_PROJECT` | Default project key for the CLI | — |
 
