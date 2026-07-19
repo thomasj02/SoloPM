@@ -1552,6 +1552,56 @@ def test_absurd_format_widths_are_rejected_without_rendering():
     assert Service._convention_pattern("{key}-{seq:09}-{slug}", "SOLO", 1, []) is not None
 
 
+def test_projects_cannot_share_a_repo(tmp_path):
+    # [gpt-review r8 P1] project ↔ repo is documented as 1:1 but was never enforced —
+    # every repo-scoped feature (PR ownership/discovery, prune, radar, status) reasons
+    # per-project and would cross wires across projects sharing a repository.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh, repo="/tmp/repo")
+    with pytest.raises(ValidationError):
+        svc.add_project(key="B", name="B", repo="/tmp/repo", master="main")
+    with pytest.raises(ValidationError):  # normalization: trailing slash is the same repo
+        svc.add_project(key="C", name="C", repo="/tmp/repo/", master="main")
+    svc.add_project(key="D", name="D", repo="/tmp/other", master="main")
+    with pytest.raises(ValidationError):  # update onto an already-mapped repo
+        svc.update_project("D", {"repo": "/tmp/repo"})
+    # Re-asserting a project's own repo is not a collision.
+    updated = svc.update_project("SOLO", {"repo": "/tmp/repo"})
+    assert updated.repo == "/tmp/repo"
+
+
+def test_legacy_shared_repo_declines_discovery(tmp_path):
+    # [gpt-review r8 P1] A legacy store can already hold two projects on one repo
+    # (pre-enforcement). Discovery must decline rather than reason per-project: with
+    # {seq}-{slug}-style overlaps, A-1 could otherwise adopt B-1's PR.
+    from solopm.core.models import DEFAULT_BRANCH_CONVENTION, DEFAULT_REVIEW_PROMPT, Project
+
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-fix")])
+    svc = _svc(tmp_path, github=gh, repo="/tmp/repo")
+    solo = svc.get_project("SOLO")
+    svc.store.insert_project(  # bypasses service validation, like a pre-existing row
+        Project(
+            key="B",
+            name="B",
+            repo="/tmp/repo",
+            master_branch="main",
+            branch_convention=DEFAULT_BRANCH_CONVENTION,
+            default_implementer="claude",
+            default_reviewer="codex",
+            review_prompt=DEFAULT_REVIEW_PROMPT,
+            seq_counter=0,
+            created_at=solo.created_at,
+            updated_at=solo.updated_at,
+        )
+    )
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    note = _comments(svc, tid)[0]
+    assert "share this repo" in note
+
+
 def test_unrenderable_convention_does_not_crash_discovery(tmp_path):
     # [gpt-review r1 P2] Arbitrary stored conventions can make str.format raise
     # AttributeError/TypeError ({key.foo}, {seq[foo]}) — discovery must degrade to the

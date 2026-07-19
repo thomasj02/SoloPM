@@ -11,6 +11,7 @@ import json
 import re
 import string
 from datetime import datetime, timezone
+from pathlib import Path
 
 from . import workflow
 from .errors import ForbiddenTransitionError, NotFoundError, ValidationError
@@ -60,6 +61,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _canonical_path(path: str) -> str:
+    """One comparable form per repo path — trailing slashes, `~`, and symlinks must not
+    let two project rows point at the same repository unnoticed."""
+    try:
+        return str(Path(path).expanduser().resolve())
+    except OSError:
+        return path
+
+
 def _require_actor(actor: str) -> str:
     if actor not in ACTORS:
         raise ValidationError(
@@ -97,6 +107,7 @@ class Service:
         key = normalize_project_key(key)
         if not name or not name.strip():
             raise ValidationError("Project name is required.")
+        self._require_repo_unclaimed(repo)
         now = _now()
         project = Project(
             key=key,
@@ -134,8 +145,26 @@ class Service:
             )
         if "name" in fields and not str(fields["name"]).strip():
             raise ValidationError("Project name cannot be blank.")
+        if "repo" in fields:
+            self._require_repo_unclaimed(fields["repo"], exclude_key=key)
         self.store.update_project(key, fields, _now())
         return self.get_project(key)
+
+    def _require_repo_unclaimed(self, repo: str | None, *, exclude_key: str | None = None) -> None:
+        """Enforce the documented project ↔ repo 1:1 mapping. Every repo-scoped feature
+        (PR ownership/discovery, prune, radar, status) reasons per-project and would
+        silently cross wires if two projects shared a repository."""
+        if not repo:
+            return
+        target = _canonical_path(repo)
+        for p in self.list_projects():
+            if exclude_key is not None and p.key == exclude_key:
+                continue
+            if p.repo and _canonical_path(p.repo) == target:
+                raise ValidationError(
+                    f"Repo {repo!r} is already mapped to project {p.key} — "
+                    "project ↔ repo is 1:1."
+                )
 
     def set_project_field(self, key: str, field: str, value) -> Project:
         return self.update_project(key, {field: value})
@@ -657,6 +686,20 @@ class Service:
                 claimed_numbers = {t.pr_number for t in siblings if t.pr_number is not None}
                 claimed_heads = {t.branch.lower() for t in siblings if t.branch}
                 sibling_seqs = [t.seq for t in siblings]
+                # Legacy stores can predate the project ↔ repo 1:1 enforcement: with a
+                # second project on this repository, ownership can't be reasoned about
+                # per-project at all — decline discovery outright.
+                shared = sorted(
+                    p.key for p in self.list_projects()
+                    if p.key != project.key and p.repo
+                    and _canonical_path(p.repo) == _canonical_path(project.repo)
+                )
+                if shared:
+                    return {}, self._nothing_note(
+                        to_state,
+                        f"project(s) {', '.join(shared)} share this repo — PR ownership "
+                        "is ambiguous across projects, resolve manually",
+                    )
                 # When a sibling's convention rendering overlaps THIS ticket's default
                 # <ID>[-slug] shape, even the default matcher can't tell whose head a
                 # match is — decline discovery for this ticket entirely.

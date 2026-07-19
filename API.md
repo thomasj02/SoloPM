@@ -87,7 +87,9 @@ Actor rules layered on top:
 - Also accepted (optional, so creation is atomic — the HTTP-backed MCP mode sends the
   full config in one POST): `branch_convention`, `default_implementer`,
   `default_reviewer`, `review_prompt` — same defaults as `<project>` documents below.
-- Duplicate key → `409 duplicate`.
+- Duplicate key → `409 duplicate`. A `repo` already mapped to another project →
+  `400 validation` (project ↔ repo is 1:1 — repo-scoped features reason per-project;
+  applies to `POST` and to `PATCH`ing `repo`).
 
 `GET /api/projects/{key}` → `<project>` (404 if missing).
 
