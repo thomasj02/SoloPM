@@ -64,11 +64,15 @@ class PR:
 @dataclass
 class OpenPR:
     """One row of the open-PR listing (SOLO-27): enough to match a PR to a ticket by
-    its head branch and act on it."""
+    its head branch and act on it safely — ``base`` gates adoption to PRs targeting the
+    project's master, and ``cross_repo`` excludes fork PRs (their bare head name is a
+    ref in the FORK; treating it as an origin branch could delete an unrelated ref)."""
 
     number: int
     url: str
     head: str  # head branch name (headRefName)
+    base: str = ""  # base branch name (baseRefName)
+    cross_repo: bool = False  # isCrossRepository (fork PR)
 
 
 @dataclass
@@ -215,13 +219,20 @@ class GitHub:
         or a possibly-truncated listing — the caller decides whether that's fatal."""
         proc = self._run(
             ["gh", "pr", "list", "--state", "open",
-             "--json", "number,url,headRefName", "--limit", str(self._OPEN_PR_LIMIT)],
+             "--json", "number,url,headRefName,baseRefName,isCrossRepository",
+             "--limit", str(self._OPEN_PR_LIMIT)],
             cwd=repo,
         )
         try:
             data = json.loads(proc.stdout or "[]")
             prs = [
-                OpenPR(number=int(d["number"]), url=str(d["url"]), head=str(d["headRefName"]))
+                OpenPR(
+                    number=int(d["number"]),
+                    url=str(d["url"]),
+                    head=str(d["headRefName"]),
+                    base=str(d["baseRefName"]),
+                    cross_repo=bool(d["isCrossRepository"]),
+                )
                 for d in data
             ]
         except (ValueError, KeyError, TypeError) as exc:

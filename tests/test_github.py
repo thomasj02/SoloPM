@@ -968,8 +968,14 @@ def test_cancelled_reaches_cancelled_when_branch_delete_fails(tmp_path):
 # --- SOLO-27: discover unrecorded PRs on done/cancelled + never skip silently ---
 
 
-def _pr(number, head):
-    return OpenPR(number=number, url=f"https://github.com/x/y/pull/{number}", head=head)
+def _pr(number, head, base="main", cross_repo=False):
+    return OpenPR(
+        number=number,
+        url=f"https://github.com/x/y/pull/{number}",
+        head=head,
+        base=base,
+        cross_repo=cross_repo,
+    )
 
 
 def _to_human_review_no_branch(svc):
@@ -1123,9 +1129,11 @@ def test_real_client_list_open_prs_parses_gh_output(monkeypatch):
         returncode = 0
         stdout = (
             '[{"number": 46, "url": "https://github.com/x/y/pull/46",'
-            ' "headRefName": "AW-62-adaptive"},'
+            ' "headRefName": "AW-62-adaptive", "baseRefName": "main",'
+            ' "isCrossRepository": false},'
             ' {"number": 47, "url": "https://github.com/x/y/pull/47",'
-            ' "headRefName": "AW-63-doc"}]'
+            ' "headRefName": "AW-63-doc", "baseRefName": "release-1.x",'
+            ' "isCrossRepository": true}]'
         )
         stderr = ""
 
@@ -1140,9 +1148,13 @@ def test_real_client_list_open_prs_parses_gh_output(monkeypatch):
     assert captured["cwd"] == "/some/repo"
     assert captured["args"] == [
         "gh", "pr", "list", "--state", "open",
-        "--json", "number,url,headRefName", "--limit", "1000",
+        "--json", "number,url,headRefName,baseRefName,isCrossRepository",
+        "--limit", "1000",
     ]
-    assert [(p.number, p.head) for p in prs] == [(46, "AW-62-adaptive"), (47, "AW-63-doc")]
+    assert [(p.number, p.head, p.base, p.cross_repo) for p in prs] == [
+        (46, "AW-62-adaptive", "main", False),
+        (47, "AW-63-doc", "release-1.x", True),
+    ]
     assert prs[0].url.endswith("/pull/46")
 
 
@@ -1184,7 +1196,13 @@ def test_real_client_list_open_prs_refuses_truncated_listings(monkeypatch):
     from solopm.core.github import GitHub
 
     rows = [
-        {"number": i, "url": f"https://github.com/x/y/pull/{i}", "headRefName": f"b-{i}"}
+        {
+            "number": i,
+            "url": f"https://github.com/x/y/pull/{i}",
+            "headRefName": f"b-{i}",
+            "baseRefName": "main",
+            "isCrossRepository": False,
+        }
         for i in range(1000)
     ]
 
@@ -1282,6 +1300,75 @@ def test_slugless_convention_matches_exactly_not_by_prefix(tmp_path):
     done2 = svc2.move_ticket(tid2, "done", actor="human")
     assert ("merge", 9) in gh2.calls
     assert done2.pr_state == "merged"
+
+
+def test_discovery_only_adopts_prs_targeting_the_project_base(tmp_path):
+    # [gpt-review r1 P1] A ticket-named PR aimed at a release/stacked branch must not be
+    # adopted — merging it would land in THAT base while the note claims master. A
+    # different-base candidate also must not count toward ambiguity.
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-x", base="release-1.x")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    assert "no PR was merged" in _comments(svc, tid)[0]
+
+    gh2 = FakeGitHub(
+        open_prs=[_pr(46, "SOLO-1-a", base="release-1.x"), _pr(47, "SOLO-1-b", base="main")]
+    )
+    svc2 = _svc(tmp_path / "mixed", github=gh2)
+    tid2 = _to_human_review_no_branch(svc2)
+    done2 = svc2.move_ticket(tid2, "done", actor="human")
+    assert ("merge", 47) in gh2.calls  # the master-based PR, unambiguously
+    assert done2.pr_number == 47
+
+
+def test_discovery_excludes_fork_prs(tmp_path):
+    # [gpt-review r1 P1] A cross-repository PR's head is a bare name in the FORK; branch
+    # cleanup would treat it as an origin ref and could delete an unrelated same-named
+    # branch. SoloPM's ownership claim only holds for same-repo heads — never adopt forks.
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-x", cross_repo=True)])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    assert "no PR was merged" in _comments(svc, tid)[0]
+
+
+def test_non_tail_slug_convention_is_unusable_for_discovery(tmp_path):
+    # [gpt-review r1 P1] feature/{slug}/{key}-{seq} degenerates to the generic prefix
+    # 'feature/' when split at the slug — under it, SOLO-2's PR would match SOLO-1. Such
+    # conventions are unusable for discovery; the default <ID>[-slug] shape still works.
+    gh = FakeGitHub(open_prs=[_pr(2, "feature/foo/SOLO-2")])
+    svc = _svc(tmp_path, github=gh)
+    svc.update_project("SOLO", {"branch_convention": "feature/{slug}/{key}-{seq}"})
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+
+    gh2 = FakeGitHub(open_prs=[_pr(9, "SOLO-1-x")])
+    svc2 = _svc(tmp_path / "default-shape", github=gh2)
+    svc2.update_project("SOLO", {"branch_convention": "feature/{slug}/{key}-{seq}"})
+    tid2 = _to_human_review_no_branch(svc2)
+    done2 = svc2.move_ticket(tid2, "done", actor="human")
+    assert ("merge", 9) in gh2.calls  # default id-shape matching is unaffected
+
+
+def test_unrenderable_convention_does_not_crash_discovery(tmp_path):
+    # [gpt-review r1 P2] Arbitrary stored conventions can make str.format raise
+    # AttributeError/TypeError ({key.foo}, {seq[foo]}) — discovery must degrade to the
+    # default shape, never 500 a branchless done.
+    for i, conv in enumerate(("{key.foo}-{slug}", "{seq[foo]}-{slug}")):
+        gh = FakeGitHub(open_prs=[_pr(9, "SOLO-1-x")])
+        svc = _svc(tmp_path / f"conv{i}", github=gh)
+        svc.update_project("SOLO", {"branch_convention": conv})
+        tid = _to_human_review_no_branch(svc)
+        done = svc.move_ticket(tid, "done", actor="human")  # must not raise
+        assert ("merge", 9) in gh.calls
+        assert done.pr_state == "merged"
 
 
 def test_no_match_note_names_what_was_searched(tmp_path):

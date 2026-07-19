@@ -639,9 +639,15 @@ class Service:
                     open_prs = self.github.list_open_prs(repo)
                 except GitHubError as exc:
                     return {}, self._nothing_note(to_state, f"PR discovery failed ({exc})")
+                # Only same-repo PRs targeting the project's master are candidates: a
+                # different base would merge into THAT branch while the note claims
+                # master, and a fork PR's bare head name is a ref in the fork — branch
+                # cleanup could delete an unrelated same-named origin ref.
                 matches = [
                     p for p in open_prs
-                    if self._head_names_ticket(p.head, ticket, project.branch_convention)
+                    if not p.cross_repo
+                    and p.base == base
+                    and self._head_names_ticket(p.head, ticket, project.branch_convention)
                 ]
                 if not matches:
                     return {}, self._nothing_note(
@@ -695,15 +701,17 @@ class Service:
         ``(text, is_prefix)``. With a ``{slug}`` tail the text is everything before the
         slug and matching is by prefix; without one only an exact head can match (there
         is no safe boundary — ``release/SOLO12`` must not match SOLO-1). ``None`` when
-        the convention can't be rendered (unknown placeholders) or yields no anchor
-        before the slug (e.g. ``{slug}-{key}`` — a leading wildcard matches anything)."""
+        the convention is unusable for discovery: it can't be rendered (settings accept
+        arbitrary strings, and str.format can raise almost anything for them), or
+        ``{slug}`` isn't the final field — splitting ``feature/{slug}/{key}-{seq}`` at
+        the slug would leave the generic ``feature/`` prefix, matching other tickets."""
         try:
             rendered = convention.format(key=key, seq=seq, slug="\x00")
-        except (KeyError, IndexError, ValueError):
+        except (KeyError, IndexError, ValueError, AttributeError, TypeError):
             return None
         if "\x00" in rendered:
-            prefix = rendered.split("\x00", 1)[0]
-            return (prefix, True) if prefix else None
+            prefix, tail = rendered.split("\x00", 1)
+            return (prefix, True) if prefix and not tail else None
         return rendered, False
 
     @staticmethod
