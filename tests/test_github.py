@@ -1052,16 +1052,58 @@ def test_done_discovery_gh_failure_does_not_block_the_move(tmp_path):
     assert "no PR was merged" in note and "discovery failed" in note
 
 
-def test_done_merge_failure_after_discovery_aborts_the_move(tmp_path):
-    # [SOLO-27 c3] Once a PR is resolved, action failures keep today's abort semantics.
+def test_done_merge_failure_after_discovery_aborts_but_keeps_the_adoption(tmp_path):
+    # [SOLO-27 c3 + gpt-review r4 P1] Once a PR is resolved, action failures keep the
+    # abort semantics — but the adoption must already be persisted: a merge that lands
+    # remotely and then times out client-side leaves a PR that is no longer OPEN, so a
+    # retry could never rediscover it. With the identity recorded, the retry goes
+    # through the recorded-PR path exactly like a ticket that was tracked all along.
     gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-x")], fail_on="merge_pr")
     svc = _svc(tmp_path, github=gh)
     tid = _to_human_review_no_branch(svc)
     with pytest.raises(GitHubError):
         svc.move_ticket(tid, "done", actor="human")
     after = svc.get_ticket(tid)
-    assert after.state == "in-human-review"
-    assert after.pr_number is None  # nothing persisted from the aborted move
+    assert after.state == "in-human-review"  # the move itself aborted
+    assert after.pr_number == 46  # ...but the discovered identity is not lost
+    assert after.branch == "SOLO-1-x"
+    assert after.pr_state == "open"
+
+    # Retry: the PR is recorded now — merged via the recorded path, no re-discovery.
+    gh.fail_on = None
+    listing_calls = sum(1 for c in gh.calls if c[0] == "list_open")
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert done.state == "done" and done.pr_state == "merged"
+    assert sum(1 for c in gh.calls if c[0] == "list_open") == listing_calls
+
+
+def test_ambiguous_seq_rendering_collision_is_rejected(tmp_path):
+    # [gpt-review r4 P1] {key}/{seq!s:.1}-{slug} passes a naive seq-vs-seq+1 probe (1 vs
+    # 2) but renders 'SOLO/1-' for BOTH seq 1 and seq 10 — SOLO-1's done would adopt
+    # SOLO-10's sole PR. The pattern must be collision-checked against the project's
+    # actual other ticket sequences. (The head deliberately does not match the default
+    # <ID>[-slug] shape, so the convention path is the only one that could adopt it.)
+    gh = FakeGitHub(open_prs=[_pr(66, "SOLO/1-fix")])
+    svc = _svc(tmp_path, github=gh)
+    svc.update_project("SOLO", {"branch_convention": "{key}/{seq!s:.1}-{slug}"})
+    tid = _to_human_review_no_branch(svc)  # SOLO-1
+    for _ in range(9):  # SOLO-2 .. SOLO-10 exist; SOLO-10 renders 'SOLO/1-' too
+        svc.create_ticket(project="SOLO", title="filler")
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+
+    # Control: with no colliding ticket in the project (seqs 1-3 render distinctly),
+    # the same convention is usable and the ticket's own PR is adopted.
+    gh2 = FakeGitHub(open_prs=[_pr(9, "SOLO/1-fix")])
+    svc2 = _svc(tmp_path / "no-collision", github=gh2)
+    svc2.update_project("SOLO", {"branch_convention": "{key}/{seq!s:.1}-{slug}"})
+    tid2 = _to_human_review_no_branch(svc2)  # SOLO-1 of 3
+    svc2.create_ticket(project="SOLO", title="b")
+    svc2.create_ticket(project="SOLO", title="c")
+    done2 = svc2.move_ticket(tid2, "done", actor="human")
+    assert ("merge", 9) in gh2.calls
+    assert done2.pr_state == "merged"
 
 
 def test_cancelled_discovers_and_closes_unrecorded_pr(tmp_path):

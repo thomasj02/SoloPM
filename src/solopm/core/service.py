@@ -642,18 +642,28 @@ class Service:
                 # Only same-repo PRs targeting the project's master are candidates: a
                 # different base would merge into THAT branch while the note claims
                 # master, and a fork PR's bare head name is a ref in the fork — branch
-                # cleanup could delete an unrelated same-named origin ref.
+                # cleanup could delete an unrelated same-named origin ref. The convention
+                # pattern is computed once, collision-checked against the project's other
+                # ticket sequences (an exotic format spec can render the same text for
+                # two different seqs — {seq!s:.1} yields '1' for both 1 and 10).
+                other_seqs = [
+                    t.seq for t in self.list_tickets(project=ticket.project)
+                    if t.id != ticket.id
+                ]
+                pattern = self._convention_pattern(
+                    project.branch_convention, ticket.project, ticket.seq, other_seqs
+                )
                 matches = [
                     p for p in open_prs
                     if not p.cross_repo
                     and p.base == base
-                    and self._head_names_ticket(p.head, ticket, project.branch_convention)
+                    and self._head_names_ticket(p.head, ticket, pattern)
                 ]
                 if not matches:
                     return {}, self._nothing_note(
                         to_state,
                         "no PR is recorded on this ticket and no open PR head matches "
-                        f"{self._searched_heads(ticket, project.branch_convention)}",
+                        f"{self._searched_heads(ticket, pattern)}",
                     )
                 if len(matches) > 1:
                     heads = ", ".join(f"#{p.number} (`{p.head}`)" for p in matches)
@@ -664,8 +674,25 @@ class Service:
                     )
                 found = matches[0]
                 number, url, branch = found.number, found.url, found.head
-                # Adopt the discovered PR onto the ticket so history, the board, and the
-                # prune helper see it exactly as if it had been recorded up front.
+                # Adopt the discovered PR onto the ticket BEFORE acting on it: if the
+                # merge/close lands remotely but the client fails afterwards (timeout),
+                # the PR is no longer open and a retry could never rediscover it — with
+                # the identity recorded, the retry takes the recorded-PR path instead.
+                self.store.change_ticket(
+                    ticket.id,
+                    {
+                        "branch": found.head,
+                        "pr_number": found.number,
+                        "pr_url": found.url,
+                        "pr_state": "open",
+                    },
+                    actor=actor,
+                    kind="comment",
+                    body=f"Adopted open PR #{found.number} ({found.url}) on branch "
+                    f"`{found.head}` — discovered by branch convention.",
+                    meta={},
+                    when=_now(),
+                )
                 extra = {"pr_number": found.number, "pr_url": found.url, "branch": found.head}
             # Branch cleanup must target the PR's *own* head, resolved fresh from GitHub —
             # not any stored ticket field, which could have drifted from the real head (a
@@ -696,7 +723,9 @@ class Service:
         return f"GitHub automation: no PR was {action} — {reason}."
 
     @staticmethod
-    def _convention_pattern(convention: str, key: str, seq: int) -> tuple[str, bool] | None:
+    def _convention_pattern(
+        convention: str, key: str, seq: int, other_seqs: "list[int] | tuple[int, ...]" = ()
+    ) -> tuple[str, bool] | None:
         """The head pattern a project's branch convention yields for one ticket:
         ``(text, is_prefix)``. With a ``{slug}`` tail the text is everything before the
         slug and matching is by prefix; without one only an exact head can match (there
@@ -706,13 +735,16 @@ class Service:
         ``{slug}`` isn't the final field (splitting ``feature/{slug}/{key}-{seq}`` at
         the slug would leave the generic ``feature/`` prefix, matching other tickets);
         the prefix lacks a separator boundary — ``{key}-{seq}{slug}`` renders
-        ``SOLO-1``, which startswith-matches SOLO-10's branches; or the pattern does
-        not depend on ``{seq}`` at all (``feature/{slug}``, ``release/{key}``) and so
-        is identical for every ticket in the project. The seq-dependence check renders
-        twice with different sequence numbers and requires the match text to differ."""
+        ``SOLO-1``, which startswith-matches SOLO-10's branches; the pattern does not
+        depend on ``{seq}`` at all (``feature/{slug}``, ``release/{key}``) and so is
+        identical for every ticket; or the pattern COLLIDES with another existing
+        ticket's — an exotic format spec can render the same text for two different
+        sequences (``{seq!s:.1}`` yields ``1`` for both 1 and 10), so the caller passes
+        ``other_seqs`` and any of them rendering this ticket's text rejects it."""
         try:
             rendered = convention.format(key=key, seq=seq, slug="\x00")
             probe = convention.format(key=key, seq=seq + 1, slug="\x00")
+            others = [convention.format(key=key, seq=s, slug="\x00") for s in other_seqs]
         except (KeyError, IndexError, ValueError, AttributeError, TypeError):
             return None
         if "\x00" in rendered:
@@ -722,24 +754,27 @@ class Service:
                 and not tail
                 and not prefix[-1].isalnum()
                 and prefix != probe.split("\x00", 1)[0]
+                and all(prefix != o.split("\x00", 1)[0] for o in others)
             ):
                 return prefix, True
             return None
-        if rendered == probe:
+        if rendered == probe or rendered in others:
             return None
         return rendered, False
 
     @staticmethod
-    def _head_names_ticket(head: str, ticket: Ticket, convention: str) -> bool:
+    def _head_names_ticket(
+        head: str, ticket: Ticket, pattern: tuple[str, bool] | None
+    ) -> bool:
         """True when an open PR's head branch names this ticket — the default
-        ``<ID>[-slug]`` shape or the project's configured convention. Compared
+        ``<ID>[-slug]`` shape or the precomputed convention ``pattern`` (from
+        :meth:`_convention_pattern`; None = convention unusable). Compared
         case-insensitively: hand-made branches are routinely lowercase while ticket
         ids are uppercase, and the caller's ambiguity guard covers collisions."""
         h = head.lower()
         tid = ticket.id.lower()
         if h == tid or h.startswith(tid + "-"):
             return True
-        pattern = Service._convention_pattern(convention, ticket.project, ticket.seq)
         if pattern is None:
             return False
         text, is_prefix = pattern[0].lower(), pattern[1]
@@ -748,10 +783,9 @@ class Service:
         return h == text
 
     @staticmethod
-    def _searched_heads(ticket: Ticket, convention: str) -> str:
+    def _searched_heads(ticket: Ticket, pattern: tuple[str, bool] | None) -> str:
         """Spell out exactly which head shapes discovery searched, for the note."""
         shapes = [f"`{ticket.id}[-…]`"]
-        pattern = Service._convention_pattern(convention, ticket.project, ticket.seq)
         if pattern is not None:
             text, is_prefix = pattern
             if not (is_prefix and text.lower() == f"{ticket.id.lower()}-"):
