@@ -126,6 +126,8 @@ class GitHubClient(Protocol):
 
     def list_open_prs(self, repo: str) -> list[OpenPR]: ...
 
+    def remote_url(self, repo: str) -> str | None: ...
+
     def open_or_refresh_pr(
         self, repo: str, branch: str, base: str, title: str, body: str
     ) -> PR: ...
@@ -243,6 +245,21 @@ class GitHub:
                 "refusing to match against an incomplete view."
             )
         return prs
+
+    def remote_url(self, repo: str) -> str | None:
+        """The checkout's ``origin`` URL, or None when it can't be determined.
+
+        A best-effort repository-identity signal (SOLO-27): linked worktrees and
+        separate clones of one GitHub repository resolve to different filesystem
+        paths but share this URL. Never raises — identity checks degrade, they
+        don't block."""
+        try:
+            proc = self._run(["git", "remote", "get-url", "origin"], cwd=repo, check=False)
+        except GitHubError:
+            return None
+        if proc.returncode != 0:
+            return None
+        return (proc.stdout or "").strip() or None
 
     def open_or_refresh_pr(self, repo: str, branch: str, base: str, title: str, body: str) -> PR:
         existing = self.find_pr(repo, branch)

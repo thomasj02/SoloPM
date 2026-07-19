@@ -107,7 +107,9 @@ class Service:
         key = normalize_project_key(key)
         if not name or not name.strip():
             raise ValidationError("Project name is required.")
-        self._require_repo_unclaimed(repo)
+        # Excluding this key keeps a same-key retry on the documented 409-duplicate
+        # path (insert_project) instead of tripping over its own repo claim.
+        self._require_repo_unclaimed(repo, exclude_key=key)
         now = _now()
         project = Project(
             key=key,
@@ -149,6 +151,16 @@ class Service:
             self._require_repo_unclaimed(fields["repo"], exclude_key=key)
         self.store.update_project(key, fields, _now())
         return self.get_project(key)
+
+    def _normalized_remote(self, repo: str) -> str | None:
+        """The repo's origin URL in one comparable form (case, trailing /, .git)."""
+        if self.github is None:
+            return None
+        url = self.github.remote_url(repo)
+        if not url:
+            return None
+        url = url.strip().lower().rstrip("/")
+        return url[:-4] if url.endswith(".git") else url
 
     def _require_repo_unclaimed(self, repo: str | None, *, exclude_key: str | None = None) -> None:
         """Enforce the documented project ↔ repo 1:1 mapping. Every repo-scoped feature
@@ -686,13 +698,22 @@ class Service:
                 claimed_numbers = {t.pr_number for t in siblings if t.pr_number is not None}
                 claimed_heads = {t.branch.lower() for t in siblings if t.branch}
                 sibling_seqs = [t.seq for t in siblings]
-                # Legacy stores can predate the project ↔ repo 1:1 enforcement: with a
-                # second project on this repository, ownership can't be reasoned about
-                # per-project at all — decline discovery outright.
+                # Legacy stores can predate the project ↔ repo 1:1 enforcement, and two
+                # CHECKOUTS (worktrees/clones) of one repository defeat path comparison
+                # entirely — the origin remote URL is the shared-identity signal there
+                # (best-effort: identity checks degrade, they don't block). Either way,
+                # ownership can't be reasoned about per-project — decline discovery.
+                my_remote = self._normalized_remote(repo)
                 shared = sorted(
                     p.key for p in self.list_projects()
                     if p.key != project.key and p.repo
-                    and _canonical_path(p.repo) == _canonical_path(project.repo)
+                    and (
+                        _canonical_path(p.repo) == _canonical_path(project.repo)
+                        or (
+                            my_remote is not None
+                            and self._normalized_remote(p.repo) == my_remote
+                        )
+                    )
                 )
                 if shared:
                     return {}, self._nothing_note(

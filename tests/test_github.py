@@ -25,6 +25,7 @@ class FakeGitHub:
         branch_deleted: bool = True,
         open_prs: list | None = None,
         has_pr_for_branch: bool = True,
+        remote_urls: dict | None = None,
     ):
         self.calls: list[tuple] = []
         self.pr_number = pr_number
@@ -34,6 +35,7 @@ class FakeGitHub:
         self.branch_deleted = branch_deleted
         self.open_prs = list(open_prs or [])  # what list_open_prs reports (SOLO-27)
         self.has_pr_for_branch = has_pr_for_branch  # find_pr returns None when False
+        self.remote_urls = dict(remote_urls or {})  # repo path -> origin URL
         self.head_branch = None  # the PR head, recorded when a PR is opened/found
         self.merge_branch = None  # branch the client was last asked to clean up
         self.close_branch = None
@@ -58,6 +60,10 @@ class FakeGitHub:
         self._maybe_fail("list_open_prs")
         self.calls.append(("list_open", repo))
         return list(self.open_prs)
+
+    def remote_url(self, repo):
+        self._maybe_fail("remote_url")
+        return (self.remote_urls or {}).get(repo)
 
     def open_or_refresh_pr(self, repo, branch, base, title, body):
         self._maybe_fail("open_or_refresh_pr")
@@ -1568,6 +1574,53 @@ def test_projects_cannot_share_a_repo(tmp_path):
     # Re-asserting a project's own repo is not a collision.
     updated = svc.update_project("SOLO", {"repo": "/tmp/repo"})
     assert updated.repo == "/tmp/repo"
+
+
+def test_shared_remote_identity_declines_discovery(tmp_path):
+    # [gpt-review r9 P1] Two projects on different CHECKOUTS (worktrees/clones) of one
+    # GitHub repository defeat path comparison — the origin remote URL is the shared
+    # identity signal, compared best-effort at discovery time (project CRUD must not
+    # require a cloned repo or working git, so enforcement lives here).
+    gh = FakeGitHub(
+        open_prs=[_pr(46, "SOLO-1-fix")],
+        remote_urls={
+            "/tmp/repo": "git@github.com:me/thing.git",
+            "/tmp/clone": "git@github.com:me/Thing",  # same repo: case/.git differences
+        },
+    )
+    svc = _svc(tmp_path, github=gh, repo="/tmp/repo")
+    svc.add_project(key="B", name="B", repo="/tmp/clone", master="main")
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    assert "share this repo" in _comments(svc, tid)[0]
+
+    # Control: genuinely different remotes — discovery proceeds and adopts.
+    gh2 = FakeGitHub(
+        open_prs=[_pr(9, "SOLO-1-fix")],
+        remote_urls={
+            "/tmp/repo": "git@github.com:me/thing.git",
+            "/tmp/other": "git@github.com:me/unrelated.git",
+        },
+    )
+    svc2 = _svc(tmp_path / "distinct", github=gh2, repo="/tmp/repo")
+    svc2.add_project(key="B", name="B", repo="/tmp/other", master="main")
+    tid2 = _to_human_review_no_branch(svc2)
+    done2 = svc2.move_ticket(tid2, "done", actor="human")
+    assert ("merge", 9) in gh2.calls
+    assert done2.pr_state == "merged"
+
+
+def test_recreating_the_same_project_is_duplicate_not_repo_conflict(tmp_path):
+    # [gpt-review r9 P2] Retrying POST /api/projects with the same key+repo must keep
+    # the documented 409 duplicate — not trip over its own repo claim as a 400.
+    from solopm.core.errors import DuplicateError
+
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh, repo="/tmp/repo")
+    with pytest.raises(DuplicateError):
+        svc.add_project(key="SOLO", name="SoloPM", repo="/tmp/repo", master="main")
 
 
 def test_legacy_shared_repo_declines_discovery(tmp_path):
