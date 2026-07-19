@@ -62,6 +62,16 @@ class PR:
 
 
 @dataclass
+class OpenPR:
+    """One row of the open-PR listing (SOLO-27): enough to match a PR to a ticket by
+    its head branch and act on it."""
+
+    number: int
+    url: str
+    head: str  # head branch name (headRefName)
+
+
+@dataclass
 class MergeResult:
     """Outcome of :meth:`GitHubClient.merge_pr`.
 
@@ -109,6 +119,8 @@ class GitHubClient(Protocol):
     def push_branch(self, repo: str, branch: str) -> None: ...
 
     def find_pr(self, repo: str, branch: str) -> PR | None: ...
+
+    def list_open_prs(self, repo: str) -> list[OpenPR]: ...
 
     def open_or_refresh_pr(
         self, repo: str, branch: str, base: str, title: str, body: str
@@ -191,6 +203,21 @@ class GitHub:
             )
         data = json.loads(proc.stdout)
         return PR(number=int(data["number"]), url=data["url"], state=str(data["state"]).lower())
+
+    def list_open_prs(self, repo: str) -> list[OpenPR]:
+        """All open PRs with their head branches, for convention-based discovery
+        (SOLO-27). Raises :class:`GitHubError` on any gh failure — the caller decides
+        whether discovery is best-effort."""
+        proc = self._run(
+            ["gh", "pr", "list", "--state", "open",
+             "--json", "number,url,headRefName", "--limit", "200"],
+            cwd=repo,
+        )
+        data = json.loads(proc.stdout or "[]")
+        return [
+            OpenPR(number=int(d["number"]), url=d["url"], head=str(d["headRefName"]))
+            for d in data
+        ]
 
     def open_or_refresh_pr(self, repo: str, branch: str, base: str, title: str, body: str) -> PR:
         existing = self.find_pr(repo, branch)

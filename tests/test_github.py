@@ -3,7 +3,7 @@
 import pytest
 
 from solopm.core.errors import NotFoundError, ValidationError
-from solopm.core.github import CloseResult, PR, GitHubError, MergeResult
+from solopm.core.github import CloseResult, OpenPR, PR, GitHubError, MergeResult
 from solopm.core.service import Service
 from solopm.core.store import Store
 
@@ -23,6 +23,8 @@ class FakeGitHub:
         merge_sha: str | None = "1a2b3c4d5e6f",
         merge_state: str = "merged",
         branch_deleted: bool = True,
+        open_prs: list | None = None,
+        has_pr_for_branch: bool = True,
     ):
         self.calls: list[tuple] = []
         self.pr_number = pr_number
@@ -30,6 +32,8 @@ class FakeGitHub:
         self.merge_sha = merge_sha
         self.merge_state = merge_state  # "merged" or "queued"
         self.branch_deleted = branch_deleted
+        self.open_prs = list(open_prs or [])  # what list_open_prs reports (SOLO-27)
+        self.has_pr_for_branch = has_pr_for_branch  # find_pr returns None when False
         self.head_branch = None  # the PR head, recorded when a PR is opened/found
         self.merge_branch = None  # branch the client was last asked to clean up
         self.close_branch = None
@@ -45,8 +49,15 @@ class FakeGitHub:
     def find_pr(self, repo, branch):
         self._maybe_fail("find_pr")
         self.calls.append(("find", branch))
+        if not self.has_pr_for_branch:
+            return None
         self.head_branch = branch  # the PR matched on this branch → it is the head
         return PR(number=self.pr_number, url=f"https://github.com/thomasj02/SoloPM/pull/{self.pr_number}", state="open")
+
+    def list_open_prs(self, repo):
+        self._maybe_fail("list_open_prs")
+        self.calls.append(("list_open", repo))
+        return list(self.open_prs)
 
     def open_or_refresh_pr(self, repo, branch, base, title, body):
         self._maybe_fail("open_or_refresh_pr")
@@ -317,16 +328,19 @@ def test_done_with_queued_merge_records_queued_not_merged(tmp_path):
     assert "Merged PR" not in note  # not a false merge confirmation
 
 
-def test_branchless_done_appends_no_comment(tmp_path):
-    # [SOLO-11] A branch-less ticket reaching done has no PR, so no merge note.
-    gh = FakeGitHub()
+def test_branchless_done_notes_nothing_merged(tmp_path):
+    # [SOLO-11 → superseded by SOLO-27 c4] A branch-less done used to stay silent; that
+    # silence masked skipped merges (AW-62), so it now leaves an explicit note instead.
+    gh = FakeGitHub()  # no open PRs → discovery finds nothing
     svc = _svc(tmp_path, github=gh)
     t = svc.create_ticket(project="SOLO", title="y")
     svc.move_ticket(t.id, "in-progress")
     svc.move_ticket(t.id, "in-ai-review", actor="claude")  # no branch → no PR
     svc.move_ticket(t.id, "in-human-review", actor="codex")
-    svc.move_ticket(t.id, "done", actor="human")
-    assert _comments(svc, t.id) == []
+    done = svc.move_ticket(t.id, "done", actor="human")
+    assert done.state == "done"  # the move itself is never blocked
+    notes = _comments(svc, t.id)
+    assert len(notes) == 1 and "no PR was merged" in notes[0]
 
 
 def test_done_without_github_appends_no_comment(tmp_path):
@@ -949,3 +963,180 @@ def test_cancelled_reaches_cancelled_when_branch_delete_fails(tmp_path):
     assert cancelled.state == "cancelled"
     assert cancelled.pr_state == "closed"
     assert "retained" in _comments(svc, tid)[0].lower()
+
+
+# --- SOLO-27: discover unrecorded PRs on done/cancelled + never skip silently ---
+
+
+def _pr(number, head):
+    return OpenPR(number=number, url=f"https://github.com/x/y/pull/{number}", head=head)
+
+
+def _to_human_review_no_branch(svc):
+    """The AW-62 shape: the agent reviews and hands off without ever recording a branch
+    (it opened the PR out-of-band with `gh`), so the ticket has branch/pr = null."""
+    t = svc.create_ticket(project="SOLO", title="x")
+    svc.move_ticket(t.id, "in-progress")
+    svc.move_ticket(t.id, "in-ai-review", actor="claude")  # no branch passed
+    svc.move_ticket(t.id, "in-human-review", actor="codex")
+    return t.id
+
+
+def test_done_discovers_unrecorded_pr_by_branch_convention(tmp_path):
+    # [SOLO-27 c1/c5] The AW-62 regression: no recorded branch/PR, but an open PR whose
+    # head follows the ticket's branch convention exists → adopt and squash-merge it.
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-anthropic-adaptive"), _pr(9, "OTHER-1-x")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    assert svc.get_ticket(tid).branch is None  # precondition: nothing recorded
+
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert ("merge", 46) in gh.calls
+    assert done.state == "done"
+    assert done.pr_number == 46
+    assert done.pr_state == "merged"
+    assert done.branch == "SOLO-1-anthropic-adaptive"  # adopted for prune/history
+    assert any("Merged PR #46" in c for c in _comments(svc, tid))
+
+
+def test_done_discovery_matches_bare_ticket_id_head(tmp_path):
+    # [SOLO-27 c1] A head that is exactly the ticket id (no slug) also matches.
+    gh = FakeGitHub(open_prs=[_pr(7, "SOLO-1")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert ("merge", 7) in gh.calls
+    assert done.pr_state == "merged"
+
+
+def test_done_discovery_prefix_cannot_cross_ticket_ids(tmp_path):
+    # [SOLO-27 c2] SOLO-1 must not adopt SOLO-10's or SOLO-19's PR.
+    gh = FakeGitHub(open_prs=[_pr(10, "SOLO-10-foo"), _pr(19, "SOLO-19")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.state == "done"
+    assert done.pr_number is None
+    notes = _comments(svc, tid)
+    assert len(notes) == 1 and "no PR was merged" in notes[0]
+
+
+def test_done_discovery_ambiguous_merges_nothing(tmp_path):
+    # [SOLO-27 c2] Two convention-matching open PRs: guessing could merge the wrong one.
+    gh = FakeGitHub(open_prs=[_pr(1, "SOLO-1-first"), _pr(2, "SOLO-1-second")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.state == "done"
+    note = _comments(svc, tid)[0]
+    assert "no PR was merged" in note and "#1" in note and "#2" in note
+
+
+def test_done_discovery_gh_failure_does_not_block_the_move(tmp_path):
+    # [SOLO-27 c3] Failing to LOOK for a PR must not block the human's done-move.
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-x")], fail_on="list_open_prs")
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert done.state == "done"
+    assert not any(c[0] == "merge" for c in gh.calls)
+    note = _comments(svc, tid)[0]
+    assert "no PR was merged" in note and "discovery failed" in note
+
+
+def test_done_merge_failure_after_discovery_aborts_the_move(tmp_path):
+    # [SOLO-27 c3] Once a PR is resolved, action failures keep today's abort semantics.
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-x")], fail_on="merge_pr")
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    with pytest.raises(GitHubError):
+        svc.move_ticket(tid, "done", actor="human")
+    after = svc.get_ticket(tid)
+    assert after.state == "in-human-review"
+    assert after.pr_number is None  # nothing persisted from the aborted move
+
+
+def test_cancelled_discovers_and_closes_unrecorded_pr(tmp_path):
+    # [SOLO-27 c1] Cancelled gets the same recovery, closing instead of merging.
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-x")])
+    svc = _svc(tmp_path, github=gh)
+    t = svc.create_ticket(project="SOLO", title="x")
+    svc.move_ticket(t.id, "in-progress")
+    svc.move_ticket(t.id, "in-ai-review", actor="claude")  # no branch
+    cancelled = svc.move_ticket(t.id, "cancelled", actor="claude")
+    assert ("close", 46) in gh.calls
+    assert cancelled.pr_state == "closed"
+    assert cancelled.branch == "SOLO-1-x"
+    assert any("Closed PR #46" in c for c in _comments(svc, t.id))
+
+
+def test_recorded_branch_without_pr_notes_instead_of_silence(tmp_path):
+    # [SOLO-27 c4] A branch recorded (e.g. on → in-progress for the radar) that has no PR:
+    # the cancel notes it rather than silently closing nothing.
+    gh = FakeGitHub(has_pr_for_branch=False)
+    svc = _svc(tmp_path, github=gh)
+    t = svc.create_ticket(project="SOLO", title="x")
+    svc.move_ticket(t.id, "in-progress", branch="SOLO-1-wip", actor="claude")
+    cancelled = svc.move_ticket(t.id, "cancelled", actor="claude")
+    assert cancelled.state == "cancelled"
+    note = _comments(svc, t.id)[0]
+    assert "no PR was closed" in note and "SOLO-1-wip" in note
+
+
+def test_no_repo_and_no_automation_stay_silent_on_done(tmp_path):
+    # [SOLO-27 c4] No expectation of a PR → no note noise.
+    gh = FakeGitHub(open_prs=[])
+    svc_no_repo = _svc(tmp_path, github=gh, repo=None)
+    tid = _to_human_review_no_branch(svc_no_repo)
+    svc_no_repo.move_ticket(tid, "done", actor="human")
+    assert _comments(svc_no_repo, tid) == []
+
+    store = Store(tmp_path / "nogh.db")
+    store.init()
+    svc_no_gh = Service(store, github=None)
+    svc_no_gh.add_project(key="SOLO", name="SoloPM", repo="/tmp/repo", master="main")
+    tid = _to_human_review_no_branch(svc_no_gh)
+    svc_no_gh.move_ticket(tid, "done", actor="human")
+    assert _comments(svc_no_gh, tid) == []
+
+
+def test_recorded_pr_skips_discovery(tmp_path):
+    # A ticket with a recorded PR must never hit the list-open-PRs discovery path.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc)
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "list_open" for c in gh.calls)
+
+
+def test_real_client_list_open_prs_parses_gh_output(monkeypatch):
+    # The real GitHub.list_open_prs: correct gh invocation + JSON parsing.
+    from solopm.core.github import GitHub
+
+    captured = {}
+
+    class Proc:
+        returncode = 0
+        stdout = (
+            '[{"number": 46, "url": "https://github.com/x/y/pull/46",'
+            ' "headRefName": "AW-62-adaptive"},'
+            ' {"number": 47, "url": "https://github.com/x/y/pull/47",'
+            ' "headRefName": "AW-63-doc"}]'
+        )
+        stderr = ""
+
+    gh = GitHub()
+
+    def fake_run(args, cwd, *, check=True):
+        captured["args"], captured["cwd"] = args, cwd
+        return Proc()
+
+    monkeypatch.setattr(gh, "_run", fake_run)
+    prs = gh.list_open_prs("/some/repo")
+    assert captured["cwd"] == "/some/repo"
+    assert "pr" in captured["args"] and "list" in captured["args"]
+    assert [(p.number, p.head) for p in prs] == [(46, "AW-62-adaptive"), (47, "AW-63-doc")]
+    assert prs[0].url.endswith("/pull/46")

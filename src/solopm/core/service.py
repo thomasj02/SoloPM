@@ -584,11 +584,13 @@ class Service:
         state change; ``note`` is an optional confirmation comment to append afterwards
         (the merge/close record), or ``None``.
 
-        A no-op unless GitHub automation is configured, the ticket has a SoloPM branch,
-        and the project has a repo. Raises on a git/gh failure so the caller aborts the
-        transition.
+        A no-op unless GitHub automation is configured and the project has a repo.
+        → in-ai-review additionally needs a SoloPM branch; → done/cancelled works from
+        the recorded PR/branch, falling back to convention-based discovery (SOLO-27).
+        Raises on a git/gh failure so the caller aborts the transition — except while
+        *discovering* an unrecorded PR, which is best-effort and only produces a note.
         """
-        if self.github is None or not branch:
+        if self.github is None:
             return {}, None
         project = self.get_project(ticket.project)
         if not project.repo:
@@ -596,8 +598,8 @@ class Service:
         repo, base = project.repo, project.master_branch
         if to_state == "in-ai-review":
             # Git automation is agent-only: a human reaching in-ai-review (or supplying a
-            # branch) must not push or open a PR.
-            if actor == "human":
+            # branch) must not push or open a PR. Without a branch there is nothing to push.
+            if actor == "human" or not branch:
                 return {}, None
             self.github.push_branch(repo, branch)
             pr = self.github.open_or_refresh_pr(
@@ -606,16 +608,51 @@ class Service:
             return {"pr_number": pr.number, "pr_url": pr.url, "pr_state": pr.state}, None
         if to_state in ("done", "cancelled"):
             # Merge/close the recorded PR; if none was recorded, resolve it by branch
-            # (SoloPM owns the branch, so any PR on it is this ticket's).
+            # (SoloPM owns the branch, so any PR on it is this ticket's). With no branch
+            # recorded at all, fall back to convention-based discovery (SOLO-27). Either
+            # way, when nothing ends up merged/closed the caller gets a note — a repo
+            # project with automation on must never skip silently (AW-62).
             extra: dict = {}
             number = ticket.pr_number
             url = ticket.pr_url
-            if number is None:
+            if number is None and branch:
                 found = self.github.find_pr(repo, branch)
                 if found is None:
-                    return {}, None  # nothing to merge/close
+                    return {}, self._nothing_note(
+                        to_state, f"branch `{branch}` is recorded but has no PR"
+                    )
                 number, url = found.number, found.url
                 extra = {"pr_number": found.number, "pr_url": found.url}
+            elif number is None:
+                # The implementer drove `gh` by hand and never recorded a branch: an open
+                # PR whose head is `<ID>` or `<ID>-<slug>` is this ticket's. Failing to
+                # LOOK must not block the (human-driven) move — note it instead.
+                try:
+                    open_prs = self.github.list_open_prs(repo)
+                except GitHubError as exc:
+                    return {}, self._nothing_note(to_state, f"PR discovery failed ({exc})")
+                matches = [
+                    p for p in open_prs
+                    if p.head == ticket.id or p.head.startswith(ticket.id + "-")
+                ]
+                if not matches:
+                    return {}, self._nothing_note(
+                        to_state,
+                        "no PR is recorded on this ticket and no open PR matches its "
+                        "branch convention",
+                    )
+                if len(matches) > 1:
+                    heads = ", ".join(f"#{p.number} (`{p.head}`)" for p in matches)
+                    return {}, self._nothing_note(
+                        to_state,
+                        f"multiple open PRs match its branch convention: {heads} — "
+                        "resolve manually",
+                    )
+                found = matches[0]
+                number, url, branch = found.number, found.url, found.head
+                # Adopt the discovered PR onto the ticket so history, the board, and the
+                # prune helper see it exactly as if it had been recorded up front.
+                extra = {"pr_number": found.number, "pr_url": found.url, "branch": found.head}
             # Branch cleanup must target the PR's *own* head, resolved fresh from GitHub —
             # not any stored ticket field, which could have drifted from the real head (a
             # caller override, or a row from before branch pinning). If the head can't be
@@ -636,6 +673,13 @@ class Service:
             note = self._close_note(number, url, note_branch, result.branch_deleted)
             return {**extra, "pr_state": "closed"}, note
         return {}, None
+
+    @staticmethod
+    def _nothing_note(to_state: str, reason: str) -> str:
+        """The never-skip-silently record (SOLO-27): automation ran on done/cancelled
+        but had nothing to act on — say so on the card instead of looking merged."""
+        action = "merged" if to_state == "done" else "closed"
+        return f"GitHub automation: no PR was {action} — {reason}."
 
     @staticmethod
     def _branch_cleanup_note(branch: str, branch_deleted: bool) -> str:
