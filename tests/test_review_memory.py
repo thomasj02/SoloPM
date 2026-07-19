@@ -102,6 +102,24 @@ def test_assembled_prompt_includes_only_active_items(service, project):
     assert project.review_prompt.strip()[:20] in prompt  # base prompt is included
 
 
+def test_accepted_risk_items_render_as_exclusions_not_checklist(service, project):
+    # [SOLO-28] ACCEPTED-RISK items are adjudications: rendering them under "verify
+    # each and report per item" would instruct the reviewer to report the very
+    # findings the convention says not to re-raise. They get their own do-NOT-re-raise
+    # section instead.
+    service.add_review_memory("SOLO", "NORMAL-CHECK bounds on clamps", status="active")
+    service.add_review_memory(
+        "SOLO", "ACCEPTED-RISK: TOCTOU on claim snapshots", status="active"
+    )
+    prompt = service.assembled_review_prompt("SOLO")
+    checklist, _, adjudicated = prompt.partition("Adjudicated risks")
+    assert adjudicated, prompt  # the exclusion section exists
+    assert "ACCEPTED-RISK: TOCTOU" in adjudicated
+    assert "do NOT re-raise" in adjudicated
+    assert "NORMAL-CHECK" in checklist  # ordinary items stay on the checklist
+    assert "ACCEPTED-RISK" not in checklist  # and adjudications are NOT report-per-item
+
+
 def test_record_hit_increments_active_item_hits(service, project):
     item = service.add_review_memory("SOLO", "x", status="active")
     service.assembled_review_prompt("SOLO", record_hit=True)

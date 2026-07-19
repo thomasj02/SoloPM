@@ -25,7 +25,21 @@ INSTRUCTIONS = (
     "to your agent identity. Call "
     "workflow_info for the legal states and transition rules. Note: only the human may "
     "move a ticket to 'done' — you cannot close a ticket. Deleting a project with tickets "
-    "requires force=true (it cascade-deletes all of them)."
+    "requires force=true (it cascade-deletes all of them).\n\n"
+    "Git/PR workflow: SoloPM owns the PR lifecycle. When your work on a ticket is "
+    "committed, move it to 'in-ai-review' and PASS the `branch` argument — SoloPM pushes "
+    "the branch, opens or refreshes the PR, and squash-merges it when the human moves the "
+    "ticket to 'done'. Never push branches or open/merge PRs yourself with `gh`: "
+    "recording the branch is the reliable path — an unrecorded ticket falls back to "
+    "best-effort PR discovery on done, which only works for default-branch-convention "
+    "projects and declines whenever ownership is ambiguous.\n\n"
+    "Review adjudications: before reviewing a ticket's changes, fetch review_prompt — it "
+    "embeds the project's active review-memory checklist, including items prefixed "
+    "'ACCEPTED-RISK:', which are findings the human has already adjudicated and accepted. "
+    "Do not re-raise an ACCEPTED-RISK item unless you have genuinely new evidence that "
+    "changes its risk. Conversely, when a review finding is consciously accepted rather "
+    "than fixed, record it with add_review_memory using the 'ACCEPTED-RISK:' prefix so "
+    "future review rounds see the adjudication instead of rediscovering it."
 )
 
 
