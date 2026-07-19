@@ -1549,6 +1549,58 @@ def test_sibling_convention_can_compromise_the_default_matcher(tmp_path):
     assert "no PR was merged" in _comments(svc, mine.id)[0]
 
 
+def test_unmodellable_sibling_convention_declines_discovery(tmp_path):
+    # [gpt-review r10 P1] {key}-{seq:x}-{slug}-tail is unusable as a pattern (non-tail
+    # slug), but sibling 16 still legitimately branches as 'SOLO-10-fix-tail' — which
+    # ticket 10's DEFAULT matcher accepts. A sibling whose heads can't be modelled
+    # safely must mean decline, not skip.
+    gh = FakeGitHub(open_prs=[_pr(66, "SOLO-10-fix-tail")])
+    svc = _svc(tmp_path, github=gh)
+    svc.update_project("SOLO", {"branch_convention": "{key}-{seq:x}-{slug}-tail"})
+    for _ in range(9):
+        svc.create_ticket(project="SOLO", title="filler")
+    mine = svc.create_ticket(project="SOLO", title="mine")  # SOLO-10
+    for _ in range(6):  # up to SOLO-16, whose heads start 'SOLO-10-'
+        svc.create_ticket(project="SOLO", title="filler")
+    svc.move_ticket(mine.id, "in-progress")
+    svc.move_ticket(mine.id, "in-ai-review", actor="claude")
+    svc.move_ticket(mine.id, "in-human-review", actor="codex")
+    done = svc.move_ticket(mine.id, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+
+
+def test_remote_identity_matches_across_transport_schemes(tmp_path):
+    # [gpt-review r10 P1] git@github.com:me/thing.git and https://github.com/Me/Thing
+    # are the same repository — the shared-repo guard must normalize to
+    # host/owner/repo identity, not just lowercase and trim.
+    gh = FakeGitHub(
+        open_prs=[_pr(46, "SOLO-1-fix")],
+        remote_urls={
+            "/tmp/repo": "git@github.com:me/thing.git",
+            "/tmp/clone": "https://github.com/Me/Thing",
+        },
+    )
+    svc = _svc(tmp_path, github=gh, repo="/tmp/repo")
+    svc.add_project(key="B", name="B", repo="/tmp/clone", master="main")
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    assert "share this repo" in _comments(svc, tid)[0]
+
+
+def test_nested_format_widths_are_rejected_without_rendering():
+    # [gpt-review r10 P2] {seq:{seq}000000000} hides its width inside a nested field —
+    # the literal digits parse as 0, but the resolved width is ~1e9. Nested replacement
+    # fields in specs are rejected outright, before any formatting.
+    from solopm.core.service import Service
+
+    assert (
+        Service._convention_pattern("{seq:{seq}000000000}-{slug}", "SOLO", 1, []) is None
+    )
+
+
 def test_absurd_format_widths_are_rejected_without_rendering():
     # [gpt-review r7 P2] {seq:1000000000} would allocate ~1GB per render (times
     # siblings) — the spec is rejected before any formatting happens.

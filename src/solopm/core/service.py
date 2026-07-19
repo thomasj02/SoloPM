@@ -153,14 +153,21 @@ class Service:
         return self.get_project(key)
 
     def _normalized_remote(self, repo: str) -> str | None:
-        """The repo's origin URL in one comparable form (case, trailing /, .git)."""
+        """The repo's origin identity as ``host/path`` — one comparable form across
+        transports: git@host:path, ssh://, and https:// clones of one repository must
+        compare equal (plus case, trailing ``/``, and ``.git`` differences)."""
         if self.github is None:
             return None
-        url = self.github.remote_url(repo)
+        url = (self.github.remote_url(repo) or "").strip()
         if not url:
             return None
-        url = url.strip().lower().rstrip("/")
-        return url[:-4] if url.endswith(".git") else url
+        if "://" in url:
+            m = re.match(r"^[a-z+]+://(?:[^@/]+@)?([\w.\-]+)(?::\d+)?/(.+)$", url, re.IGNORECASE)
+        else:
+            m = re.match(r"^(?:[\w.\-]+@)?([\w.\-]+):(.+)$", url)  # scp-like git@host:path
+        ident = f"{m.group(1)}/{m.group(2)}" if m else url
+        ident = ident.strip().lower().rstrip("/")
+        return ident[:-4] if ident.endswith(".git") else ident
 
     def _require_repo_unclaimed(self, repo: str | None, *, exclude_key: str | None = None) -> None:
         """Enforce the documented project ↔ repo 1:1 mapping. Every repo-scoped feature
@@ -848,20 +855,27 @@ class Service:
         return mine
 
     @staticmethod
-    def _render_convention(convention: str, key: str, seq: int) -> tuple[str, bool] | None:
-        """Render one ticket's convention head pattern, or None when it can't be
-        reasoned about safely: unrenderable (settings accept arbitrary strings and
-        str.format can raise almost anything), absurd width/precision specs (a
-        {seq:1000000000} would allocate ~1GB before any exception fires), oversized
-        output, a non-tail ``{slug}``, or a prefix without a separator boundary."""
+    def _bounded_format(convention: str, key: str, seq: int) -> str | None:
+        """``format()`` with the slug sentinel, refusing anything that could allocate
+        unboundedly — huge numeric widths, and NESTED replacement fields whose width
+        only resolves at render time ({seq:{seq}000000000}) — plus oversized output.
+        None on any render failure (settings accept arbitrary strings)."""
         try:
             for _lit, _field, spec, _conv in string.Formatter().parse(convention):
-                if spec and any(int(n) > 64 for n in re.findall(r"\d+", spec)):
+                if spec and ("{" in spec or any(int(n) > 64 for n in re.findall(r"\d+", spec))):
                     return None
             rendered = convention.format(key=key, seq=seq, slug="\x00")
         except (KeyError, IndexError, ValueError, AttributeError, TypeError, OverflowError):
             return None
-        if len(rendered) > 300:
+        return rendered if len(rendered) <= 300 else None
+
+    @staticmethod
+    def _render_convention(convention: str, key: str, seq: int) -> tuple[str, bool] | None:
+        """Render one ticket's convention head pattern for use as a MATCHER, or None
+        when it can't be used safely: unrenderable/unbounded (see _bounded_format), a
+        non-tail ``{slug}``, or a prefix without a separator boundary."""
+        rendered = Service._bounded_format(convention, key, seq)
+        if rendered is None:
             return None
         if "\x00" in rendered:
             prefix, tail = rendered.split("\x00", 1)
@@ -871,23 +885,33 @@ class Service:
         return rendered, False
 
     @staticmethod
+    def _raw_head_pattern(convention: str, key: str, seq: int) -> tuple[str, bool] | None:
+        """The head SHAPE a sibling following the convention actually produces —
+        everything before the slug as a prefix, with none of the matcher-safety rules:
+        {key}-{seq:x}-{slug}-tail is unusable as a matcher, yet ticket 16 still
+        branches as ``SOLO-10-…`` under it. None when the shape can't be modelled."""
+        rendered = Service._bounded_format(convention, key, seq)
+        if rendered is None:
+            return None
+        if "\x00" in rendered:
+            return rendered.split("\x00", 1)[0], True
+        return rendered, False
+
+    @staticmethod
     def _default_shape_compromised(
         convention: str, key: str, seq: int, other_seqs: "list[int] | tuple[int, ...]"
     ) -> bool:
-        """True when a SIBLING's convention rendering overlaps THIS ticket's default
-        ``<ID>[-slug]`` patterns — the default matcher itself is then unsafe:
-        {key}-{seq:x}-{slug} makes ticket 16 legitimately branch as ``SOLO-10-…``,
-        which is exactly ticket 10's default shape, so ticket 10's discovery must
-        decline rather than adopt what may be ticket 16's PR."""
+        """True when a SIBLING's convention heads can overlap THIS ticket's default
+        ``<ID>[-slug]`` patterns — or can't be modelled at all: an unrenderable sibling
+        shape doesn't mean the sibling has no branches, so guessing is not allowed."""
         my_defaults: list[tuple[str, bool]] = [(f"{key}-{seq}-", True), (f"{key}-{seq}", False)]
         for s in other_seqs:
-            theirs = Service._render_convention(convention, key, s)
+            theirs = Service._raw_head_pattern(convention, key, s)
             if theirs is None:
-                continue
+                return True
             if any(Service._patterns_collide(d, theirs) for d in my_defaults):
                 return True
         return False
-
     @staticmethod
     def _patterns_collide(mine: tuple[str, bool], other: tuple[str, bool]) -> bool:
         """Matcher-faithful overlap between two head patterns: True when some head both
