@@ -87,7 +87,9 @@ Actor rules layered on top:
 - Also accepted (optional, so creation is atomic — the HTTP-backed MCP mode sends the
   full config in one POST): `branch_convention`, `default_implementer`,
   `default_reviewer`, `review_prompt` — same defaults as `<project>` documents below.
-- Duplicate key → `409 duplicate`.
+- Duplicate key → `409 duplicate`. A `repo` already mapped to another project →
+  `400 validation` (project ↔ repo is 1:1 — repo-scoped features reason per-project;
+  applies to `POST` and to `PATCH`ing `repo`).
 
 `GET /api/projects/{key}` → `<project>` (404 if missing).
 
@@ -200,20 +202,34 @@ self-transitions to `in-ai-review` after committing its work).
 Errors: `invalid_transition`, `forbidden_transition`, `validation` (if `after` is not in
 the target column), `not_found` (unknown `after`).
 
-**GitHub PR side effects (Tier-1, agent-only).** When the backend is run with GitHub
-automation enabled (`solopm serve` / `solopm mcp`) and the ticket has a SoloPM `branch`
-and its project has a `repo`, transitions drive the PR via `gh`/`git`:
-- → `in-ai-review`: push the branch and open (or refresh) the PR; the ticket's `pr` is
-  recorded.
+**GitHub PR side effects (Tier-1).** When the backend is run with GitHub automation
+enabled (`solopm serve` / `solopm mcp`) and the ticket's project has a `repo`,
+transitions drive the PR via `gh`/`git`:
+- → `in-ai-review` (agent-only, requires a SoloPM `branch`): push the branch and open
+  (or refresh) the PR; the ticket's `pr` is recorded.
 - → `done`: squash-merge the PR into the project's master branch (deletes the branch) and
   append a confirmation comment naming the PR, squash commit sha, base, and branch deletion.
   On a merge-queue-protected branch the PR is only *enqueued*, not merged — the ticket then
   records `pr.state` `queued` (not `merged`) with a "merge queued" note.
 - → `cancelled`: close the PR (deletes the branch) and append a "closed PR #N" note.
 
+**Unrecorded-PR discovery.** A ticket reaching `done`/`cancelled` with no recorded
+`branch`/`pr` (its implementer opened the PR by hand) still gets its PR handled: the
+single open PR whose head names the ticket — `<ID>` or `<ID>-<slug>`, matched
+case-insensitively — is adopted (the ticket's `branch` and `pr` are recorded) and
+merged/closed as above. Discovery runs only for projects using the **default**
+`branch_convention` (`{key}-{seq}-{slug}`): under a custom convention another ticket's
+branches can legitimately collide with this ticket's `<ID>-` shape, so discovery
+declines with a note instead of guessing. Ambiguous matches, PRs from forks or
+targeting a non-master base, and PRs already recorded on another ticket are never
+adopted. When nothing ends up merged/closed (nothing matched, ambiguity, custom
+convention, or discovery itself failed), a note comment says so — the move never skips
+silently. Exception: cancelling a ticket straight out of `backlog`/`todo` with nothing
+recorded stays silent and never touches GitHub (routine triage of never-started ideas).
+
 These run **before** the state change, so a `gh`/`git` failure (`github` error) aborts
-the transition. Branch-less / human-worked tickets are unaffected. `pr.state` is one of
-`open`, `merged`, `queued`, or `closed`.
+the transition — except PR *discovery*, which is best-effort and degrades to a note.
+`pr.state` is one of `open`, `merged`, `queued`, or `closed`.
 
 `POST /api/tickets/{id}/reorder` body `{ "after": <id>|null }` → returns `<ticket>`.
 Repositions a ticket **within its current column** (cosmetic — no state change, no

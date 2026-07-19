@@ -62,6 +62,20 @@ class PR:
 
 
 @dataclass
+class OpenPR:
+    """One row of the open-PR listing (SOLO-27): enough to match a PR to a ticket by
+    its head branch and act on it safely — ``base`` gates adoption to PRs targeting the
+    project's master, and ``cross_repo`` excludes fork PRs (their bare head name is a
+    ref in the FORK; treating it as an origin branch could delete an unrelated ref)."""
+
+    number: int
+    url: str
+    head: str  # head branch name (headRefName)
+    base: str = ""  # base branch name (baseRefName)
+    cross_repo: bool = False  # isCrossRepository (fork PR)
+
+
+@dataclass
 class MergeResult:
     """Outcome of :meth:`GitHubClient.merge_pr`.
 
@@ -109,6 +123,10 @@ class GitHubClient(Protocol):
     def push_branch(self, repo: str, branch: str) -> None: ...
 
     def find_pr(self, repo: str, branch: str) -> PR | None: ...
+
+    def list_open_prs(self, repo: str) -> list[OpenPR]: ...
+
+    def remote_url(self, repo: str) -> str | None: ...
 
     def open_or_refresh_pr(
         self, repo: str, branch: str, base: str, title: str, body: str
@@ -191,6 +209,57 @@ class GitHub:
             )
         data = json.loads(proc.stdout)
         return PR(number=int(data["number"]), url=data["url"], state=str(data["state"]).lower())
+
+    # A listing that FILLS this limit may be truncated (gh sorts newest-first, and the
+    # match is typically old) — matching against a truncated view could bypass the
+    # caller's ambiguity guard, so list_open_prs refuses instead of guessing.
+    _OPEN_PR_LIMIT = 1000
+
+    def list_open_prs(self, repo: str) -> list[OpenPR]:
+        """All open PRs with their head branches, for convention-based discovery
+        (SOLO-27). Raises :class:`GitHubError` on any gh failure, unparseable output,
+        or a possibly-truncated listing — the caller decides whether that's fatal."""
+        proc = self._run(
+            ["gh", "pr", "list", "--state", "open",
+             "--json", "number,url,headRefName,baseRefName,isCrossRepository",
+             "--limit", str(self._OPEN_PR_LIMIT)],
+            cwd=repo,
+        )
+        try:
+            data = json.loads(proc.stdout or "[]")
+            prs = [
+                OpenPR(
+                    number=int(d["number"]),
+                    url=str(d["url"]),
+                    head=str(d["headRefName"]),
+                    base=str(d["baseRefName"]),
+                    cross_repo=bool(d["isCrossRepository"]),
+                )
+                for d in data
+            ]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise GitHubError(f"Could not parse `gh pr list` output: {exc}") from exc
+        if len(prs) >= self._OPEN_PR_LIMIT:
+            raise GitHubError(
+                f"{self._OPEN_PR_LIMIT}+ open PRs — the listing may be truncated, "
+                "refusing to match against an incomplete view."
+            )
+        return prs
+
+    def remote_url(self, repo: str) -> str | None:
+        """The checkout's ``origin`` URL, or None when it can't be determined.
+
+        A best-effort repository-identity signal (SOLO-27): linked worktrees and
+        separate clones of one GitHub repository resolve to different filesystem
+        paths but share this URL. Never raises — identity checks degrade, they
+        don't block."""
+        try:
+            proc = self._run(["git", "remote", "get-url", "origin"], cwd=repo, check=False)
+        except GitHubError:
+            return None
+        if proc.returncode != 0:
+            return None
+        return (proc.stdout or "").strip() or None
 
     def open_or_refresh_pr(self, repo: str, branch: str, base: str, title: str, body: str) -> PR:
         existing = self.find_pr(repo, branch)

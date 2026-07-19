@@ -3,7 +3,7 @@
 import pytest
 
 from solopm.core.errors import NotFoundError, ValidationError
-from solopm.core.github import CloseResult, PR, GitHubError, MergeResult
+from solopm.core.github import CloseResult, OpenPR, PR, GitHubError, MergeResult
 from solopm.core.service import Service
 from solopm.core.store import Store
 
@@ -23,6 +23,9 @@ class FakeGitHub:
         merge_sha: str | None = "1a2b3c4d5e6f",
         merge_state: str = "merged",
         branch_deleted: bool = True,
+        open_prs: list | None = None,
+        has_pr_for_branch: bool = True,
+        remote_urls: dict | None = None,
     ):
         self.calls: list[tuple] = []
         self.pr_number = pr_number
@@ -30,6 +33,9 @@ class FakeGitHub:
         self.merge_sha = merge_sha
         self.merge_state = merge_state  # "merged" or "queued"
         self.branch_deleted = branch_deleted
+        self.open_prs = list(open_prs or [])  # what list_open_prs reports (SOLO-27)
+        self.has_pr_for_branch = has_pr_for_branch  # find_pr returns None when False
+        self.remote_urls = dict(remote_urls or {})  # repo path -> origin URL
         self.head_branch = None  # the PR head, recorded when a PR is opened/found
         self.merge_branch = None  # branch the client was last asked to clean up
         self.close_branch = None
@@ -45,8 +51,19 @@ class FakeGitHub:
     def find_pr(self, repo, branch):
         self._maybe_fail("find_pr")
         self.calls.append(("find", branch))
+        if not self.has_pr_for_branch:
+            return None
         self.head_branch = branch  # the PR matched on this branch → it is the head
         return PR(number=self.pr_number, url=f"https://github.com/thomasj02/SoloPM/pull/{self.pr_number}", state="open")
+
+    def list_open_prs(self, repo):
+        self._maybe_fail("list_open_prs")
+        self.calls.append(("list_open", repo))
+        return list(self.open_prs)
+
+    def remote_url(self, repo):
+        self._maybe_fail("remote_url")
+        return (self.remote_urls or {}).get(repo)
 
     def open_or_refresh_pr(self, repo, branch, base, title, body):
         self._maybe_fail("open_or_refresh_pr")
@@ -317,16 +334,19 @@ def test_done_with_queued_merge_records_queued_not_merged(tmp_path):
     assert "Merged PR" not in note  # not a false merge confirmation
 
 
-def test_branchless_done_appends_no_comment(tmp_path):
-    # [SOLO-11] A branch-less ticket reaching done has no PR, so no merge note.
-    gh = FakeGitHub()
+def test_branchless_done_notes_nothing_merged(tmp_path):
+    # [SOLO-11 → superseded by SOLO-27 c4] A branch-less done used to stay silent; that
+    # silence masked skipped merges (AW-62), so it now leaves an explicit note instead.
+    gh = FakeGitHub()  # no open PRs → discovery finds nothing
     svc = _svc(tmp_path, github=gh)
     t = svc.create_ticket(project="SOLO", title="y")
     svc.move_ticket(t.id, "in-progress")
     svc.move_ticket(t.id, "in-ai-review", actor="claude")  # no branch → no PR
     svc.move_ticket(t.id, "in-human-review", actor="codex")
-    svc.move_ticket(t.id, "done", actor="human")
-    assert _comments(svc, t.id) == []
+    done = svc.move_ticket(t.id, "done", actor="human")
+    assert done.state == "done"  # the move itself is never blocked
+    notes = _comments(svc, t.id)
+    assert len(notes) == 1 and "no PR was merged" in notes[0]
 
 
 def test_done_without_github_appends_no_comment(tmp_path):
@@ -949,3 +969,551 @@ def test_cancelled_reaches_cancelled_when_branch_delete_fails(tmp_path):
     assert cancelled.state == "cancelled"
     assert cancelled.pr_state == "closed"
     assert "retained" in _comments(svc, tid)[0].lower()
+
+
+# --- SOLO-27: discover unrecorded PRs on done/cancelled + never skip silently ---
+
+
+def _pr(number, head, base="main", cross_repo=False):
+    return OpenPR(
+        number=number,
+        url=f"https://github.com/x/y/pull/{number}",
+        head=head,
+        base=base,
+        cross_repo=cross_repo,
+    )
+
+
+def _to_human_review_no_branch(svc):
+    """The AW-62 shape: the agent reviews and hands off without ever recording a branch
+    (it opened the PR out-of-band with `gh`), so the ticket has branch/pr = null."""
+    t = svc.create_ticket(project="SOLO", title="x")
+    svc.move_ticket(t.id, "in-progress")
+    svc.move_ticket(t.id, "in-ai-review", actor="claude")  # no branch passed
+    svc.move_ticket(t.id, "in-human-review", actor="codex")
+    return t.id
+
+
+def test_done_discovers_unrecorded_pr_by_branch_convention(tmp_path):
+    # [SOLO-27 c1/c5] The AW-62 regression: no recorded branch/PR, but an open PR whose
+    # head follows the ticket's branch convention exists → adopt and squash-merge it.
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-anthropic-adaptive"), _pr(9, "OTHER-1-x")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    assert svc.get_ticket(tid).branch is None  # precondition: nothing recorded
+
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert ("merge", 46) in gh.calls
+    assert done.state == "done"
+    assert done.pr_number == 46
+    assert done.pr_state == "merged"
+    assert done.branch == "SOLO-1-anthropic-adaptive"  # adopted for prune/history
+    assert any("Merged PR #46" in c for c in _comments(svc, tid))
+
+
+def test_done_discovery_matches_bare_ticket_id_head(tmp_path):
+    # [SOLO-27 c1] A head that is exactly the ticket id (no slug) also matches.
+    gh = FakeGitHub(open_prs=[_pr(7, "SOLO-1")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert ("merge", 7) in gh.calls
+    assert done.pr_state == "merged"
+
+
+def test_done_discovery_prefix_cannot_cross_ticket_ids(tmp_path):
+    # [SOLO-27 c2] SOLO-1 must not adopt SOLO-10's or SOLO-19's PR.
+    gh = FakeGitHub(open_prs=[_pr(10, "SOLO-10-foo"), _pr(19, "SOLO-19")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.state == "done"
+    assert done.pr_number is None
+    notes = _comments(svc, tid)
+    assert len(notes) == 1 and "no PR was merged" in notes[0]
+
+
+def test_done_discovery_ambiguous_merges_nothing(tmp_path):
+    # [SOLO-27 c2] Two convention-matching open PRs: guessing could merge the wrong one.
+    gh = FakeGitHub(open_prs=[_pr(1, "SOLO-1-first"), _pr(2, "SOLO-1-second")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.state == "done"
+    note = _comments(svc, tid)[0]
+    assert "no PR was merged" in note and "#1" in note and "#2" in note
+
+
+def test_done_discovery_gh_failure_does_not_block_the_move(tmp_path):
+    # [SOLO-27 c3] Failing to LOOK for a PR must not block the human's done-move.
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-x")], fail_on="list_open_prs")
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert done.state == "done"
+    assert not any(c[0] == "merge" for c in gh.calls)
+    note = _comments(svc, tid)[0]
+    assert "no PR was merged" in note and "discovery failed" in note
+
+
+def test_done_merge_failure_after_discovery_aborts_but_keeps_the_adoption(tmp_path):
+    # [SOLO-27 c3 + gpt-review r4 P1] Once a PR is resolved, action failures keep the
+    # abort semantics — but the adoption must already be persisted: a merge that lands
+    # remotely and then times out client-side leaves a PR that is no longer OPEN, so a
+    # retry could never rediscover it. With the identity recorded, the retry goes
+    # through the recorded-PR path exactly like a ticket that was tracked all along.
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-x")], fail_on="merge_pr")
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    with pytest.raises(GitHubError):
+        svc.move_ticket(tid, "done", actor="human")
+    after = svc.get_ticket(tid)
+    assert after.state == "in-human-review"  # the move itself aborted
+    assert after.pr_number == 46  # ...but the discovered identity is not lost
+    assert after.branch == "SOLO-1-x"
+    assert after.pr_state == "open"
+
+    # Retry: the PR is recorded now — merged via the recorded path, no re-discovery.
+    gh.fail_on = None
+    listing_calls = sum(1 for c in gh.calls if c[0] == "list_open")
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert done.state == "done" and done.pr_state == "merged"
+    assert sum(1 for c in gh.calls if c[0] == "list_open") == listing_calls
+
+
+
+def test_cancelled_discovers_and_closes_unrecorded_pr(tmp_path):
+    # [SOLO-27 c1] Cancelled gets the same recovery, closing instead of merging.
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-x")])
+    svc = _svc(tmp_path, github=gh)
+    t = svc.create_ticket(project="SOLO", title="x")
+    svc.move_ticket(t.id, "in-progress")
+    svc.move_ticket(t.id, "in-ai-review", actor="claude")  # no branch
+    cancelled = svc.move_ticket(t.id, "cancelled", actor="claude")
+    assert ("close", 46) in gh.calls
+    assert cancelled.pr_state == "closed"
+    assert cancelled.branch == "SOLO-1-x"
+    assert any("Closed PR #46" in c for c in _comments(svc, t.id))
+
+
+def test_recorded_branch_without_pr_notes_instead_of_silence(tmp_path):
+    # [SOLO-27 c4] A branch recorded (e.g. on → in-progress for the radar) that has no PR:
+    # the cancel notes it rather than silently closing nothing.
+    gh = FakeGitHub(has_pr_for_branch=False)
+    svc = _svc(tmp_path, github=gh)
+    t = svc.create_ticket(project="SOLO", title="x")
+    svc.move_ticket(t.id, "in-progress", branch="SOLO-1-wip", actor="claude")
+    cancelled = svc.move_ticket(t.id, "cancelled", actor="claude")
+    assert cancelled.state == "cancelled"
+    note = _comments(svc, t.id)[0]
+    assert "no PR was closed" in note and "SOLO-1-wip" in note
+
+
+def test_no_repo_and_no_automation_stay_silent_on_done(tmp_path):
+    # [SOLO-27 c4] No expectation of a PR → no note noise.
+    gh = FakeGitHub(open_prs=[])
+    svc_no_repo = _svc(tmp_path, github=gh, repo=None)
+    tid = _to_human_review_no_branch(svc_no_repo)
+    svc_no_repo.move_ticket(tid, "done", actor="human")
+    assert _comments(svc_no_repo, tid) == []
+
+    store = Store(tmp_path / "nogh.db")
+    store.init()
+    svc_no_gh = Service(store, github=None)
+    svc_no_gh.add_project(key="SOLO", name="SoloPM", repo="/tmp/repo", master="main")
+    tid = _to_human_review_no_branch(svc_no_gh)
+    svc_no_gh.move_ticket(tid, "done", actor="human")
+    assert _comments(svc_no_gh, tid) == []
+
+
+def test_recorded_pr_skips_discovery(tmp_path):
+    # A ticket with a recorded PR must never hit the list-open-PRs discovery path.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    tid, _ = _to_ai_review(svc)
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "list_open" for c in gh.calls)
+
+
+def test_real_client_list_open_prs_parses_gh_output(monkeypatch):
+    # The real GitHub.list_open_prs: exact gh invocation (state filter, field list,
+    # limit — a wrong flag silently changes discovery semantics) + JSON parsing.
+    from solopm.core.github import GitHub
+
+    captured = {}
+
+    class Proc:
+        returncode = 0
+        stdout = (
+            '[{"number": 46, "url": "https://github.com/x/y/pull/46",'
+            ' "headRefName": "AW-62-adaptive", "baseRefName": "main",'
+            ' "isCrossRepository": false},'
+            ' {"number": 47, "url": "https://github.com/x/y/pull/47",'
+            ' "headRefName": "AW-63-doc", "baseRefName": "release-1.x",'
+            ' "isCrossRepository": true}]'
+        )
+        stderr = ""
+
+    gh = GitHub()
+
+    def fake_run(args, cwd, *, check=True):
+        captured["args"], captured["cwd"] = args, cwd
+        return Proc()
+
+    monkeypatch.setattr(gh, "_run", fake_run)
+    prs = gh.list_open_prs("/some/repo")
+    assert captured["cwd"] == "/some/repo"
+    assert captured["args"] == [
+        "gh", "pr", "list", "--state", "open",
+        "--json", "number,url,headRefName,baseRefName,isCrossRepository",
+        "--limit", "1000",
+    ]
+    assert [(p.number, p.head, p.base, p.cross_repo) for p in prs] == [
+        (46, "AW-62-adaptive", "main", False),
+        (47, "AW-63-doc", "release-1.x", True),
+    ]
+    assert prs[0].url.endswith("/pull/46")
+
+
+def test_real_client_list_open_prs_wraps_parse_failures(monkeypatch):
+    # [SOLO-27 c3] gh exiting 0 with non-JSON stdout (wrapper banner, changed fields)
+    # must surface as GitHubError so the caller's best-effort contract holds.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+
+    def fake_run_garbage(args, cwd, *, check=True):
+        class Proc:
+            returncode = 0
+            stdout = "A new gh release is available!\n[]"
+            stderr = ""
+        return Proc()
+
+    monkeypatch.setattr(gh, "_run", fake_run_garbage)
+    with pytest.raises(GitHubError):
+        gh.list_open_prs("/some/repo")
+
+    def fake_run_missing_field(args, cwd, *, check=True):
+        class Proc:
+            returncode = 0
+            stdout = '[{"number": 1, "url": "u"}]'  # headRefName missing
+            stderr = ""
+        return Proc()
+
+    monkeypatch.setattr(gh, "_run", fake_run_missing_field)
+    with pytest.raises(GitHubError):
+        gh.list_open_prs("/some/repo")
+
+
+def test_real_client_list_open_prs_refuses_truncated_listings(monkeypatch):
+    # [SOLO-27 c2] A listing that fills the limit may be truncated — matching against
+    # it could bypass the ambiguity guard, so it must refuse rather than guess.
+    import json as _json
+
+    from solopm.core.github import GitHub
+
+    rows = [
+        {
+            "number": i,
+            "url": f"https://github.com/x/y/pull/{i}",
+            "headRefName": f"b-{i}",
+            "baseRefName": "main",
+            "isCrossRepository": False,
+        }
+        for i in range(1000)
+    ]
+
+    class Proc:
+        returncode = 0
+        stdout = _json.dumps(rows)
+        stderr = ""
+
+    gh = GitHub()
+    monkeypatch.setattr(gh, "_run", lambda args, cwd, *, check=True: Proc())
+    with pytest.raises(GitHubError):
+        gh.list_open_prs("/some/repo")
+
+
+def test_cancel_from_planning_states_never_touches_github(tmp_path):
+    # [SOLO-27 review P2] Cancelling a backlog/todo ticket (routine triage) must not
+    # probe GitHub, must not adopt/close a coincidentally matching PR, and must not
+    # stamp a note — pre-SOLO-27 silence was correct there: no work was ever recorded.
+    for planning_state in ("backlog", "todo"):
+        gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-spike")])
+        svc = _svc(tmp_path / planning_state, github=gh)
+        t = svc.create_ticket(project="SOLO", title="idea")
+        if planning_state == "todo":
+            svc.move_ticket(t.id, "todo")
+        cancelled = svc.move_ticket(t.id, "cancelled", actor="human")
+        assert cancelled.state == "cancelled"
+        assert gh.calls == []  # no list/close — the spike PR survives
+        assert _comments(svc, t.id) == []
+
+
+def test_single_crossing_pr_is_not_adopted(tmp_path):
+    # [SOLO-27 review] With ONLY SOLO-10's PR open, SOLO-1's done must not adopt it —
+    # a plain startswith(ticket.id) match would (and the ambiguity guard can't save it).
+    gh = FakeGitHub(open_prs=[_pr(10, "SOLO-10-foo")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    assert "no PR was merged" in _comments(svc, tid)[0]
+
+
+def test_queued_merge_on_discovery_path_persists_adoption(tmp_path):
+    # [SOLO-27 review] A discovered PR that lands in the merge queue must still be
+    # adopted onto the ticket (number/url/branch) alongside pr_state=queued.
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-x")], merge_state="queued")
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert done.pr_state == "queued"
+    assert done.pr_number == 46
+    assert done.branch == "SOLO-1-x"
+    assert any("merge queue" in c.lower() for c in _comments(svc, tid))
+
+
+def test_discovery_is_case_insensitive(tmp_path):
+    # [SOLO-27 review] Hand-made branches are often lowercase (the repo's own examples
+    # are, e.g. solo-9-feature) while ticket ids are uppercase — discovery must match.
+    gh = FakeGitHub(open_prs=[_pr(46, "solo-1-fix")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert ("merge", 46) in gh.calls
+    assert done.branch == "solo-1-fix"
+
+
+
+
+def test_discovery_only_adopts_prs_targeting_the_project_base(tmp_path):
+    # [gpt-review r1 P1] A ticket-named PR aimed at a release/stacked branch must not be
+    # adopted — merging it would land in THAT base while the note claims master. A
+    # different-base candidate also must not count toward ambiguity.
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-x", base="release-1.x")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    assert "no PR was merged" in _comments(svc, tid)[0]
+
+    gh2 = FakeGitHub(
+        open_prs=[_pr(46, "SOLO-1-a", base="release-1.x"), _pr(47, "SOLO-1-b", base="main")]
+    )
+    svc2 = _svc(tmp_path / "mixed", github=gh2)
+    tid2 = _to_human_review_no_branch(svc2)
+    done2 = svc2.move_ticket(tid2, "done", actor="human")
+    assert ("merge", 47) in gh2.calls  # the master-based PR, unambiguously
+    assert done2.pr_number == 47
+
+
+def test_discovery_excludes_fork_prs(tmp_path):
+    # [gpt-review r1 P1] A cross-repository PR's head is a bare name in the FORK; branch
+    # cleanup would treat it as an origin ref and could delete an unrelated same-named
+    # branch. SoloPM's ownership claim only holds for same-repo heads — never adopt forks.
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-x", cross_repo=True)])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    assert "no PR was merged" in _comments(svc, tid)[0]
+
+
+
+
+def test_discovery_excludes_prs_recorded_on_another_ticket(tmp_path):
+    # [gpt-review r6 P1] A head/PR already recorded on another ticket is that ticket's —
+    # a branchless done must not re-adopt it, even when the name matches.
+    gh = FakeGitHub(open_prs=[_pr(17, "SOLO-1-fix")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)  # SOLO-1, nothing recorded
+    other = svc.create_ticket(project="SOLO", title="claimer")  # SOLO-2
+    # A branch override legally records the SOLO-1-shaped branch on SOLO-2.
+    svc.move_ticket(other.id, "in-progress", branch="SOLO-1-fix", actor="claude")
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    assert "no PR was merged" in _comments(svc, tid)[0]
+
+
+
+
+def test_remote_identity_matches_across_transport_schemes(tmp_path):
+    # [gpt-review r10 P1] git@github.com:me/thing.git and https://github.com/Me/Thing
+    # are the same repository — the shared-repo guard must normalize to
+    # host/owner/repo identity, not just lowercase and trim.
+    gh = FakeGitHub(
+        open_prs=[_pr(46, "SOLO-1-fix")],
+        remote_urls={
+            "/tmp/repo": "git@github.com:me/thing.git",
+            "/tmp/clone": "https://github.com/Me/Thing",
+        },
+    )
+    svc = _svc(tmp_path, github=gh, repo="/tmp/repo")
+    svc.add_project(key="B", name="B", repo="/tmp/clone", master="main")
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    assert "share this repo" in _comments(svc, tid)[0]
+
+
+
+
+def test_projects_cannot_share_a_repo(tmp_path):
+    # [gpt-review r8 P1] project ↔ repo is documented as 1:1 but was never enforced —
+    # every repo-scoped feature (PR ownership/discovery, prune, radar, status) reasons
+    # per-project and would cross wires across projects sharing a repository.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh, repo="/tmp/repo")
+    with pytest.raises(ValidationError):
+        svc.add_project(key="B", name="B", repo="/tmp/repo", master="main")
+    with pytest.raises(ValidationError):  # normalization: trailing slash is the same repo
+        svc.add_project(key="C", name="C", repo="/tmp/repo/", master="main")
+    svc.add_project(key="D", name="D", repo="/tmp/other", master="main")
+    with pytest.raises(ValidationError):  # update onto an already-mapped repo
+        svc.update_project("D", {"repo": "/tmp/repo"})
+    # Re-asserting a project's own repo is not a collision.
+    updated = svc.update_project("SOLO", {"repo": "/tmp/repo"})
+    assert updated.repo == "/tmp/repo"
+
+
+def test_shared_remote_identity_declines_discovery(tmp_path):
+    # [gpt-review r9 P1] Two projects on different CHECKOUTS (worktrees/clones) of one
+    # GitHub repository defeat path comparison — the origin remote URL is the shared
+    # identity signal, compared best-effort at discovery time (project CRUD must not
+    # require a cloned repo or working git, so enforcement lives here).
+    gh = FakeGitHub(
+        open_prs=[_pr(46, "SOLO-1-fix")],
+        remote_urls={
+            "/tmp/repo": "git@github.com:me/thing.git",
+            "/tmp/clone": "git@github.com:me/Thing",  # same repo: case/.git differences
+        },
+    )
+    svc = _svc(tmp_path, github=gh, repo="/tmp/repo")
+    svc.add_project(key="B", name="B", repo="/tmp/clone", master="main")
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    assert "share this repo" in _comments(svc, tid)[0]
+
+    # Control: genuinely different remotes — discovery proceeds and adopts.
+    gh2 = FakeGitHub(
+        open_prs=[_pr(9, "SOLO-1-fix")],
+        remote_urls={
+            "/tmp/repo": "git@github.com:me/thing.git",
+            "/tmp/other": "git@github.com:me/unrelated.git",
+        },
+    )
+    svc2 = _svc(tmp_path / "distinct", github=gh2, repo="/tmp/repo")
+    svc2.add_project(key="B", name="B", repo="/tmp/other", master="main")
+    tid2 = _to_human_review_no_branch(svc2)
+    done2 = svc2.move_ticket(tid2, "done", actor="human")
+    assert ("merge", 9) in gh2.calls
+    assert done2.pr_state == "merged"
+
+
+def test_recreating_the_same_project_is_duplicate_not_repo_conflict(tmp_path):
+    # [gpt-review r9/r12 P2] Any create with an EXISTING key is the documented 409
+    # duplicate — including when the request also names a repo owned by a DIFFERENT
+    # project (the key check must precede the repo-claim scan).
+    from solopm.core.errors import DuplicateError
+
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh, repo="/tmp/repo")
+    with pytest.raises(DuplicateError):
+        svc.add_project(key="SOLO", name="SoloPM", repo="/tmp/repo", master="main")
+    svc.add_project(key="D", name="D", repo="/tmp/other", master="main")
+    with pytest.raises(DuplicateError):  # existing key + someone else's repo → still 409
+        svc.add_project(key="SOLO", name="SoloPM", repo="/tmp/other", master="main")
+
+
+def test_unresolvable_home_in_repo_path_does_not_crash(tmp_path):
+    # [gpt-review r12 P2] Path('~nouser').expanduser() raises RuntimeError, which an
+    # OSError-only net misses — canonicalization must fall back to the raw path.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh, repo="/tmp/repo")
+    created = svc.add_project(
+        key="T", name="T", repo="~no_such_user_xyz_12345/repo", master="main"
+    )
+    assert created.repo == "~no_such_user_xyz_12345/repo"
+    # [r13 P2] An embedded NUL raises ValueError from Path.resolve — same degrade.
+    created2 = svc.add_project(key="U", name="U", repo="/tmp/x\x00y", master="main")
+    assert created2.repo == "/tmp/x\x00y"
+
+
+def test_legacy_shared_repo_declines_discovery(tmp_path):
+    # [gpt-review r8 P1] A legacy store can already hold two projects on one repo
+    # (pre-enforcement). Discovery must decline rather than reason per-project: with
+    # {seq}-{slug}-style overlaps, A-1 could otherwise adopt B-1's PR.
+    from solopm.core.models import DEFAULT_BRANCH_CONVENTION, DEFAULT_REVIEW_PROMPT, Project
+
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-fix")])
+    svc = _svc(tmp_path, github=gh, repo="/tmp/repo")
+    solo = svc.get_project("SOLO")
+    svc.store.insert_project(  # bypasses service validation, like a pre-existing row
+        Project(
+            key="B",
+            name="B",
+            repo="/tmp/repo",
+            master_branch="main",
+            branch_convention=DEFAULT_BRANCH_CONVENTION,
+            default_implementer="claude",
+            default_reviewer="codex",
+            review_prompt=DEFAULT_REVIEW_PROMPT,
+            seq_counter=0,
+            created_at=solo.created_at,
+            updated_at=solo.updated_at,
+        )
+    )
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    note = _comments(svc, tid)[0]
+    assert "share this repo" in note
+
+
+
+def test_custom_convention_declines_discovery(tmp_path):
+    # [SOLO-27 design, post-review] Automatic discovery supports only the DEFAULT
+    # branch convention. Under a custom one, sibling heads can land on this ticket's
+    # default <ID>- shape ({key}-{seq:x}-{slug} makes ticket 16 branch as SOLO-10-*),
+    # so not even the default matcher can be trusted — and modelling arbitrary format
+    # templates safely proved an open-ended problem. Custom conventions decline with a
+    # note, including for default-shaped heads, and never raise (unrenderable ones too).
+    conventions = (
+        "feature/{key}-{seq}-{slug}",  # benign custom
+        "{key}-{seq:x}-{slug}",        # the sibling/default-shape collision class
+        "{key.foo}-{slug}",            # unrenderable — must decline, not crash
+    )
+    for i, conv in enumerate(conventions):
+        gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-fix"), _pr(47, "feature/SOLO-1-fix")])
+        svc = _svc(tmp_path / f"conv{i}", github=gh)
+        svc.update_project("SOLO", {"branch_convention": conv})
+        tid = _to_human_review_no_branch(svc)
+        done = svc.move_ticket(tid, "done", actor="human")
+        assert not any(c[0] == "merge" for c in gh.calls), conv
+        assert done.pr_number is None, conv
+        note = _comments(svc, tid)[0]
+        assert "no PR was merged" in note, conv
+        assert "default branch convention" in note, conv
+
+
+def test_no_match_note_names_what_was_searched(tmp_path):
+    # [SOLO-27 review] The note must state the pattern actually searched — not vaguely
+    # claim "its branch convention" was checked.
+    gh = FakeGitHub(open_prs=[])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    svc.move_ticket(tid, "done", actor="human")
+    note = _comments(svc, tid)[0]
+    assert "SOLO-1" in note  # the searched head shape is spelled out

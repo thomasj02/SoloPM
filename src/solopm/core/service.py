@@ -8,10 +8,12 @@ parity, as the product brief requires.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 from . import workflow
-from .errors import ForbiddenTransitionError, NotFoundError, ValidationError
+from .errors import DuplicateError, ForbiddenTransitionError, NotFoundError, ValidationError
 from .github import GitHubClient, GitHubError, validate_branch_name
 from .models import (
     ASSIGNEES,
@@ -58,6 +60,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _canonical_path(path: str) -> str:
+    """One comparable form per repo path — trailing slashes, `~`, and symlinks must not
+    let two project rows point at the same repository unnoticed."""
+    try:
+        return str(Path(path).expanduser().resolve())
+    except (OSError, RuntimeError, ValueError):
+        # expanduser raises RuntimeError for an unresolvable ~user, resolve can too on
+        # symlink loops, and an embedded NUL raises ValueError — canonicalization
+        # degrades to the raw path, never errors.
+        return path
+
+
 def _require_actor(actor: str) -> str:
     if actor not in ACTORS:
         raise ValidationError(
@@ -95,6 +109,16 @@ class Service:
         key = normalize_project_key(key)
         if not name or not name.strip():
             raise ValidationError("Project name is required.")
+        # The duplicate-key check runs BEFORE the repo claim so any create against an
+        # existing key is the documented 409 — even when the request also names a repo
+        # owned by a different project. insert_project's atomic check stays the backstop.
+        try:
+            self.get_project(key)
+        except NotFoundError:
+            pass
+        else:
+            raise DuplicateError(f"Project {key!r} already exists.")
+        self._require_repo_unclaimed(repo, exclude_key=key)
         now = _now()
         project = Project(
             key=key,
@@ -132,8 +156,43 @@ class Service:
             )
         if "name" in fields and not str(fields["name"]).strip():
             raise ValidationError("Project name cannot be blank.")
+        if "repo" in fields:
+            self._require_repo_unclaimed(fields["repo"], exclude_key=key)
         self.store.update_project(key, fields, _now())
         return self.get_project(key)
+
+    def _normalized_remote(self, repo: str) -> str | None:
+        """The repo's origin identity as ``host/path`` — one comparable form across
+        transports: git@host:path, ssh://, and https:// clones of one repository must
+        compare equal (plus case, trailing ``/``, and ``.git`` differences)."""
+        if self.github is None:
+            return None
+        url = (self.github.remote_url(repo) or "").strip()
+        if not url:
+            return None
+        if "://" in url:
+            m = re.match(r"^[a-z+]+://(?:[^@/]+@)?([\w.\-]+)(?::\d+)?/(.+)$", url, re.IGNORECASE)
+        else:
+            m = re.match(r"^(?:[\w.\-]+@)?([\w.\-]+):(.+)$", url)  # scp-like git@host:path
+        ident = f"{m.group(1)}/{m.group(2)}" if m else url
+        ident = ident.strip().lower().rstrip("/")
+        return ident[:-4] if ident.endswith(".git") else ident
+
+    def _require_repo_unclaimed(self, repo: str | None, *, exclude_key: str | None = None) -> None:
+        """Enforce the documented project ↔ repo 1:1 mapping. Every repo-scoped feature
+        (PR ownership/discovery, prune, radar, status) reasons per-project and would
+        silently cross wires if two projects shared a repository."""
+        if not repo:
+            return
+        target = _canonical_path(repo)
+        for p in self.list_projects():
+            if exclude_key is not None and p.key == exclude_key:
+                continue
+            if p.repo and _canonical_path(p.repo) == target:
+                raise ValidationError(
+                    f"Repo {repo!r} is already mapped to project {p.key} — "
+                    "project ↔ repo is 1:1."
+                )
 
     def set_project_field(self, key: str, field: str, value) -> Project:
         return self.update_project(key, {field: value})
@@ -584,11 +643,13 @@ class Service:
         state change; ``note`` is an optional confirmation comment to append afterwards
         (the merge/close record), or ``None``.
 
-        A no-op unless GitHub automation is configured, the ticket has a SoloPM branch,
-        and the project has a repo. Raises on a git/gh failure so the caller aborts the
-        transition.
+        A no-op unless GitHub automation is configured and the project has a repo.
+        → in-ai-review additionally needs a SoloPM branch; → done/cancelled works from
+        the recorded PR/branch, falling back to convention-based discovery (SOLO-27).
+        Raises on a git/gh failure so the caller aborts the transition — except while
+        *discovering* an unrecorded PR, which is best-effort and only produces a note.
         """
-        if self.github is None or not branch:
+        if self.github is None:
             return {}, None
         project = self.get_project(ticket.project)
         if not project.repo:
@@ -596,8 +657,8 @@ class Service:
         repo, base = project.repo, project.master_branch
         if to_state == "in-ai-review":
             # Git automation is agent-only: a human reaching in-ai-review (or supplying a
-            # branch) must not push or open a PR.
-            if actor == "human":
+            # branch) must not push or open a PR. Without a branch there is nothing to push.
+            if actor == "human" or not branch:
                 return {}, None
             self.github.push_branch(repo, branch)
             pr = self.github.open_or_refresh_pr(
@@ -606,16 +667,126 @@ class Service:
             return {"pr_number": pr.number, "pr_url": pr.url, "pr_state": pr.state}, None
         if to_state in ("done", "cancelled"):
             # Merge/close the recorded PR; if none was recorded, resolve it by branch
-            # (SoloPM owns the branch, so any PR on it is this ticket's).
+            # (SoloPM owns the branch, so any PR on it is this ticket's). With no branch
+            # recorded at all, fall back to convention-based discovery (SOLO-27). Either
+            # way, when nothing ends up merged/closed the caller gets a note — a repo
+            # project with automation on must never skip silently (AW-62).
+            #
+            # Exception: cancelling a ticket straight out of planning (backlog/todo)
+            # with nothing recorded is routine triage of ideas that never had work —
+            # probing GitHub there could close a coincidentally-named in-flight PR,
+            # and a note per cancel is pure noise. (done can't arrive from planning.)
+            if ticket.state in ("backlog", "todo") and ticket.pr_number is None and not branch:
+                return {}, None
             extra: dict = {}
             number = ticket.pr_number
             url = ticket.pr_url
-            if number is None:
+            if number is None and branch:
                 found = self.github.find_pr(repo, branch)
                 if found is None:
-                    return {}, None  # nothing to merge/close
+                    return {}, self._nothing_note(
+                        to_state, f"branch `{branch}` is recorded but has no PR"
+                    )
                 number, url = found.number, found.url
                 extra = {"pr_number": found.number, "pr_url": found.url}
+            elif number is None:
+                # The implementer drove `gh` by hand and never recorded a branch: an open
+                # PR whose head names this ticket in the DEFAULT `<ID>[-slug]` shape is
+                # this ticket's. Discovery supports only the default branch convention —
+                # under a custom one, sibling heads can land on this ticket's default
+                # shape (e.g. {key}-{seq:x}-{slug} makes ticket 16 branch as SOLO-10-*),
+                # so not even the default matcher can be trusted; modelling arbitrary
+                # format templates safely is an open-ended problem, declined instead.
+                # Failing to LOOK must not block the (human-driven) move — note it.
+                if project.branch_convention != DEFAULT_BRANCH_CONVENTION:
+                    return {}, self._nothing_note(
+                        to_state,
+                        "automatic PR discovery supports only the default branch "
+                        f"convention — this project uses "
+                        f"{project.branch_convention!r}, resolve manually",
+                    )
+                try:
+                    open_prs = self.github.list_open_prs(repo)
+                except GitHubError as exc:
+                    return {}, self._nothing_note(to_state, f"PR discovery failed ({exc})")
+                # Only same-repo PRs targeting the project's master are candidates: a
+                # different base would merge into THAT branch while the note claims
+                # master, and a fork PR's bare head name is a ref in the fork — branch
+                # cleanup could delete an unrelated same-named origin ref. A PR whose
+                # number or head is already recorded on ANOTHER ticket is that ticket's
+                # (a branch override can legally record any name).
+                siblings = [
+                    t for t in self.list_tickets(project=ticket.project)
+                    if t.id != ticket.id
+                ]
+                claimed_numbers = {t.pr_number for t in siblings if t.pr_number is not None}
+                claimed_heads = {t.branch.lower() for t in siblings if t.branch}
+                # Legacy stores can predate the project ↔ repo 1:1 enforcement, and two
+                # CHECKOUTS (worktrees/clones) of one repository defeat path comparison
+                # entirely — the origin remote URL is the shared-identity signal there
+                # (best-effort: identity checks degrade, they don't block). Either way,
+                # ownership can't be reasoned about per-project — decline discovery.
+                my_remote = self._normalized_remote(repo)
+                shared = sorted(
+                    p.key for p in self.list_projects()
+                    if p.key != project.key and p.repo
+                    and (
+                        _canonical_path(p.repo) == _canonical_path(project.repo)
+                        or (
+                            my_remote is not None
+                            and self._normalized_remote(p.repo) == my_remote
+                        )
+                    )
+                )
+                if shared:
+                    return {}, self._nothing_note(
+                        to_state,
+                        f"project(s) {', '.join(shared)} share this repo — PR ownership "
+                        "is ambiguous across projects, resolve manually",
+                    )
+                matches = [
+                    p for p in open_prs
+                    if not p.cross_repo
+                    and p.base == base
+                    and p.number not in claimed_numbers
+                    and p.head.lower() not in claimed_heads
+                    and self._head_names_ticket(p.head, ticket)
+                ]
+                if not matches:
+                    return {}, self._nothing_note(
+                        to_state,
+                        "no PR is recorded on this ticket and no open PR head matches "
+                        f"`{ticket.id}[-…]`",
+                    )
+                if len(matches) > 1:
+                    heads = ", ".join(f"#{p.number} (`{p.head}`)" for p in matches)
+                    return {}, self._nothing_note(
+                        to_state,
+                        f"multiple open PRs match its branch convention: {heads} — "
+                        "resolve manually",
+                    )
+                found = matches[0]
+                number, url, branch = found.number, found.url, found.head
+                # Adopt the discovered PR onto the ticket BEFORE acting on it: if the
+                # merge/close lands remotely but the client fails afterwards (timeout),
+                # the PR is no longer open and a retry could never rediscover it — with
+                # the identity recorded, the retry takes the recorded-PR path instead.
+                self.store.change_ticket(
+                    ticket.id,
+                    {
+                        "branch": found.head,
+                        "pr_number": found.number,
+                        "pr_url": found.url,
+                        "pr_state": "open",
+                    },
+                    actor=actor,
+                    kind="comment",
+                    body=f"Adopted open PR #{found.number} ({found.url}) on branch "
+                    f"`{found.head}` — discovered by branch convention.",
+                    meta={},
+                    when=_now(),
+                )
+                extra = {"pr_number": found.number, "pr_url": found.url, "branch": found.head}
             # Branch cleanup must target the PR's *own* head, resolved fresh from GitHub —
             # not any stored ticket field, which could have drifted from the real head (a
             # caller override, or a row from before branch pinning). If the head can't be
@@ -636,6 +807,24 @@ class Service:
             note = self._close_note(number, url, note_branch, result.branch_deleted)
             return {**extra, "pr_state": "closed"}, note
         return {}, None
+
+    @staticmethod
+    def _nothing_note(to_state: str, reason: str) -> str:
+        """The never-skip-silently record (SOLO-27): automation ran on done/cancelled
+        but had nothing to act on — say so on the card instead of looking merged."""
+        action = "merged" if to_state == "done" else "closed"
+        return f"GitHub automation: no PR was {action} — {reason}."
+
+    @staticmethod
+    def _head_names_ticket(head: str, ticket: Ticket) -> bool:
+        """Default-convention ownership: a head that is exactly ``<ID>`` or starts with
+        ``<ID>-`` is this ticket's branch. Case-insensitive (hand-made branches are
+        routinely lowercase); the trailing ``-`` boundary keeps SOLO-1 from matching
+        SOLO-10's branches. Only ever consulted for default-convention projects —
+        discovery declines outright on custom conventions."""
+        h = head.lower()
+        tid = ticket.id.lower()
+        return h == tid or h.startswith(tid + "-")
 
     @staticmethod
     def _branch_cleanup_note(branch: str, branch_deleted: bool) -> str:
