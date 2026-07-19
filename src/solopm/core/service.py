@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import workflow
-from .errors import ForbiddenTransitionError, NotFoundError, ValidationError
+from .errors import DuplicateError, ForbiddenTransitionError, NotFoundError, ValidationError
 from .github import GitHubClient, GitHubError, validate_branch_name
 from .models import (
     ASSIGNEES,
@@ -65,7 +65,9 @@ def _canonical_path(path: str) -> str:
     let two project rows point at the same repository unnoticed."""
     try:
         return str(Path(path).expanduser().resolve())
-    except OSError:
+    except (OSError, RuntimeError):
+        # expanduser raises RuntimeError for an unresolvable ~user; resolve can too
+        # on symlink loops — canonicalization degrades to the raw path, never errors.
         return path
 
 
@@ -106,8 +108,15 @@ class Service:
         key = normalize_project_key(key)
         if not name or not name.strip():
             raise ValidationError("Project name is required.")
-        # Excluding this key keeps a same-key retry on the documented 409-duplicate
-        # path (insert_project) instead of tripping over its own repo claim.
+        # The duplicate-key check runs BEFORE the repo claim so any create against an
+        # existing key is the documented 409 — even when the request also names a repo
+        # owned by a different project. insert_project's atomic check stays the backstop.
+        try:
+            self.get_project(key)
+        except NotFoundError:
+            pass
+        else:
+            raise DuplicateError(f"Project {key!r} already exists.")
         self._require_repo_unclaimed(repo, exclude_key=key)
         now = _now()
         project = Project(

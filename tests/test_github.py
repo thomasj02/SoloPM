@@ -1422,14 +1422,29 @@ def test_shared_remote_identity_declines_discovery(tmp_path):
 
 
 def test_recreating_the_same_project_is_duplicate_not_repo_conflict(tmp_path):
-    # [gpt-review r9 P2] Retrying POST /api/projects with the same key+repo must keep
-    # the documented 409 duplicate — not trip over its own repo claim as a 400.
+    # [gpt-review r9/r12 P2] Any create with an EXISTING key is the documented 409
+    # duplicate — including when the request also names a repo owned by a DIFFERENT
+    # project (the key check must precede the repo-claim scan).
     from solopm.core.errors import DuplicateError
 
     gh = FakeGitHub()
     svc = _svc(tmp_path, github=gh, repo="/tmp/repo")
     with pytest.raises(DuplicateError):
         svc.add_project(key="SOLO", name="SoloPM", repo="/tmp/repo", master="main")
+    svc.add_project(key="D", name="D", repo="/tmp/other", master="main")
+    with pytest.raises(DuplicateError):  # existing key + someone else's repo → still 409
+        svc.add_project(key="SOLO", name="SoloPM", repo="/tmp/other", master="main")
+
+
+def test_unresolvable_home_in_repo_path_does_not_crash(tmp_path):
+    # [gpt-review r12 P2] Path('~nouser').expanduser() raises RuntimeError, which an
+    # OSError-only net misses — canonicalization must fall back to the raw path.
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh, repo="/tmp/repo")
+    created = svc.add_project(
+        key="T", name="T", repo="~no_such_user_xyz_12345/repo", master="main"
+    )
+    assert created.repo == "~no_such_user_xyz_12345/repo"
 
 
 def test_legacy_shared_repo_declines_discovery(tmp_path):
