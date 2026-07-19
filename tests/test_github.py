@@ -1520,6 +1520,38 @@ def test_convention_collision_includes_stripped_bare_aliases():
     assert Service._convention_pattern("x{seq:c}{slug}", "SOLO", 45, [47]) is None
 
 
+def test_sibling_convention_can_compromise_the_default_matcher(tmp_path):
+    # [gpt-review r7 P1] With {key}-{seq:x}-{slug}, ticket 16's LEGITIMATE convention
+    # head is 'SOLO-10-fix' — which is ticket 10's default <ID>- shape. Ticket 10's
+    # branchless done must not adopt it via the default matcher: when a sibling's
+    # convention rendering overlaps this ticket's default patterns, discovery is
+    # ambiguous for this ticket and must decline with a note.
+    gh = FakeGitHub(open_prs=[_pr(66, "SOLO-10-fix")])
+    svc = _svc(tmp_path, github=gh)
+    svc.update_project("SOLO", {"branch_convention": "{key}-{seq:x}-{slug}"})
+    for _ in range(9):  # SOLO-1..9
+        svc.create_ticket(project="SOLO", title="filler")
+    mine = svc.create_ticket(project="SOLO", title="mine")  # SOLO-10
+    for _ in range(6):  # SOLO-11..16 — 16 renders hex '10'
+        svc.create_ticket(project="SOLO", title="filler")
+    svc.move_ticket(mine.id, "in-progress")
+    svc.move_ticket(mine.id, "in-ai-review", actor="claude")
+    svc.move_ticket(mine.id, "in-human-review", actor="codex")
+    done = svc.move_ticket(mine.id, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    assert "no PR was merged" in _comments(svc, mine.id)[0]
+
+
+def test_absurd_format_widths_are_rejected_without_rendering():
+    # [gpt-review r7 P2] {seq:1000000000} would allocate ~1GB per render (times
+    # siblings) — the spec is rejected before any formatting happens.
+    from solopm.core.service import Service
+
+    assert Service._convention_pattern("{seq:1000000000}-{slug}", "SOLO", 1, []) is None
+    assert Service._convention_pattern("{key}-{seq:09}-{slug}", "SOLO", 1, []) is not None
+
+
 def test_unrenderable_convention_does_not_crash_discovery(tmp_path):
     # [gpt-review r1 P2] Arbitrary stored conventions can make str.format raise
     # AttributeError/TypeError ({key.foo}, {seq[foo]}) — discovery must degrade to the

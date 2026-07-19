@@ -8,6 +8,8 @@ parity, as the product brief requires.
 from __future__ import annotations
 
 import json
+import re
+import string
 from datetime import datetime, timezone
 
 from . import workflow
@@ -654,11 +656,20 @@ class Service:
                 ]
                 claimed_numbers = {t.pr_number for t in siblings if t.pr_number is not None}
                 claimed_heads = {t.branch.lower() for t in siblings if t.branch}
+                sibling_seqs = [t.seq for t in siblings]
+                # When a sibling's convention rendering overlaps THIS ticket's default
+                # <ID>[-slug] shape, even the default matcher can't tell whose head a
+                # match is — decline discovery for this ticket entirely.
+                if self._default_shape_compromised(
+                    project.branch_convention, ticket.project, ticket.seq, sibling_seqs
+                ):
+                    return {}, self._nothing_note(
+                        to_state,
+                        "the project's branch convention makes PR ownership ambiguous "
+                        "for this ticket — resolve manually",
+                    )
                 pattern = self._convention_pattern(
-                    project.branch_convention,
-                    ticket.project,
-                    ticket.seq,
-                    [t.seq for t in siblings],
+                    project.branch_convention, ticket.project, ticket.seq, sibling_seqs
                 )
                 matches = [
                     p for p in open_prs
@@ -750,36 +761,68 @@ class Service:
         ticket's — an exotic format spec can render the same text for two different
         sequences (``{seq!s:.1}`` yields ``1`` for both 1 and 10), so the caller passes
         ``other_seqs`` and any of them rendering this ticket's text rejects it."""
-        def parse(r: str) -> tuple[str, bool] | None:
-            if "\x00" in r:
-                head_part, tail = r.split("\x00", 1)
-                if head_part and not tail and not head_part[-1].isalnum():
-                    return head_part, True
-                return None
-            return r, False
-
-        try:
-            mine = parse(convention.format(key=key, seq=seq, slug="\x00"))
-            if mine is None:
-                return None
-            # The collision candidates are everything any OTHER ticket's matcher would
-            # accept: its convention rendering AND its default `<ID>[-slug]` shapes —
-            # {key}-{seq:x}-{slug} renders ticket 16's prefix as 'SOLO-10-', which is
-            # ticket 10's default shape even though ticket 10's convention rendering
-            # ('SOLO-a-') looks nothing like it. The seq+1 probe (convention only)
-            # rejects degenerate conventions before a colliding ticket even exists.
-            candidates = [parse(convention.format(key=key, seq=seq + 1, slug="\x00"))]
-            for s in other_seqs:
-                candidates.append(parse(convention.format(key=key, seq=s, slug="\x00")))
-                candidates.append((f"{key}-{s}-", True))  # their default prefix shape
-                candidates.append((f"{key}-{s}", False))  # their default bare head
-        except (KeyError, IndexError, ValueError, AttributeError, TypeError, OverflowError):
+        mine = Service._render_convention(convention, key, seq)
+        if mine is None:
             return None
+        # The collision candidates are everything any OTHER ticket's matcher would
+        # accept: its convention rendering AND its default `<ID>[-slug]` shapes —
+        # {key}-{seq:x}-{slug} renders ticket 16's prefix as 'SOLO-10-', which is
+        # ticket 10's default shape even though ticket 10's convention rendering
+        # ('SOLO-a-') looks nothing like it. The seq+1 probe (convention only)
+        # rejects degenerate conventions before a colliding ticket even exists.
+        candidates: list[tuple[str, bool] | None] = [
+            Service._render_convention(convention, key, seq + 1)
+        ]
+        for s in other_seqs:
+            candidates.append(Service._render_convention(convention, key, s))
+            candidates.append((f"{key}-{s}-", True))  # their default prefix shape
+            candidates.append((f"{key}-{s}", False))  # their default bare head
         for other in candidates:
-            # An unparseable candidate (None) accepts nothing — no overlap possible.
+            # An unrenderable candidate (None) accepts nothing — no overlap possible.
             if other is not None and Service._patterns_collide(mine, other):
                 return None
         return mine
+
+    @staticmethod
+    def _render_convention(convention: str, key: str, seq: int) -> tuple[str, bool] | None:
+        """Render one ticket's convention head pattern, or None when it can't be
+        reasoned about safely: unrenderable (settings accept arbitrary strings and
+        str.format can raise almost anything), absurd width/precision specs (a
+        {seq:1000000000} would allocate ~1GB before any exception fires), oversized
+        output, a non-tail ``{slug}``, or a prefix without a separator boundary."""
+        try:
+            for _lit, _field, spec, _conv in string.Formatter().parse(convention):
+                if spec and any(int(n) > 64 for n in re.findall(r"\d+", spec)):
+                    return None
+            rendered = convention.format(key=key, seq=seq, slug="\x00")
+        except (KeyError, IndexError, ValueError, AttributeError, TypeError, OverflowError):
+            return None
+        if len(rendered) > 300:
+            return None
+        if "\x00" in rendered:
+            prefix, tail = rendered.split("\x00", 1)
+            if prefix and not tail and not prefix[-1].isalnum():
+                return prefix, True
+            return None
+        return rendered, False
+
+    @staticmethod
+    def _default_shape_compromised(
+        convention: str, key: str, seq: int, other_seqs: "list[int] | tuple[int, ...]"
+    ) -> bool:
+        """True when a SIBLING's convention rendering overlaps THIS ticket's default
+        ``<ID>[-slug]`` patterns — the default matcher itself is then unsafe:
+        {key}-{seq:x}-{slug} makes ticket 16 legitimately branch as ``SOLO-10-…``,
+        which is exactly ticket 10's default shape, so ticket 10's discovery must
+        decline rather than adopt what may be ticket 16's PR."""
+        my_defaults: list[tuple[str, bool]] = [(f"{key}-{seq}-", True), (f"{key}-{seq}", False)]
+        for s in other_seqs:
+            theirs = Service._render_convention(convention, key, s)
+            if theirs is None:
+                continue
+            if any(Service._patterns_collide(d, theirs) for d in my_defaults):
+                return True
+        return False
 
     @staticmethod
     def _patterns_collide(mine: tuple[str, bool], other: tuple[str, bool]) -> bool:
