@@ -1380,6 +1380,35 @@ def test_convention_prefix_without_separator_boundary_is_unusable(tmp_path):
     assert done2.pr_state == "merged"
 
 
+def test_seqless_convention_cannot_identify_a_ticket(tmp_path):
+    # [gpt-review r3 P1] A convention that never renders {seq} produces the SAME pattern
+    # for every ticket — feature/{slug} matches any feature/* PR, {key}/{slug} matches
+    # any SOLO/* PR, and the seq-less exact form release/{key} matches for every ticket.
+    # None of these can identify the ticket; all are unusable for discovery.
+    cases = [
+        ("feature/{slug}", "feature/whatever"),
+        ("{key}/{slug}", "SOLO/other-work"),
+        ("release/{key}", "release/SOLO"),
+    ]
+    for i, (conv, head) in enumerate(cases):
+        gh = FakeGitHub(open_prs=[_pr(66, head)])
+        svc = _svc(tmp_path / f"seqless{i}", github=gh)
+        svc.update_project("SOLO", {"branch_convention": conv})
+        tid = _to_human_review_no_branch(svc)
+        done = svc.move_ticket(tid, "done", actor="human")
+        assert not any(c[0] == "merge" for c in gh.calls), conv
+        assert done.pr_number is None, conv
+
+    # And the ticket's own default-shape PR is still found under such a convention.
+    gh2 = FakeGitHub(open_prs=[_pr(9, "SOLO-1-x")])
+    svc2 = _svc(tmp_path / "seqless-own", github=gh2)
+    svc2.update_project("SOLO", {"branch_convention": "feature/{slug}"})
+    tid2 = _to_human_review_no_branch(svc2)
+    done2 = svc2.move_ticket(tid2, "done", actor="human")
+    assert ("merge", 9) in gh2.calls
+    assert done2.pr_state == "merged"
+
+
 def test_unrenderable_convention_does_not_crash_discovery(tmp_path):
     # [gpt-review r1 P2] Arbitrary stored conventions can make str.format raise
     # AttributeError/TypeError ({key.foo}, {seq[foo]}) — discovery must degrade to the

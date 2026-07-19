@@ -705,16 +705,27 @@ class Service:
         arbitrary strings, and str.format can raise almost anything for them);
         ``{slug}`` isn't the final field (splitting ``feature/{slug}/{key}-{seq}`` at
         the slug would leave the generic ``feature/`` prefix, matching other tickets);
-        or the prefix lacks a separator boundary — ``{key}-{seq}{slug}`` renders
-        ``SOLO-1``, which startswith-matches SOLO-10's branches."""
+        the prefix lacks a separator boundary — ``{key}-{seq}{slug}`` renders
+        ``SOLO-1``, which startswith-matches SOLO-10's branches; or the pattern does
+        not depend on ``{seq}`` at all (``feature/{slug}``, ``release/{key}``) and so
+        is identical for every ticket in the project. The seq-dependence check renders
+        twice with different sequence numbers and requires the match text to differ."""
         try:
             rendered = convention.format(key=key, seq=seq, slug="\x00")
+            probe = convention.format(key=key, seq=seq + 1, slug="\x00")
         except (KeyError, IndexError, ValueError, AttributeError, TypeError):
             return None
         if "\x00" in rendered:
             prefix, tail = rendered.split("\x00", 1)
-            if prefix and not tail and not prefix[-1].isalnum():
+            if (
+                prefix
+                and not tail
+                and not prefix[-1].isalnum()
+                and prefix != probe.split("\x00", 1)[0]
+            ):
                 return prefix, True
+            return None
+        if rendered == probe:
             return None
         return rendered, False
 
