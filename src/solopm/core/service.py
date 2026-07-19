@@ -1760,11 +1760,21 @@ class Service:
         parts: list[str] = []
         if proj.review_prompt.strip():
             parts.append(proj.review_prompt.strip())
-        if active:
-            checklist = "\n".join(f"- {i.text}" for i in active)
+        # ACCEPTED-RISK items are adjudications, not checks: putting them under the
+        # report-per-item checklist would instruct the reviewer to report the very
+        # findings the convention says not to re-raise (SOLO-28).
+        checks = [i for i in active if not i.text.lstrip().upper().startswith("ACCEPTED-RISK:")]
+        adjudicated = [i for i in active if i.text.lstrip().upper().startswith("ACCEPTED-RISK:")]
+        if checks:
             parts.append(
                 "Project review checklist (accumulated review memory — verify each and "
-                "report per item):\n" + checklist
+                "report per item):\n" + "\n".join(f"- {i.text}" for i in checks)
+            )
+        if adjudicated:
+            parts.append(
+                "Adjudicated risks (explicitly ACCEPTED by the project owner — do NOT "
+                "re-raise these unless the change introduces genuinely new evidence that "
+                "alters the risk):\n" + "\n".join(f"- {i.text}" for i in adjudicated)
             )
         return "\n\n".join(parts)
 
