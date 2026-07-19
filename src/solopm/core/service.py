@@ -642,21 +642,30 @@ class Service:
                 # Only same-repo PRs targeting the project's master are candidates: a
                 # different base would merge into THAT branch while the note claims
                 # master, and a fork PR's bare head name is a ref in the fork — branch
-                # cleanup could delete an unrelated same-named origin ref. The convention
-                # pattern is computed once, collision-checked against the project's other
-                # ticket sequences (an exotic format spec can render the same text for
-                # two different seqs — {seq!s:.1} yields '1' for both 1 and 10).
-                other_seqs = [
-                    t.seq for t in self.list_tickets(project=ticket.project)
+                # cleanup could delete an unrelated same-named origin ref. A PR whose
+                # number or head is already recorded on ANOTHER ticket is that ticket's
+                # (a branch override can legally record any name). The convention
+                # pattern is computed once, collision-checked against the project's
+                # other ticket sequences (an exotic format spec can render the same
+                # text for two different seqs — {seq!s:.1} yields '1' for both 1 and 10).
+                siblings = [
+                    t for t in self.list_tickets(project=ticket.project)
                     if t.id != ticket.id
                 ]
+                claimed_numbers = {t.pr_number for t in siblings if t.pr_number is not None}
+                claimed_heads = {t.branch.lower() for t in siblings if t.branch}
                 pattern = self._convention_pattern(
-                    project.branch_convention, ticket.project, ticket.seq, other_seqs
+                    project.branch_convention,
+                    ticket.project,
+                    ticket.seq,
+                    [t.seq for t in siblings],
                 )
                 matches = [
                     p for p in open_prs
                     if not p.cross_repo
                     and p.base == base
+                    and p.number not in claimed_numbers
+                    and p.head.lower() not in claimed_heads
                     and self._head_names_ticket(p.head, ticket, pattern)
                 ]
                 if not matches:
@@ -741,33 +750,56 @@ class Service:
         ticket's — an exotic format spec can render the same text for two different
         sequences (``{seq!s:.1}`` yields ``1`` for both 1 and 10), so the caller passes
         ``other_seqs`` and any of them rendering this ticket's text rejects it."""
+        def parse(r: str) -> tuple[str, bool] | None:
+            if "\x00" in r:
+                head_part, tail = r.split("\x00", 1)
+                if head_part and not tail and not head_part[-1].isalnum():
+                    return head_part, True
+                return None
+            return r, False
+
         try:
-            rendered = convention.format(key=key, seq=seq, slug="\x00")
-            probe = convention.format(key=key, seq=seq + 1, slug="\x00")
-            others = [convention.format(key=key, seq=s, slug="\x00") for s in other_seqs]
+            mine = parse(convention.format(key=key, seq=seq, slug="\x00"))
+            if mine is None:
+                return None
+            # The collision candidates are everything any OTHER ticket's matcher would
+            # accept: its convention rendering AND its default `<ID>[-slug]` shapes —
+            # {key}-{seq:x}-{slug} renders ticket 16's prefix as 'SOLO-10-', which is
+            # ticket 10's default shape even though ticket 10's convention rendering
+            # ('SOLO-a-') looks nothing like it. The seq+1 probe (convention only)
+            # rejects degenerate conventions before a colliding ticket even exists.
+            candidates = [parse(convention.format(key=key, seq=seq + 1, slug="\x00"))]
+            for s in other_seqs:
+                candidates.append(parse(convention.format(key=key, seq=s, slug="\x00")))
+                candidates.append((f"{key}-{s}-", True))  # their default prefix shape
+                candidates.append((f"{key}-{s}", False))  # their default bare head
         except (KeyError, IndexError, ValueError, AttributeError, TypeError, OverflowError):
             return None
-        if "\x00" in rendered:
-            prefix, tail = rendered.split("\x00", 1)
-            if not (prefix and not tail and not prefix[-1].isalnum()):
+        for other in candidates:
+            # An unparseable candidate (None) accepts nothing — no overlap possible.
+            if other is not None and Service._patterns_collide(mine, other):
                 return None
-            # Collisions are judged with the MATCHER's semantics (case-insensitive
-            # startswith), not plain equality: {key:-<{seq}}{slug} renders 'SOLO-' for
-            # seq 5 and 'SOLO--' for seq 6 — unequal, yet either prefix accepts heads
-            # generated from the other. Two prefixes overlap when one is a prefix of
-            # the other; the seq+1 probe is checked the same way, so degenerate
-            # conventions are rejected even before a colliding ticket exists.
-            mine = prefix.lower()
-            candidates = [probe] + others
-            for other in candidates:
-                theirs = other.split("\x00", 1)[0].lower()
-                if mine.startswith(theirs) or theirs.startswith(mine):
-                    return None
-            return prefix, True
-        mine = rendered.lower()
-        if mine == probe.lower() or any(mine == o.lower() for o in others):
-            return None
-        return rendered, False
+        return mine
+
+    @staticmethod
+    def _patterns_collide(mine: tuple[str, bool], other: tuple[str, bool]) -> bool:
+        """Matcher-faithful overlap between two head patterns: True when some head both
+        would accept exists. Case-insensitive like the matcher, and including the
+        stripped bare-head alias a prefix also accepts — 'x-' and 'x/' don't prefix
+        each other, yet both accept the bare head 'x'."""
+        a, a_prefix = mine[0].lower(), mine[1]
+        b, b_prefix = other[0].lower(), other[1]
+        if a_prefix and b_prefix:
+            return (
+                a.startswith(b)
+                or b.startswith(a)
+                or a.rstrip("-_/") == b.rstrip("-_/")
+            )
+        if a_prefix:
+            return b.startswith(a) or b == a.rstrip("-_/")
+        if b_prefix:
+            return a.startswith(b) or a == b.rstrip("-_/")
+        return a == b
 
     @staticmethod
     def _head_names_ticket(

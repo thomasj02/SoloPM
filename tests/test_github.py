@@ -1480,6 +1480,46 @@ def test_formatting_overflow_is_an_unusable_convention():
     assert Service._convention_pattern("{seq:c}-{slug}", "SOLO", 0x110000) is None
 
 
+def test_discovery_excludes_prs_recorded_on_another_ticket(tmp_path):
+    # [gpt-review r6 P1] A head/PR already recorded on another ticket is that ticket's —
+    # a branchless done must not re-adopt it, even when the name matches.
+    gh = FakeGitHub(open_prs=[_pr(17, "SOLO-1-fix")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)  # SOLO-1, nothing recorded
+    other = svc.create_ticket(project="SOLO", title="claimer")  # SOLO-2
+    # A branch override legally records the SOLO-1-shaped branch on SOLO-2.
+    svc.move_ticket(other.id, "in-progress", branch="SOLO-1-fix", actor="claude")
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    assert "no PR was merged" in _comments(svc, tid)[0]
+
+
+def test_convention_collision_includes_default_head_shapes():
+    # [gpt-review r6 P1] {key}-{seq:x}-{slug} renders ticket 16's prefix as 'SOLO-10-',
+    # which IS ticket 10's default <ID>- shape — the collision check must compare
+    # against other tickets' default patterns, not just their convention renderings.
+    from solopm.core.service import Service
+
+    assert (
+        Service._convention_pattern("{key}-{seq:x}-{slug}", "SOLO", 16, [10]) is None
+    )
+    # Without ticket 10 in the project there is nothing to collide with.
+    assert (
+        Service._convention_pattern("{key}-{seq:x}-{slug}", "SOLO", 16, [11, 12])
+        is not None
+    )
+
+
+def test_convention_collision_includes_stripped_bare_aliases():
+    # [gpt-review r6 P2] x{seq:c}{slug} gives seq 45 the prefix 'x-' and seq 47 'x/';
+    # neither prefixes the other, but BOTH accept the bare head 'x' via the stripped
+    # alias — the collision check must include those aliases.
+    from solopm.core.service import Service
+
+    assert Service._convention_pattern("x{seq:c}{slug}", "SOLO", 45, [47]) is None
+
+
 def test_unrenderable_convention_does_not_crash_discovery(tmp_path):
     # [gpt-review r1 P2] Arbitrary stored conventions can make str.format raise
     # AttributeError/TypeError ({key.foo}, {seq[foo]}) — discovery must degrade to the
