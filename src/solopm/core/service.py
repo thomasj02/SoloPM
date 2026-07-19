@@ -745,20 +745,27 @@ class Service:
             rendered = convention.format(key=key, seq=seq, slug="\x00")
             probe = convention.format(key=key, seq=seq + 1, slug="\x00")
             others = [convention.format(key=key, seq=s, slug="\x00") for s in other_seqs]
-        except (KeyError, IndexError, ValueError, AttributeError, TypeError):
+        except (KeyError, IndexError, ValueError, AttributeError, TypeError, OverflowError):
             return None
         if "\x00" in rendered:
             prefix, tail = rendered.split("\x00", 1)
-            if (
-                prefix
-                and not tail
-                and not prefix[-1].isalnum()
-                and prefix != probe.split("\x00", 1)[0]
-                and all(prefix != o.split("\x00", 1)[0] for o in others)
-            ):
-                return prefix, True
-            return None
-        if rendered == probe or rendered in others:
+            if not (prefix and not tail and not prefix[-1].isalnum()):
+                return None
+            # Collisions are judged with the MATCHER's semantics (case-insensitive
+            # startswith), not plain equality: {key:-<{seq}}{slug} renders 'SOLO-' for
+            # seq 5 and 'SOLO--' for seq 6 — unequal, yet either prefix accepts heads
+            # generated from the other. Two prefixes overlap when one is a prefix of
+            # the other; the seq+1 probe is checked the same way, so degenerate
+            # conventions are rejected even before a colliding ticket exists.
+            mine = prefix.lower()
+            candidates = [probe] + others
+            for other in candidates:
+                theirs = other.split("\x00", 1)[0].lower()
+                if mine.startswith(theirs) or theirs.startswith(mine):
+                    return None
+            return prefix, True
+        mine = rendered.lower()
+        if mine == probe.lower() or any(mine == o.lower() for o in others):
             return None
         return rendered, False
 

@@ -1451,6 +1451,35 @@ def test_seqless_convention_cannot_identify_a_ticket(tmp_path):
     assert done2.pr_state == "merged"
 
 
+def test_overlapping_prefix_collision_uses_matcher_semantics(tmp_path):
+    # [gpt-review r5 P1] {key:-<{seq}}{slug} renders 'SOLO-' for seq 5 and 'SOLO--' for
+    # seq 6 — unequal, so an exact-equality collision check approves the pattern, yet
+    # the matcher is case-insensitive startswith, so SOLO-5's done would adopt SOLO-6's
+    # sole 'SOLO--fix' PR. Collisions must be judged with the matcher's own semantics:
+    # two prefixes collide when either is a (case-insensitive) prefix of the other.
+    gh = FakeGitHub(open_prs=[_pr(66, "SOLO--fix")])
+    svc = _svc(tmp_path, github=gh)
+    svc.update_project("SOLO", {"branch_convention": "{key:-<{seq}}{slug}"})
+    for _ in range(4):  # SOLO-1..4 fillers
+        svc.create_ticket(project="SOLO", title="filler")
+    t = svc.create_ticket(project="SOLO", title="mine")  # SOLO-5 → prefix 'SOLO-'
+    svc.create_ticket(project="SOLO", title="other")  # SOLO-6 → prefix 'SOLO--'
+    svc.move_ticket(t.id, "in-progress")
+    svc.move_ticket(t.id, "in-ai-review", actor="claude")
+    svc.move_ticket(t.id, "in-human-review", actor="codex")
+    done = svc.move_ticket(t.id, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+
+
+def test_formatting_overflow_is_an_unusable_convention():
+    # [gpt-review r5 P2] {seq:c} overflows str.format past the max code point —
+    # another render failure that must mean "unusable", never an escaped exception.
+    from solopm.core.service import Service
+
+    assert Service._convention_pattern("{seq:c}-{slug}", "SOLO", 0x110000) is None
+
+
 def test_unrenderable_convention_does_not_crash_discovery(tmp_path):
     # [gpt-review r1 P2] Arbitrary stored conventions can make str.format raise
     # AttributeError/TypeError ({key.foo}, {seq[foo]}) — discovery must degrade to the
