@@ -702,16 +702,20 @@ class Service:
         slug and matching is by prefix; without one only an exact head can match (there
         is no safe boundary — ``release/SOLO12`` must not match SOLO-1). ``None`` when
         the convention is unusable for discovery: it can't be rendered (settings accept
-        arbitrary strings, and str.format can raise almost anything for them), or
-        ``{slug}`` isn't the final field — splitting ``feature/{slug}/{key}-{seq}`` at
-        the slug would leave the generic ``feature/`` prefix, matching other tickets."""
+        arbitrary strings, and str.format can raise almost anything for them);
+        ``{slug}`` isn't the final field (splitting ``feature/{slug}/{key}-{seq}`` at
+        the slug would leave the generic ``feature/`` prefix, matching other tickets);
+        or the prefix lacks a separator boundary — ``{key}-{seq}{slug}`` renders
+        ``SOLO-1``, which startswith-matches SOLO-10's branches."""
         try:
             rendered = convention.format(key=key, seq=seq, slug="\x00")
         except (KeyError, IndexError, ValueError, AttributeError, TypeError):
             return None
         if "\x00" in rendered:
             prefix, tail = rendered.split("\x00", 1)
-            return (prefix, True) if prefix and not tail else None
+            if prefix and not tail and not prefix[-1].isalnum():
+                return prefix, True
+            return None
         return rendered, False
 
     @staticmethod

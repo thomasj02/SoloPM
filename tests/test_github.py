@@ -1357,6 +1357,29 @@ def test_non_tail_slug_convention_is_unusable_for_discovery(tmp_path):
     assert ("merge", 9) in gh2.calls  # default id-shape matching is unaffected
 
 
+def test_convention_prefix_without_separator_boundary_is_unusable(tmp_path):
+    # [gpt-review r2 P1] {key}-{seq}{slug} renders the prefix 'SOLO-1', which
+    # startswith-matches SOLO-10's branch — a sole 'SOLO-10-fix' PR would be merged for
+    # SOLO-1 with the ambiguity guard blind. A prefix is only safe when it ends in a
+    # separator; without one the convention is unusable (default matching still works).
+    gh = FakeGitHub(open_prs=[_pr(10, "SOLO-10-fix")])
+    svc = _svc(tmp_path, github=gh)
+    svc.update_project("SOLO", {"branch_convention": "{key}-{seq}{slug}"})
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+
+    # The ticket's own PR is still found via the default <ID>[-slug] shape.
+    gh2 = FakeGitHub(open_prs=[_pr(9, "SOLO-1-fix")])
+    svc2 = _svc(tmp_path / "own", github=gh2)
+    svc2.update_project("SOLO", {"branch_convention": "{key}-{seq}{slug}"})
+    tid2 = _to_human_review_no_branch(svc2)
+    done2 = svc2.move_ticket(tid2, "done", actor="human")
+    assert ("merge", 9) in gh2.calls
+    assert done2.pr_state == "merged"
+
+
 def test_unrenderable_convention_does_not_crash_discovery(tmp_path):
     # [gpt-review r1 P2] Arbitrary stored conventions can make str.format raise
     # AttributeError/TypeError ({key.foo}, {seq[foo]}) — discovery must degrade to the
