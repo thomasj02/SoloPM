@@ -612,6 +612,13 @@ class Service:
             # recorded at all, fall back to convention-based discovery (SOLO-27). Either
             # way, when nothing ends up merged/closed the caller gets a note — a repo
             # project with automation on must never skip silently (AW-62).
+            #
+            # Exception: cancelling a ticket straight out of planning (backlog/todo)
+            # with nothing recorded is routine triage of ideas that never had work —
+            # probing GitHub there could close a coincidentally-named in-flight PR,
+            # and a note per cancel is pure noise. (done can't arrive from planning.)
+            if ticket.state in ("backlog", "todo") and ticket.pr_number is None and not branch:
+                return {}, None
             extra: dict = {}
             number = ticket.pr_number
             url = ticket.pr_url
@@ -625,7 +632,8 @@ class Service:
                 extra = {"pr_number": found.number, "pr_url": found.url}
             elif number is None:
                 # The implementer drove `gh` by hand and never recorded a branch: an open
-                # PR whose head is `<ID>` or `<ID>-<slug>` is this ticket's. Failing to
+                # PR whose head names this ticket — the default `<ID>[-slug]` shape or the
+                # project's configured branch convention — is this ticket's. Failing to
                 # LOOK must not block the (human-driven) move — note it instead.
                 try:
                     open_prs = self.github.list_open_prs(repo)
@@ -633,13 +641,13 @@ class Service:
                     return {}, self._nothing_note(to_state, f"PR discovery failed ({exc})")
                 matches = [
                     p for p in open_prs
-                    if p.head == ticket.id or p.head.startswith(ticket.id + "-")
+                    if self._head_names_ticket(p.head, ticket, project.branch_convention)
                 ]
                 if not matches:
                     return {}, self._nothing_note(
                         to_state,
-                        "no PR is recorded on this ticket and no open PR matches its "
-                        "branch convention",
+                        "no PR is recorded on this ticket and no open PR head matches "
+                        f"{self._searched_heads(ticket, project.branch_convention)}",
                     )
                 if len(matches) > 1:
                     heads = ", ".join(f"#{p.number} (`{p.head}`)" for p in matches)
@@ -680,6 +688,52 @@ class Service:
         but had nothing to act on — say so on the card instead of looking merged."""
         action = "merged" if to_state == "done" else "closed"
         return f"GitHub automation: no PR was {action} — {reason}."
+
+    @staticmethod
+    def _convention_pattern(convention: str, key: str, seq: int) -> tuple[str, bool] | None:
+        """The head pattern a project's branch convention yields for one ticket:
+        ``(text, is_prefix)``. With a ``{slug}`` tail the text is everything before the
+        slug and matching is by prefix; without one only an exact head can match (there
+        is no safe boundary — ``release/SOLO12`` must not match SOLO-1). ``None`` when
+        the convention can't be rendered (unknown placeholders) or yields no anchor
+        before the slug (e.g. ``{slug}-{key}`` — a leading wildcard matches anything)."""
+        try:
+            rendered = convention.format(key=key, seq=seq, slug="\x00")
+        except (KeyError, IndexError, ValueError):
+            return None
+        if "\x00" in rendered:
+            prefix = rendered.split("\x00", 1)[0]
+            return (prefix, True) if prefix else None
+        return rendered, False
+
+    @staticmethod
+    def _head_names_ticket(head: str, ticket: Ticket, convention: str) -> bool:
+        """True when an open PR's head branch names this ticket — the default
+        ``<ID>[-slug]`` shape or the project's configured convention. Compared
+        case-insensitively: hand-made branches are routinely lowercase while ticket
+        ids are uppercase, and the caller's ambiguity guard covers collisions."""
+        h = head.lower()
+        tid = ticket.id.lower()
+        if h == tid or h.startswith(tid + "-"):
+            return True
+        pattern = Service._convention_pattern(convention, ticket.project, ticket.seq)
+        if pattern is None:
+            return False
+        text, is_prefix = pattern[0].lower(), pattern[1]
+        if is_prefix:
+            return h.startswith(text) or h == text.rstrip("-_/")
+        return h == text
+
+    @staticmethod
+    def _searched_heads(ticket: Ticket, convention: str) -> str:
+        """Spell out exactly which head shapes discovery searched, for the note."""
+        shapes = [f"`{ticket.id}[-…]`"]
+        pattern = Service._convention_pattern(convention, ticket.project, ticket.seq)
+        if pattern is not None:
+            text, is_prefix = pattern
+            if not (is_prefix and text.lower() == f"{ticket.id.lower()}-"):
+                shapes.append(f"`{text}…`" if is_prefix else f"`{text}`")
+        return " or ".join(shapes)
 
     @staticmethod
     def _branch_cleanup_note(branch: str, branch_deleted: bool) -> str:

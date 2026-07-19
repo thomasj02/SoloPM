@@ -204,20 +204,34 @@ class GitHub:
         data = json.loads(proc.stdout)
         return PR(number=int(data["number"]), url=data["url"], state=str(data["state"]).lower())
 
+    # A listing that FILLS this limit may be truncated (gh sorts newest-first, and the
+    # match is typically old) — matching against a truncated view could bypass the
+    # caller's ambiguity guard, so list_open_prs refuses instead of guessing.
+    _OPEN_PR_LIMIT = 1000
+
     def list_open_prs(self, repo: str) -> list[OpenPR]:
         """All open PRs with their head branches, for convention-based discovery
-        (SOLO-27). Raises :class:`GitHubError` on any gh failure — the caller decides
-        whether discovery is best-effort."""
+        (SOLO-27). Raises :class:`GitHubError` on any gh failure, unparseable output,
+        or a possibly-truncated listing — the caller decides whether that's fatal."""
         proc = self._run(
             ["gh", "pr", "list", "--state", "open",
-             "--json", "number,url,headRefName", "--limit", "200"],
+             "--json", "number,url,headRefName", "--limit", str(self._OPEN_PR_LIMIT)],
             cwd=repo,
         )
-        data = json.loads(proc.stdout or "[]")
-        return [
-            OpenPR(number=int(d["number"]), url=d["url"], head=str(d["headRefName"]))
-            for d in data
-        ]
+        try:
+            data = json.loads(proc.stdout or "[]")
+            prs = [
+                OpenPR(number=int(d["number"]), url=str(d["url"]), head=str(d["headRefName"]))
+                for d in data
+            ]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise GitHubError(f"Could not parse `gh pr list` output: {exc}") from exc
+        if len(prs) >= self._OPEN_PR_LIMIT:
+            raise GitHubError(
+                f"{self._OPEN_PR_LIMIT}+ open PRs — the listing may be truncated, "
+                "refusing to match against an incomplete view."
+            )
+        return prs
 
     def open_or_refresh_pr(self, repo: str, branch: str, base: str, title: str, body: str) -> PR:
         existing = self.find_pr(repo, branch)

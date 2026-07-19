@@ -1113,7 +1113,8 @@ def test_recorded_pr_skips_discovery(tmp_path):
 
 
 def test_real_client_list_open_prs_parses_gh_output(monkeypatch):
-    # The real GitHub.list_open_prs: correct gh invocation + JSON parsing.
+    # The real GitHub.list_open_prs: exact gh invocation (state filter, field list,
+    # limit — a wrong flag silently changes discovery semantics) + JSON parsing.
     from solopm.core.github import GitHub
 
     captured = {}
@@ -1137,6 +1138,158 @@ def test_real_client_list_open_prs_parses_gh_output(monkeypatch):
     monkeypatch.setattr(gh, "_run", fake_run)
     prs = gh.list_open_prs("/some/repo")
     assert captured["cwd"] == "/some/repo"
-    assert "pr" in captured["args"] and "list" in captured["args"]
+    assert captured["args"] == [
+        "gh", "pr", "list", "--state", "open",
+        "--json", "number,url,headRefName", "--limit", "1000",
+    ]
     assert [(p.number, p.head) for p in prs] == [(46, "AW-62-adaptive"), (47, "AW-63-doc")]
     assert prs[0].url.endswith("/pull/46")
+
+
+def test_real_client_list_open_prs_wraps_parse_failures(monkeypatch):
+    # [SOLO-27 c3] gh exiting 0 with non-JSON stdout (wrapper banner, changed fields)
+    # must surface as GitHubError so the caller's best-effort contract holds.
+    from solopm.core.github import GitHub
+
+    gh = GitHub()
+
+    def fake_run_garbage(args, cwd, *, check=True):
+        class Proc:
+            returncode = 0
+            stdout = "A new gh release is available!\n[]"
+            stderr = ""
+        return Proc()
+
+    monkeypatch.setattr(gh, "_run", fake_run_garbage)
+    with pytest.raises(GitHubError):
+        gh.list_open_prs("/some/repo")
+
+    def fake_run_missing_field(args, cwd, *, check=True):
+        class Proc:
+            returncode = 0
+            stdout = '[{"number": 1, "url": "u"}]'  # headRefName missing
+            stderr = ""
+        return Proc()
+
+    monkeypatch.setattr(gh, "_run", fake_run_missing_field)
+    with pytest.raises(GitHubError):
+        gh.list_open_prs("/some/repo")
+
+
+def test_real_client_list_open_prs_refuses_truncated_listings(monkeypatch):
+    # [SOLO-27 c2] A listing that fills the limit may be truncated — matching against
+    # it could bypass the ambiguity guard, so it must refuse rather than guess.
+    import json as _json
+
+    from solopm.core.github import GitHub
+
+    rows = [
+        {"number": i, "url": f"https://github.com/x/y/pull/{i}", "headRefName": f"b-{i}"}
+        for i in range(1000)
+    ]
+
+    class Proc:
+        returncode = 0
+        stdout = _json.dumps(rows)
+        stderr = ""
+
+    gh = GitHub()
+    monkeypatch.setattr(gh, "_run", lambda args, cwd, *, check=True: Proc())
+    with pytest.raises(GitHubError):
+        gh.list_open_prs("/some/repo")
+
+
+def test_cancel_from_planning_states_never_touches_github(tmp_path):
+    # [SOLO-27 review P2] Cancelling a backlog/todo ticket (routine triage) must not
+    # probe GitHub, must not adopt/close a coincidentally matching PR, and must not
+    # stamp a note — pre-SOLO-27 silence was correct there: no work was ever recorded.
+    for planning_state in ("backlog", "todo"):
+        gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-spike")])
+        svc = _svc(tmp_path / planning_state, github=gh)
+        t = svc.create_ticket(project="SOLO", title="idea")
+        if planning_state == "todo":
+            svc.move_ticket(t.id, "todo")
+        cancelled = svc.move_ticket(t.id, "cancelled", actor="human")
+        assert cancelled.state == "cancelled"
+        assert gh.calls == []  # no list/close — the spike PR survives
+        assert _comments(svc, t.id) == []
+
+
+def test_single_crossing_pr_is_not_adopted(tmp_path):
+    # [SOLO-27 review] With ONLY SOLO-10's PR open, SOLO-1's done must not adopt it —
+    # a plain startswith(ticket.id) match would (and the ambiguity guard can't save it).
+    gh = FakeGitHub(open_prs=[_pr(10, "SOLO-10-foo")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+    assert "no PR was merged" in _comments(svc, tid)[0]
+
+
+def test_queued_merge_on_discovery_path_persists_adoption(tmp_path):
+    # [SOLO-27 review] A discovered PR that lands in the merge queue must still be
+    # adopted onto the ticket (number/url/branch) alongside pr_state=queued.
+    gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-x")], merge_state="queued")
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert done.pr_state == "queued"
+    assert done.pr_number == 46
+    assert done.branch == "SOLO-1-x"
+    assert any("merge queue" in c.lower() for c in _comments(svc, tid))
+
+
+def test_discovery_is_case_insensitive(tmp_path):
+    # [SOLO-27 review] Hand-made branches are often lowercase (the repo's own examples
+    # are, e.g. solo-9-feature) while ticket ids are uppercase — discovery must match.
+    gh = FakeGitHub(open_prs=[_pr(46, "solo-1-fix")])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert ("merge", 46) in gh.calls
+    assert done.branch == "solo-1-fix"
+
+
+def test_discovery_follows_the_project_branch_convention(tmp_path):
+    # [SOLO-27 review] A project with a custom convention (e.g. feature/{key}-{seq}-{slug})
+    # must discover heads of that shape, not just the default <ID>-<slug>.
+    gh = FakeGitHub(open_prs=[_pr(46, "feature/SOLO-1-fix")])
+    svc = _svc(tmp_path, github=gh)
+    svc.update_project("SOLO", {"branch_convention": "feature/{key}-{seq}-{slug}"})
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert ("merge", 46) in gh.calls
+    assert done.pr_state == "merged"
+    assert done.branch == "feature/SOLO-1-fix"
+
+
+def test_slugless_convention_matches_exactly_not_by_prefix(tmp_path):
+    # [SOLO-27 review] A convention without {slug} has no safe prefix boundary: only an
+    # exact head may match (release/SOLO12 must not be adopted for SOLO-1).
+    gh = FakeGitHub(open_prs=[_pr(12, "release/SOLO12")])
+    svc = _svc(tmp_path, github=gh)
+    svc.update_project("SOLO", {"branch_convention": "release/{key}{seq}"})
+    tid = _to_human_review_no_branch(svc)
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "merge" for c in gh.calls)
+    assert done.pr_number is None
+
+    gh2 = FakeGitHub(open_prs=[_pr(9, "release/SOLO1")])
+    svc2 = _svc(tmp_path / "exact", github=gh2)
+    svc2.update_project("SOLO", {"branch_convention": "release/{key}{seq}"})
+    tid2 = _to_human_review_no_branch(svc2)
+    done2 = svc2.move_ticket(tid2, "done", actor="human")
+    assert ("merge", 9) in gh2.calls
+    assert done2.pr_state == "merged"
+
+
+def test_no_match_note_names_what_was_searched(tmp_path):
+    # [SOLO-27 review] The note must state the pattern actually searched — not vaguely
+    # claim "its branch convention" was checked.
+    gh = FakeGitHub(open_prs=[])
+    svc = _svc(tmp_path, github=gh)
+    tid = _to_human_review_no_branch(svc)
+    svc.move_ticket(tid, "done", actor="human")
+    note = _comments(svc, tid)[0]
+    assert "SOLO-1" in note  # the searched head shape is spelled out
