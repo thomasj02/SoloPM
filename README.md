@@ -164,6 +164,12 @@ Register the server with your MCP client by pointing it at `uv run solopm mcp` (
 repo root) — e.g. in Claude Code, `claude mcp add solopm -- uv run solopm mcp`.
 Registering it at user scope makes SoloPM available across all your projects.
 
+Two workflow rules the server instructs agents to follow: **record your branch** by
+passing `branch` on the move to `in-ai-review` (SoloPM pushes, opens the PR, and merges
+it on done — never drive `gh` directly), and **honor review adjudications** — findings
+the human accepted are stored as `ACCEPTED-RISK:` review-memory items, surfaced through
+`review_prompt`, and must not be re-raised without new evidence.
+
 ### HTTP mode (remote machines)
 
 `solopm mcp --url http://host:8787` runs the same MCP server against a **remote**
