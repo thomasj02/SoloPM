@@ -215,13 +215,17 @@ transitions drive the PR via `gh`/`git`:
 
 **Unrecorded-PR discovery.** A ticket reaching `done`/`cancelled` with no recorded
 `branch`/`pr` (its implementer opened the PR by hand) still gets its PR handled: the
-single open PR whose head names the ticket — `<ID>` / `<ID>-<slug>` or the project's
-`branch_convention`, matched case-insensitively — is adopted (the ticket's `branch` and
-`pr` are recorded) and merged/closed as above. Ambiguous matches act on nothing. When
-nothing ends up merged/closed (nothing matched, ambiguity, or discovery itself failed),
-a note comment says so — the move never skips silently. Exception: cancelling a ticket
-straight out of `backlog`/`todo` with nothing recorded stays silent and never touches
-GitHub (routine triage of never-started ideas).
+single open PR whose head names the ticket — `<ID>` or `<ID>-<slug>`, matched
+case-insensitively — is adopted (the ticket's `branch` and `pr` are recorded) and
+merged/closed as above. Discovery runs only for projects using the **default**
+`branch_convention` (`{key}-{seq}-{slug}`): under a custom convention another ticket's
+branches can legitimately collide with this ticket's `<ID>-` shape, so discovery
+declines with a note instead of guessing. Ambiguous matches, PRs from forks or
+targeting a non-master base, and PRs already recorded on another ticket are never
+adopted. When nothing ends up merged/closed (nothing matched, ambiguity, custom
+convention, or discovery itself failed), a note comment says so — the move never skips
+silently. Exception: cancelling a ticket straight out of `backlog`/`todo` with nothing
+recorded stays silent and never touches GitHub (routine triage of never-started ideas).
 
 These run **before** the state change, so a `gh`/`git` failure (`github` error) aborts
 the transition — except PR *discovery*, which is best-effort and degrades to a note.

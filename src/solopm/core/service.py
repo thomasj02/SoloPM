@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import re
-import string
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -682,9 +681,20 @@ class Service:
                 extra = {"pr_number": found.number, "pr_url": found.url}
             elif number is None:
                 # The implementer drove `gh` by hand and never recorded a branch: an open
-                # PR whose head names this ticket — the default `<ID>[-slug]` shape or the
-                # project's configured branch convention — is this ticket's. Failing to
-                # LOOK must not block the (human-driven) move — note it instead.
+                # PR whose head names this ticket in the DEFAULT `<ID>[-slug]` shape is
+                # this ticket's. Discovery supports only the default branch convention —
+                # under a custom one, sibling heads can land on this ticket's default
+                # shape (e.g. {key}-{seq:x}-{slug} makes ticket 16 branch as SOLO-10-*),
+                # so not even the default matcher can be trusted; modelling arbitrary
+                # format templates safely is an open-ended problem, declined instead.
+                # Failing to LOOK must not block the (human-driven) move — note it.
+                if project.branch_convention != DEFAULT_BRANCH_CONVENTION:
+                    return {}, self._nothing_note(
+                        to_state,
+                        "automatic PR discovery supports only the default branch "
+                        f"convention — this project uses "
+                        f"{project.branch_convention!r}, resolve manually",
+                    )
                 try:
                     open_prs = self.github.list_open_prs(repo)
                 except GitHubError as exc:
@@ -694,17 +704,13 @@ class Service:
                 # master, and a fork PR's bare head name is a ref in the fork — branch
                 # cleanup could delete an unrelated same-named origin ref. A PR whose
                 # number or head is already recorded on ANOTHER ticket is that ticket's
-                # (a branch override can legally record any name). The convention
-                # pattern is computed once, collision-checked against the project's
-                # other ticket sequences (an exotic format spec can render the same
-                # text for two different seqs — {seq!s:.1} yields '1' for both 1 and 10).
+                # (a branch override can legally record any name).
                 siblings = [
                     t for t in self.list_tickets(project=ticket.project)
                     if t.id != ticket.id
                 ]
                 claimed_numbers = {t.pr_number for t in siblings if t.pr_number is not None}
                 claimed_heads = {t.branch.lower() for t in siblings if t.branch}
-                sibling_seqs = [t.seq for t in siblings]
                 # Legacy stores can predate the project ↔ repo 1:1 enforcement, and two
                 # CHECKOUTS (worktrees/clones) of one repository defeat path comparison
                 # entirely — the origin remote URL is the shared-identity signal there
@@ -728,33 +734,19 @@ class Service:
                         f"project(s) {', '.join(shared)} share this repo — PR ownership "
                         "is ambiguous across projects, resolve manually",
                     )
-                # When a sibling's convention rendering overlaps THIS ticket's default
-                # <ID>[-slug] shape, even the default matcher can't tell whose head a
-                # match is — decline discovery for this ticket entirely.
-                if self._default_shape_compromised(
-                    project.branch_convention, ticket.project, ticket.seq, sibling_seqs
-                ):
-                    return {}, self._nothing_note(
-                        to_state,
-                        "the project's branch convention makes PR ownership ambiguous "
-                        "for this ticket — resolve manually",
-                    )
-                pattern = self._convention_pattern(
-                    project.branch_convention, ticket.project, ticket.seq, sibling_seqs
-                )
                 matches = [
                     p for p in open_prs
                     if not p.cross_repo
                     and p.base == base
                     and p.number not in claimed_numbers
                     and p.head.lower() not in claimed_heads
-                    and self._head_names_ticket(p.head, ticket, pattern)
+                    and self._head_names_ticket(p.head, ticket)
                 ]
                 if not matches:
                     return {}, self._nothing_note(
                         to_state,
                         "no PR is recorded on this ticket and no open PR head matches "
-                        f"{self._searched_heads(ticket, pattern)}",
+                        f"`{ticket.id}[-…]`",
                     )
                 if len(matches) > 1:
                     heads = ", ".join(f"#{p.number} (`{p.head}`)" for p in matches)
@@ -814,160 +806,15 @@ class Service:
         return f"GitHub automation: no PR was {action} — {reason}."
 
     @staticmethod
-    def _convention_pattern(
-        convention: str, key: str, seq: int, other_seqs: "list[int] | tuple[int, ...]" = ()
-    ) -> tuple[str, bool] | None:
-        """The head pattern a project's branch convention yields for one ticket:
-        ``(text, is_prefix)``. With a ``{slug}`` tail the text is everything before the
-        slug and matching is by prefix; without one only an exact head can match (there
-        is no safe boundary — ``release/SOLO12`` must not match SOLO-1). ``None`` when
-        the convention is unusable for discovery: it can't be rendered (settings accept
-        arbitrary strings, and str.format can raise almost anything for them);
-        ``{slug}`` isn't the final field (splitting ``feature/{slug}/{key}-{seq}`` at
-        the slug would leave the generic ``feature/`` prefix, matching other tickets);
-        the prefix lacks a separator boundary — ``{key}-{seq}{slug}`` renders
-        ``SOLO-1``, which startswith-matches SOLO-10's branches; the pattern does not
-        depend on ``{seq}`` at all (``feature/{slug}``, ``release/{key}``) and so is
-        identical for every ticket; or the pattern COLLIDES with another existing
-        ticket's — an exotic format spec can render the same text for two different
-        sequences (``{seq!s:.1}`` yields ``1`` for both 1 and 10), so the caller passes
-        ``other_seqs`` and any of them rendering this ticket's text rejects it."""
-        mine = Service._render_convention(convention, key, seq)
-        if mine is None:
-            return None
-        # The collision candidates are everything any OTHER ticket's matcher would
-        # accept: its convention rendering AND its default `<ID>[-slug]` shapes —
-        # {key}-{seq:x}-{slug} renders ticket 16's prefix as 'SOLO-10-', which is
-        # ticket 10's default shape even though ticket 10's convention rendering
-        # ('SOLO-a-') looks nothing like it. The seq+1 probe (convention only)
-        # rejects degenerate conventions before a colliding ticket even exists.
-        candidates: list[tuple[str, bool] | None] = [
-            Service._render_convention(convention, key, seq + 1)
-        ]
-        for s in other_seqs:
-            candidates.append(Service._render_convention(convention, key, s))
-            candidates.append((f"{key}-{s}-", True))  # their default prefix shape
-            candidates.append((f"{key}-{s}", False))  # their default bare head
-        for other in candidates:
-            # An unrenderable candidate (None) accepts nothing — no overlap possible.
-            if other is not None and Service._patterns_collide(mine, other):
-                return None
-        return mine
-
-    @staticmethod
-    def _bounded_format(convention: str, key: str, seq: int) -> str | None:
-        """``format()`` with the slug sentinel, refusing anything that could allocate
-        unboundedly — huge numeric widths, and NESTED replacement fields whose width
-        only resolves at render time ({seq:{seq}000000000}) — plus oversized output.
-        None on any render failure (settings accept arbitrary strings)."""
-        if len(convention) > 300:
-            return None  # bound BEFORE parse/format ever touch a huge literal
-        try:
-            for _lit, field, spec, conv in string.Formatter().parse(convention):
-                if spec and ("{" in spec or any(int(n) > 64 for n in re.findall(r"\d+", spec))):
-                    return None
-                # A spec/conversion on the slug field ({slug:->10}) transforms the
-                # modelling sentinel, so the modelled shape is not one real slugs
-                # share — the convention can't be reasoned about.
-                if field == "slug" and (spec or conv):
-                    return None
-            rendered = convention.format(key=key, seq=seq, slug="\x00")
-        except (KeyError, IndexError, ValueError, AttributeError, TypeError, OverflowError):
-            return None
-        return rendered if len(rendered) <= 300 else None
-
-    @staticmethod
-    def _render_convention(convention: str, key: str, seq: int) -> tuple[str, bool] | None:
-        """Render one ticket's convention head pattern for use as a MATCHER, or None
-        when it can't be used safely: unrenderable/unbounded (see _bounded_format), a
-        non-tail ``{slug}``, or a prefix without a separator boundary."""
-        rendered = Service._bounded_format(convention, key, seq)
-        if rendered is None:
-            return None
-        if "\x00" in rendered:
-            prefix, tail = rendered.split("\x00", 1)
-            if prefix and not tail and not prefix[-1].isalnum():
-                return prefix, True
-            return None
-        return rendered, False
-
-    @staticmethod
-    def _raw_head_pattern(convention: str, key: str, seq: int) -> tuple[str, bool] | None:
-        """The head SHAPE a sibling following the convention actually produces —
-        everything before the slug as a prefix, with none of the matcher-safety rules:
-        {key}-{seq:x}-{slug}-tail is unusable as a matcher, yet ticket 16 still
-        branches as ``SOLO-10-…`` under it. None when the shape can't be modelled."""
-        rendered = Service._bounded_format(convention, key, seq)
-        if rendered is None:
-            return None
-        if "\x00" in rendered:
-            return rendered.split("\x00", 1)[0], True
-        return rendered, False
-
-    @staticmethod
-    def _default_shape_compromised(
-        convention: str, key: str, seq: int, other_seqs: "list[int] | tuple[int, ...]"
-    ) -> bool:
-        """True when a SIBLING's convention heads can overlap THIS ticket's default
-        ``<ID>[-slug]`` patterns — or can't be modelled at all: an unrenderable sibling
-        shape doesn't mean the sibling has no branches, so guessing is not allowed."""
-        my_defaults: list[tuple[str, bool]] = [(f"{key}-{seq}-", True), (f"{key}-{seq}", False)]
-        for s in other_seqs:
-            theirs = Service._raw_head_pattern(convention, key, s)
-            if theirs is None:
-                return True
-            if any(Service._patterns_collide(d, theirs) for d in my_defaults):
-                return True
-        return False
-    @staticmethod
-    def _patterns_collide(mine: tuple[str, bool], other: tuple[str, bool]) -> bool:
-        """Matcher-faithful overlap between two head patterns: True when some head both
-        would accept exists. Case-insensitive like the matcher, and including the
-        stripped bare-head alias a prefix also accepts — 'x-' and 'x/' don't prefix
-        each other, yet both accept the bare head 'x'."""
-        a, a_prefix = mine[0].lower(), mine[1]
-        b, b_prefix = other[0].lower(), other[1]
-        if a_prefix and b_prefix:
-            return (
-                a.startswith(b)
-                or b.startswith(a)
-                or a.rstrip("-_/") == b.rstrip("-_/")
-            )
-        if a_prefix:
-            return b.startswith(a) or b == a.rstrip("-_/")
-        if b_prefix:
-            return a.startswith(b) or a == b.rstrip("-_/")
-        return a == b
-
-    @staticmethod
-    def _head_names_ticket(
-        head: str, ticket: Ticket, pattern: tuple[str, bool] | None
-    ) -> bool:
-        """True when an open PR's head branch names this ticket — the default
-        ``<ID>[-slug]`` shape or the precomputed convention ``pattern`` (from
-        :meth:`_convention_pattern`; None = convention unusable). Compared
-        case-insensitively: hand-made branches are routinely lowercase while ticket
-        ids are uppercase, and the caller's ambiguity guard covers collisions."""
+    def _head_names_ticket(head: str, ticket: Ticket) -> bool:
+        """Default-convention ownership: a head that is exactly ``<ID>`` or starts with
+        ``<ID>-`` is this ticket's branch. Case-insensitive (hand-made branches are
+        routinely lowercase); the trailing ``-`` boundary keeps SOLO-1 from matching
+        SOLO-10's branches. Only ever consulted for default-convention projects —
+        discovery declines outright on custom conventions."""
         h = head.lower()
         tid = ticket.id.lower()
-        if h == tid or h.startswith(tid + "-"):
-            return True
-        if pattern is None:
-            return False
-        text, is_prefix = pattern[0].lower(), pattern[1]
-        if is_prefix:
-            return h.startswith(text) or h == text.rstrip("-_/")
-        return h == text
-
-    @staticmethod
-    def _searched_heads(ticket: Ticket, pattern: tuple[str, bool] | None) -> str:
-        """Spell out exactly which head shapes discovery searched, for the note."""
-        shapes = [f"`{ticket.id}[-…]`"]
-        if pattern is not None:
-            text, is_prefix = pattern
-            if not (is_prefix and text.lower() == f"{ticket.id.lower()}-"):
-                shapes.append(f"`{text}…`" if is_prefix else f"`{text}`")
-        return " or ".join(shapes)
+        return h == tid or h.startswith(tid + "-")
 
     @staticmethod
     def _branch_cleanup_note(branch: str, branch_deleted: bool) -> str:

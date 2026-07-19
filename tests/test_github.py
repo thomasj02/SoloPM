@@ -1083,34 +1083,6 @@ def test_done_merge_failure_after_discovery_aborts_but_keeps_the_adoption(tmp_pa
     assert sum(1 for c in gh.calls if c[0] == "list_open") == listing_calls
 
 
-def test_ambiguous_seq_rendering_collision_is_rejected(tmp_path):
-    # [gpt-review r4 P1] {key}/{seq!s:.1}-{slug} passes a naive seq-vs-seq+1 probe (1 vs
-    # 2) but renders 'SOLO/1-' for BOTH seq 1 and seq 10 — SOLO-1's done would adopt
-    # SOLO-10's sole PR. The pattern must be collision-checked against the project's
-    # actual other ticket sequences. (The head deliberately does not match the default
-    # <ID>[-slug] shape, so the convention path is the only one that could adopt it.)
-    gh = FakeGitHub(open_prs=[_pr(66, "SOLO/1-fix")])
-    svc = _svc(tmp_path, github=gh)
-    svc.update_project("SOLO", {"branch_convention": "{key}/{seq!s:.1}-{slug}"})
-    tid = _to_human_review_no_branch(svc)  # SOLO-1
-    for _ in range(9):  # SOLO-2 .. SOLO-10 exist; SOLO-10 renders 'SOLO/1-' too
-        svc.create_ticket(project="SOLO", title="filler")
-    done = svc.move_ticket(tid, "done", actor="human")
-    assert not any(c[0] == "merge" for c in gh.calls)
-    assert done.pr_number is None
-
-    # Control: with no colliding ticket in the project (seqs 1-3 render distinctly),
-    # the same convention is usable and the ticket's own PR is adopted.
-    gh2 = FakeGitHub(open_prs=[_pr(9, "SOLO/1-fix")])
-    svc2 = _svc(tmp_path / "no-collision", github=gh2)
-    svc2.update_project("SOLO", {"branch_convention": "{key}/{seq!s:.1}-{slug}"})
-    tid2 = _to_human_review_no_branch(svc2)  # SOLO-1 of 3
-    svc2.create_ticket(project="SOLO", title="b")
-    svc2.create_ticket(project="SOLO", title="c")
-    done2 = svc2.move_ticket(tid2, "done", actor="human")
-    assert ("merge", 9) in gh2.calls
-    assert done2.pr_state == "merged"
-
 
 def test_cancelled_discovers_and_closes_unrecorded_pr(tmp_path):
     # [SOLO-27 c1] Cancelled gets the same recovery, closing instead of merging.
@@ -1317,37 +1289,6 @@ def test_discovery_is_case_insensitive(tmp_path):
     assert done.branch == "solo-1-fix"
 
 
-def test_discovery_follows_the_project_branch_convention(tmp_path):
-    # [SOLO-27 review] A project with a custom convention (e.g. feature/{key}-{seq}-{slug})
-    # must discover heads of that shape, not just the default <ID>-<slug>.
-    gh = FakeGitHub(open_prs=[_pr(46, "feature/SOLO-1-fix")])
-    svc = _svc(tmp_path, github=gh)
-    svc.update_project("SOLO", {"branch_convention": "feature/{key}-{seq}-{slug}"})
-    tid = _to_human_review_no_branch(svc)
-    done = svc.move_ticket(tid, "done", actor="human")
-    assert ("merge", 46) in gh.calls
-    assert done.pr_state == "merged"
-    assert done.branch == "feature/SOLO-1-fix"
-
-
-def test_slugless_convention_matches_exactly_not_by_prefix(tmp_path):
-    # [SOLO-27 review] A convention without {slug} has no safe prefix boundary: only an
-    # exact head may match (release/SOLO12 must not be adopted for SOLO-1).
-    gh = FakeGitHub(open_prs=[_pr(12, "release/SOLO12")])
-    svc = _svc(tmp_path, github=gh)
-    svc.update_project("SOLO", {"branch_convention": "release/{key}{seq}"})
-    tid = _to_human_review_no_branch(svc)
-    done = svc.move_ticket(tid, "done", actor="human")
-    assert not any(c[0] == "merge" for c in gh.calls)
-    assert done.pr_number is None
-
-    gh2 = FakeGitHub(open_prs=[_pr(9, "release/SOLO1")])
-    svc2 = _svc(tmp_path / "exact", github=gh2)
-    svc2.update_project("SOLO", {"branch_convention": "release/{key}{seq}"})
-    tid2 = _to_human_review_no_branch(svc2)
-    done2 = svc2.move_ticket(tid2, "done", actor="human")
-    assert ("merge", 9) in gh2.calls
-    assert done2.pr_state == "merged"
 
 
 def test_discovery_only_adopts_prs_targeting_the_project_base(tmp_path):
@@ -1385,105 +1326,6 @@ def test_discovery_excludes_fork_prs(tmp_path):
     assert "no PR was merged" in _comments(svc, tid)[0]
 
 
-def test_non_tail_slug_convention_is_unusable_for_discovery(tmp_path):
-    # [gpt-review r1 P1] feature/{slug}/{key}-{seq} degenerates to the generic prefix
-    # 'feature/' when split at the slug — under it, SOLO-2's PR would match SOLO-1. Such
-    # conventions are unusable for discovery; the default <ID>[-slug] shape still works.
-    gh = FakeGitHub(open_prs=[_pr(2, "feature/foo/SOLO-2")])
-    svc = _svc(tmp_path, github=gh)
-    svc.update_project("SOLO", {"branch_convention": "feature/{slug}/{key}-{seq}"})
-    tid = _to_human_review_no_branch(svc)
-    done = svc.move_ticket(tid, "done", actor="human")
-    assert not any(c[0] == "merge" for c in gh.calls)
-    assert done.pr_number is None
-
-    gh2 = FakeGitHub(open_prs=[_pr(9, "SOLO-1-x")])
-    svc2 = _svc(tmp_path / "default-shape", github=gh2)
-    svc2.update_project("SOLO", {"branch_convention": "feature/{slug}/{key}-{seq}"})
-    tid2 = _to_human_review_no_branch(svc2)
-    done2 = svc2.move_ticket(tid2, "done", actor="human")
-    assert ("merge", 9) in gh2.calls  # default id-shape matching is unaffected
-
-
-def test_convention_prefix_without_separator_boundary_is_unusable(tmp_path):
-    # [gpt-review r2 P1] {key}-{seq}{slug} renders the prefix 'SOLO-1', which
-    # startswith-matches SOLO-10's branch — a sole 'SOLO-10-fix' PR would be merged for
-    # SOLO-1 with the ambiguity guard blind. A prefix is only safe when it ends in a
-    # separator; without one the convention is unusable (default matching still works).
-    gh = FakeGitHub(open_prs=[_pr(10, "SOLO-10-fix")])
-    svc = _svc(tmp_path, github=gh)
-    svc.update_project("SOLO", {"branch_convention": "{key}-{seq}{slug}"})
-    tid = _to_human_review_no_branch(svc)
-    done = svc.move_ticket(tid, "done", actor="human")
-    assert not any(c[0] == "merge" for c in gh.calls)
-    assert done.pr_number is None
-
-    # The ticket's own PR is still found via the default <ID>[-slug] shape.
-    gh2 = FakeGitHub(open_prs=[_pr(9, "SOLO-1-fix")])
-    svc2 = _svc(tmp_path / "own", github=gh2)
-    svc2.update_project("SOLO", {"branch_convention": "{key}-{seq}{slug}"})
-    tid2 = _to_human_review_no_branch(svc2)
-    done2 = svc2.move_ticket(tid2, "done", actor="human")
-    assert ("merge", 9) in gh2.calls
-    assert done2.pr_state == "merged"
-
-
-def test_seqless_convention_cannot_identify_a_ticket(tmp_path):
-    # [gpt-review r3 P1] A convention that never renders {seq} produces the SAME pattern
-    # for every ticket — feature/{slug} matches any feature/* PR, {key}/{slug} matches
-    # any SOLO/* PR, and the seq-less exact form release/{key} matches for every ticket.
-    # None of these can identify the ticket; all are unusable for discovery.
-    cases = [
-        ("feature/{slug}", "feature/whatever"),
-        ("{key}/{slug}", "SOLO/other-work"),
-        ("release/{key}", "release/SOLO"),
-    ]
-    for i, (conv, head) in enumerate(cases):
-        gh = FakeGitHub(open_prs=[_pr(66, head)])
-        svc = _svc(tmp_path / f"seqless{i}", github=gh)
-        svc.update_project("SOLO", {"branch_convention": conv})
-        tid = _to_human_review_no_branch(svc)
-        done = svc.move_ticket(tid, "done", actor="human")
-        assert not any(c[0] == "merge" for c in gh.calls), conv
-        assert done.pr_number is None, conv
-
-    # And the ticket's own default-shape PR is still found under such a convention.
-    gh2 = FakeGitHub(open_prs=[_pr(9, "SOLO-1-x")])
-    svc2 = _svc(tmp_path / "seqless-own", github=gh2)
-    svc2.update_project("SOLO", {"branch_convention": "feature/{slug}"})
-    tid2 = _to_human_review_no_branch(svc2)
-    done2 = svc2.move_ticket(tid2, "done", actor="human")
-    assert ("merge", 9) in gh2.calls
-    assert done2.pr_state == "merged"
-
-
-def test_overlapping_prefix_collision_uses_matcher_semantics(tmp_path):
-    # [gpt-review r5 P1] {key:-<{seq}}{slug} renders 'SOLO-' for seq 5 and 'SOLO--' for
-    # seq 6 — unequal, so an exact-equality collision check approves the pattern, yet
-    # the matcher is case-insensitive startswith, so SOLO-5's done would adopt SOLO-6's
-    # sole 'SOLO--fix' PR. Collisions must be judged with the matcher's own semantics:
-    # two prefixes collide when either is a (case-insensitive) prefix of the other.
-    gh = FakeGitHub(open_prs=[_pr(66, "SOLO--fix")])
-    svc = _svc(tmp_path, github=gh)
-    svc.update_project("SOLO", {"branch_convention": "{key:-<{seq}}{slug}"})
-    for _ in range(4):  # SOLO-1..4 fillers
-        svc.create_ticket(project="SOLO", title="filler")
-    t = svc.create_ticket(project="SOLO", title="mine")  # SOLO-5 → prefix 'SOLO-'
-    svc.create_ticket(project="SOLO", title="other")  # SOLO-6 → prefix 'SOLO--'
-    svc.move_ticket(t.id, "in-progress")
-    svc.move_ticket(t.id, "in-ai-review", actor="claude")
-    svc.move_ticket(t.id, "in-human-review", actor="codex")
-    done = svc.move_ticket(t.id, "done", actor="human")
-    assert not any(c[0] == "merge" for c in gh.calls)
-    assert done.pr_number is None
-
-
-def test_formatting_overflow_is_an_unusable_convention():
-    # [gpt-review r5 P2] {seq:c} overflows str.format past the max code point —
-    # another render failure that must mean "unusable", never an escaped exception.
-    from solopm.core.service import Service
-
-    assert Service._convention_pattern("{seq:c}-{slug}", "SOLO", 0x110000) is None
 
 
 def test_discovery_excludes_prs_recorded_on_another_ticket(tmp_path):
@@ -1501,73 +1343,6 @@ def test_discovery_excludes_prs_recorded_on_another_ticket(tmp_path):
     assert "no PR was merged" in _comments(svc, tid)[0]
 
 
-def test_convention_collision_includes_default_head_shapes():
-    # [gpt-review r6 P1] {key}-{seq:x}-{slug} renders ticket 16's prefix as 'SOLO-10-',
-    # which IS ticket 10's default <ID>- shape — the collision check must compare
-    # against other tickets' default patterns, not just their convention renderings.
-    from solopm.core.service import Service
-
-    assert (
-        Service._convention_pattern("{key}-{seq:x}-{slug}", "SOLO", 16, [10]) is None
-    )
-    # Without ticket 10 in the project there is nothing to collide with.
-    assert (
-        Service._convention_pattern("{key}-{seq:x}-{slug}", "SOLO", 16, [11, 12])
-        is not None
-    )
-
-
-def test_convention_collision_includes_stripped_bare_aliases():
-    # [gpt-review r6 P2] x{seq:c}{slug} gives seq 45 the prefix 'x-' and seq 47 'x/';
-    # neither prefixes the other, but BOTH accept the bare head 'x' via the stripped
-    # alias — the collision check must include those aliases.
-    from solopm.core.service import Service
-
-    assert Service._convention_pattern("x{seq:c}{slug}", "SOLO", 45, [47]) is None
-
-
-def test_sibling_convention_can_compromise_the_default_matcher(tmp_path):
-    # [gpt-review r7 P1] With {key}-{seq:x}-{slug}, ticket 16's LEGITIMATE convention
-    # head is 'SOLO-10-fix' — which is ticket 10's default <ID>- shape. Ticket 10's
-    # branchless done must not adopt it via the default matcher: when a sibling's
-    # convention rendering overlaps this ticket's default patterns, discovery is
-    # ambiguous for this ticket and must decline with a note.
-    gh = FakeGitHub(open_prs=[_pr(66, "SOLO-10-fix")])
-    svc = _svc(tmp_path, github=gh)
-    svc.update_project("SOLO", {"branch_convention": "{key}-{seq:x}-{slug}"})
-    for _ in range(9):  # SOLO-1..9
-        svc.create_ticket(project="SOLO", title="filler")
-    mine = svc.create_ticket(project="SOLO", title="mine")  # SOLO-10
-    for _ in range(6):  # SOLO-11..16 — 16 renders hex '10'
-        svc.create_ticket(project="SOLO", title="filler")
-    svc.move_ticket(mine.id, "in-progress")
-    svc.move_ticket(mine.id, "in-ai-review", actor="claude")
-    svc.move_ticket(mine.id, "in-human-review", actor="codex")
-    done = svc.move_ticket(mine.id, "done", actor="human")
-    assert not any(c[0] == "merge" for c in gh.calls)
-    assert done.pr_number is None
-    assert "no PR was merged" in _comments(svc, mine.id)[0]
-
-
-def test_unmodellable_sibling_convention_declines_discovery(tmp_path):
-    # [gpt-review r10 P1] {key}-{seq:x}-{slug}-tail is unusable as a pattern (non-tail
-    # slug), but sibling 16 still legitimately branches as 'SOLO-10-fix-tail' — which
-    # ticket 10's DEFAULT matcher accepts. A sibling whose heads can't be modelled
-    # safely must mean decline, not skip.
-    gh = FakeGitHub(open_prs=[_pr(66, "SOLO-10-fix-tail")])
-    svc = _svc(tmp_path, github=gh)
-    svc.update_project("SOLO", {"branch_convention": "{key}-{seq:x}-{slug}-tail"})
-    for _ in range(9):
-        svc.create_ticket(project="SOLO", title="filler")
-    mine = svc.create_ticket(project="SOLO", title="mine")  # SOLO-10
-    for _ in range(6):  # up to SOLO-16, whose heads start 'SOLO-10-'
-        svc.create_ticket(project="SOLO", title="filler")
-    svc.move_ticket(mine.id, "in-progress")
-    svc.move_ticket(mine.id, "in-ai-review", actor="claude")
-    svc.move_ticket(mine.id, "in-human-review", actor="codex")
-    done = svc.move_ticket(mine.id, "done", actor="human")
-    assert not any(c[0] == "merge" for c in gh.calls)
-    assert done.pr_number is None
 
 
 def test_remote_identity_matches_across_transport_schemes(tmp_path):
@@ -1590,45 +1365,6 @@ def test_remote_identity_matches_across_transport_schemes(tmp_path):
     assert "share this repo" in _comments(svc, tid)[0]
 
 
-def test_slug_format_specs_defeat_sentinel_modelling_and_are_rejected():
-    # [gpt-review r11 P1] A spec on the slug field ({slug:->10}) pads the modelling
-    # sentinel, so the modelled prefix is not one real slugs share — the convention is
-    # unusable both as a matcher and for sibling modelling (which then declines).
-    from solopm.core.service import Service
-
-    assert Service._convention_pattern("{key}-{slug:->10}-{seq}", "SOLO", 1, []) is None
-    assert Service._raw_head_pattern("{key}-{slug:->10}-{seq}", "SOLO", 1) is None
-    assert Service._default_shape_compromised("{key}-{slug:->10}-{seq}", "SOLO", 1, [2])
-
-
-def test_oversized_convention_is_rejected_before_parsing():
-    # [gpt-review r11 P2] A multi-megabyte convention literal must be rejected before
-    # Formatter.parse/format ever touch it — repeated per-sibling formatting of huge
-    # strings is an availability hole, not a modelling question.
-    from solopm.core.service import Service
-
-    huge = "A" * 500_000 + "{key}-{seq}-{slug}"
-    assert Service._convention_pattern(huge, "SOLO", 1, []) is None
-
-
-def test_nested_format_widths_are_rejected_without_rendering():
-    # [gpt-review r10 P2] {seq:{seq}000000000} hides its width inside a nested field —
-    # the literal digits parse as 0, but the resolved width is ~1e9. Nested replacement
-    # fields in specs are rejected outright, before any formatting.
-    from solopm.core.service import Service
-
-    assert (
-        Service._convention_pattern("{seq:{seq}000000000}-{slug}", "SOLO", 1, []) is None
-    )
-
-
-def test_absurd_format_widths_are_rejected_without_rendering():
-    # [gpt-review r7 P2] {seq:1000000000} would allocate ~1GB per render (times
-    # siblings) — the spec is rejected before any formatting happens.
-    from solopm.core.service import Service
-
-    assert Service._convention_pattern("{seq:1000000000}-{slug}", "SOLO", 1, []) is None
-    assert Service._convention_pattern("{key}-{seq:09}-{slug}", "SOLO", 1, []) is not None
 
 
 def test_projects_cannot_share_a_repo(tmp_path):
@@ -1728,18 +1464,30 @@ def test_legacy_shared_repo_declines_discovery(tmp_path):
     assert "share this repo" in note
 
 
-def test_unrenderable_convention_does_not_crash_discovery(tmp_path):
-    # [gpt-review r1 P2] Arbitrary stored conventions can make str.format raise
-    # AttributeError/TypeError ({key.foo}, {seq[foo]}) — discovery must degrade to the
-    # default shape, never 500 a branchless done.
-    for i, conv in enumerate(("{key.foo}-{slug}", "{seq[foo]}-{slug}")):
-        gh = FakeGitHub(open_prs=[_pr(9, "SOLO-1-x")])
+
+def test_custom_convention_declines_discovery(tmp_path):
+    # [SOLO-27 design, post-review] Automatic discovery supports only the DEFAULT
+    # branch convention. Under a custom one, sibling heads can land on this ticket's
+    # default <ID>- shape ({key}-{seq:x}-{slug} makes ticket 16 branch as SOLO-10-*),
+    # so not even the default matcher can be trusted — and modelling arbitrary format
+    # templates safely proved an open-ended problem. Custom conventions decline with a
+    # note, including for default-shaped heads, and never raise (unrenderable ones too).
+    conventions = (
+        "feature/{key}-{seq}-{slug}",  # benign custom
+        "{key}-{seq:x}-{slug}",        # the sibling/default-shape collision class
+        "{key.foo}-{slug}",            # unrenderable — must decline, not crash
+    )
+    for i, conv in enumerate(conventions):
+        gh = FakeGitHub(open_prs=[_pr(46, "SOLO-1-fix"), _pr(47, "feature/SOLO-1-fix")])
         svc = _svc(tmp_path / f"conv{i}", github=gh)
         svc.update_project("SOLO", {"branch_convention": conv})
         tid = _to_human_review_no_branch(svc)
-        done = svc.move_ticket(tid, "done", actor="human")  # must not raise
-        assert ("merge", 9) in gh.calls
-        assert done.pr_state == "merged"
+        done = svc.move_ticket(tid, "done", actor="human")
+        assert not any(c[0] == "merge" for c in gh.calls), conv
+        assert done.pr_number is None, conv
+        note = _comments(svc, tid)[0]
+        assert "no PR was merged" in note, conv
+        assert "default branch convention" in note, conv
 
 
 def test_no_match_note_names_what_was_searched(tmp_path):
