@@ -1590,6 +1590,27 @@ def test_remote_identity_matches_across_transport_schemes(tmp_path):
     assert "share this repo" in _comments(svc, tid)[0]
 
 
+def test_slug_format_specs_defeat_sentinel_modelling_and_are_rejected():
+    # [gpt-review r11 P1] A spec on the slug field ({slug:->10}) pads the modelling
+    # sentinel, so the modelled prefix is not one real slugs share — the convention is
+    # unusable both as a matcher and for sibling modelling (which then declines).
+    from solopm.core.service import Service
+
+    assert Service._convention_pattern("{key}-{slug:->10}-{seq}", "SOLO", 1, []) is None
+    assert Service._raw_head_pattern("{key}-{slug:->10}-{seq}", "SOLO", 1) is None
+    assert Service._default_shape_compromised("{key}-{slug:->10}-{seq}", "SOLO", 1, [2])
+
+
+def test_oversized_convention_is_rejected_before_parsing():
+    # [gpt-review r11 P2] A multi-megabyte convention literal must be rejected before
+    # Formatter.parse/format ever touch it — repeated per-sibling formatting of huge
+    # strings is an availability hole, not a modelling question.
+    from solopm.core.service import Service
+
+    huge = "A" * 500_000 + "{key}-{seq}-{slug}"
+    assert Service._convention_pattern(huge, "SOLO", 1, []) is None
+
+
 def test_nested_format_widths_are_rejected_without_rendering():
     # [gpt-review r10 P2] {seq:{seq}000000000} hides its width inside a nested field —
     # the literal digits parse as 0, but the resolved width is ~1e9. Nested replacement

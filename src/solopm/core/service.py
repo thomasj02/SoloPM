@@ -860,9 +860,16 @@ class Service:
         unboundedly — huge numeric widths, and NESTED replacement fields whose width
         only resolves at render time ({seq:{seq}000000000}) — plus oversized output.
         None on any render failure (settings accept arbitrary strings)."""
+        if len(convention) > 300:
+            return None  # bound BEFORE parse/format ever touch a huge literal
         try:
-            for _lit, _field, spec, _conv in string.Formatter().parse(convention):
+            for _lit, field, spec, conv in string.Formatter().parse(convention):
                 if spec and ("{" in spec or any(int(n) > 64 for n in re.findall(r"\d+", spec))):
+                    return None
+                # A spec/conversion on the slug field ({slug:->10}) transforms the
+                # modelling sentinel, so the modelled shape is not one real slugs
+                # share — the convention can't be reasoned about.
+                if field == "slug" and (spec or conv):
                     return None
             rendered = convention.format(key=key, seq=seq, slug="\x00")
         except (KeyError, IndexError, ValueError, AttributeError, TypeError, OverflowError):
