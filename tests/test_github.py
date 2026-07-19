@@ -1445,6 +1445,9 @@ def test_unresolvable_home_in_repo_path_does_not_crash(tmp_path):
         key="T", name="T", repo="~no_such_user_xyz_12345/repo", master="main"
     )
     assert created.repo == "~no_such_user_xyz_12345/repo"
+    # [r13 P2] An embedded NUL raises ValueError from Path.resolve — same degrade.
+    created2 = svc.add_project(key="U", name="U", repo="/tmp/x\x00y", master="main")
+    assert created2.repo == "/tmp/x\x00y"
 
 
 def test_legacy_shared_repo_declines_discovery(tmp_path):

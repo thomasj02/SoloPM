@@ -65,9 +65,10 @@ def _canonical_path(path: str) -> str:
     let two project rows point at the same repository unnoticed."""
     try:
         return str(Path(path).expanduser().resolve())
-    except (OSError, RuntimeError):
-        # expanduser raises RuntimeError for an unresolvable ~user; resolve can too
-        # on symlink loops — canonicalization degrades to the raw path, never errors.
+    except (OSError, RuntimeError, ValueError):
+        # expanduser raises RuntimeError for an unresolvable ~user, resolve can too on
+        # symlink loops, and an embedded NUL raises ValueError — canonicalization
+        # degrades to the raw path, never errors.
         return path
 
 
