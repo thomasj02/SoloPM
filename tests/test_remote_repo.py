@@ -1039,3 +1039,29 @@ def test_push_helper_skips_same_state_moves(tmp_path, monkeypatch):
     )
     push_branch_for_remote_move(api, "CM-8", "in-ai-review", None)
     assert len(api.gets) == 1  # looked at the ticket, saw the no-op, stopped
+
+
+# --- gpt-review round 5 fix ----------------------------------------------------------
+
+
+def test_discovery_claims_scoped_to_the_current_slug_after_a_repoint(tmp_path):
+    """A terminal ticket's PR record from the OLD repo must not veto discovery in the
+    NEW repo when the PR number happens to be reused — sibling claims count only when
+    their pr_url belongs to the current slug (claims without a URL stay conservative)."""
+    gh = FakeGitHub(pr_number=17)
+    svc = _svc(tmp_path, github=gh)
+    svc.add_project(key="CM", name="C", repo="/home/dev/x", github_repo="acme/old")
+    tid, _ = _to_ai_review(svc)  # PR #17 recorded at github.com/acme/widget (fake URL)
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    svc.move_ticket(tid, "done", actor="human")  # terminal → repoint is legal
+    svc.update_project("CM", {"github_repo": "acme/new"})
+    # The new repo's open PR reuses number 17 with a convention-matching head.
+    gh.open_prs = [_pr(17, head="CM-2-fix")]
+    t2 = svc.create_ticket(project="CM", title="y")
+    svc.move_ticket(t2.id, "in-progress")
+    svc.move_ticket(t2.id, "in-ai-review", actor="claude")  # nothing recorded
+    svc.move_ticket(t2.id, "in-human-review", actor="codex")
+    done = svc.move_ticket(t2.id, "done", actor="human")
+    assert done.pr_number == 17
+    assert done.pr_state == "merged"
+    assert ("api_merge", "acme/new", 17) in gh.calls

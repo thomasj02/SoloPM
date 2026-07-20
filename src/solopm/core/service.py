@@ -939,8 +939,22 @@ class Service:
                     t for t in self.list_tickets(project=ticket.project)
                     if t.id != ticket.id
                 ]
-                claimed_numbers = {t.pr_number for t in siblings if t.pr_number is not None}
-                claimed_heads = {t.branch.lower() for t in siblings if t.branch}
+
+                # A sibling's PR/branch claim only vetoes discovery when it belongs to
+                # THIS repository: after a legal re-point (all old tickets terminal),
+                # a terminal ticket's old-repo PR number would otherwise deterministically
+                # suppress a new-repo PR that happens to reuse the number. A claim whose
+                # pr_url names another repo is the old era's; one with no URL at all
+                # can't be attributed and stays conservative (still counts).
+                def _claims_here(t: Ticket) -> bool:
+                    if not ops.remote or t.pr_url is None:
+                        return True
+                    return _pr_url_matches_slug(t.pr_url, ops.slug)
+
+                claimed_numbers = {
+                    t.pr_number for t in siblings if t.pr_number is not None and _claims_here(t)
+                }
+                claimed_heads = {t.branch.lower() for t in siblings if t.branch and _claims_here(t)}
                 # Legacy stores can predate the project ↔ repo 1:1 enforcement, and two
                 # CHECKOUTS (worktrees/clones) of one repository defeat path comparison
                 # entirely — the origin remote URL / GitHub slug is the shared-identity
