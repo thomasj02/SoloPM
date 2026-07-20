@@ -293,14 +293,22 @@ def mcp_cmd(
 def project_add(
     key: Annotated[str, typer.Option("--key", help="Project key, e.g. SOLO.")],
     name: Annotated[str, typer.Option("--name", help="Project name.")],
-    repo: Annotated[Optional[str], typer.Option("--repo", help="Local repo path.")] = None,
+    repo: Annotated[Optional[str], typer.Option("--repo", help="Repo checkout path.")] = None,
+    github_repo: Annotated[
+        Optional[str],
+        typer.Option(
+            "--github-repo",
+            help="owner/name slug for a repo whose checkout lives on another machine "
+            "than the backend (PR lifecycle then runs via the GitHub API).",
+        ),
+    ] = None,
     master: Annotated[str, typer.Option("--master", help="Master branch.")] = "main",
     json_out: JsonOpt = False,
     url: UrlOpt = None,
 ) -> None:
     """Register a project."""
     call = Call(json_out, None, url)
-    body = {"key": key, "name": name, "repo": repo, "master": master}
+    body = {"key": key, "name": name, "repo": repo, "github_repo": github_repo, "master": master}
     _run(call, lambda api: api.post("/api/projects", json=body), output.render_project)
 
 
