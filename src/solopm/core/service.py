@@ -243,21 +243,28 @@ class Service:
         if "name" in fields and not str(fields["name"]).strip():
             raise ValidationError("Project name cannot be blank.")
         if "github_repo" in fields:
-            prepared = self._prepare_github_repo(fields["github_repo"], exclude_key=key)
-            self._require_no_stale_repo_identities(current, prepared)
-            fields = {**fields, "github_repo": prepared}
-        # Path claims apply to the project's EFFECTIVE post-update state: a remote
-        # project's path is not a local identity, but a project going (or staying)
-        # local must hold the claim — including when clearing github_repo re-localizes
-        # a path some other local project has since taken.
+            fields = {
+                **fields,
+                "github_repo": self._prepare_github_repo(fields["github_repo"], exclude_key=key),
+            }
+        # Both identity checks reason about the project's EFFECTIVE post-update state:
+        # a multi-field patch may change repo and github_repo together, and validating
+        # the OLD repo would let its matching origin vouch for an unrelated new one.
         effective_slug = fields["github_repo"] if "github_repo" in fields else current.github_repo
         effective_repo = fields["repo"] if "repo" in fields else current.repo
+        if "github_repo" in fields:
+            self._require_no_stale_repo_identities(current, effective_slug, effective_repo)
+        # Path claims: a remote project's path is not a local identity, but a project
+        # going (or staying) local must hold the claim — including when clearing
+        # github_repo re-localizes a path some other local project has since taken.
         if not effective_slug and ("repo" in fields or "github_repo" in fields):
             self._require_repo_unclaimed(effective_repo, exclude_key=key)
         self.store.update_project(key, fields, _now())
         return self.get_project(key)
 
-    def _require_no_stale_repo_identities(self, project: Project, new_slug: str | None) -> None:
+    def _require_no_stale_repo_identities(
+        self, project: Project, new_slug: str | None, effective_repo: str | None
+    ) -> None:
         """Refuse re-pointing a project's GitHub identity while live tickets still
         carry branch/PR records tied to the OLD identity (SOLO-29). PR numbers and
         branch names are only meaningful within one repository — after a re-point, a
@@ -273,11 +280,12 @@ class Service:
         old_slug = project.github_repo
         if (old_slug or "").lower() == (new_slug or "").lower():
             return  # no identity change (covers case-only renames and no-op clears)
-        if bool(old_slug) != bool(new_slug) and project.repo:
+        if bool(old_slug) != bool(new_slug) and effective_repo:
             # local→remote: the checkout must be the NEW slug's repo; remote→local
-            # (clearing): the checkout must be the OLD slug's repo.
+            # (clearing): the checkout must be the OLD slug's repo. Always the
+            # EFFECTIVE (post-update) repo — the same patch may re-point it.
             anchor = (new_slug or old_slug or "").lower()
-            origin = self._normalized_remote(project.repo)
+            origin = self._normalized_remote(effective_repo)
             if origin is not None:
                 parts = origin.split("/")
                 if len(parts) >= 2 and "/".join(parts[-2:]) == anchor:

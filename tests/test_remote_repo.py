@@ -1004,3 +1004,38 @@ def test_remote_discovery_declines_alias_addressed_local_clone(tmp_path):
     assert done.pr_number is None
     assert not any(c[0] == "api_merge" for c in gh.calls)
     assert any("share this repo" in c for c in _comments(svc, t.id))
+
+
+# --- gpt-review round 4 fixes -------------------------------------------------------
+
+
+def test_multi_field_patch_cannot_smuggle_repo_past_the_identity_gate(tmp_path):
+    """Clearing github_repo AND re-pointing repo in ONE patch must validate the
+    escape hatch against the EFFECTIVE (post-update) repo — otherwise the old path's
+    matching origin vouches for an unrelated new checkout while live tickets keep
+    their old PR numbers."""
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    _remote_project(svc)
+    tid, _ = _to_ai_review(svc)  # live records
+    gh.remote_urls["/home/dev/chessmimic"] = "git@github.com:acme/widget.git"  # old path: old slug
+    with pytest.raises(ValidationError, match="CM-1"):
+        svc.update_project("CM", {"github_repo": "", "repo": "/somewhere/else"})
+    # Control: the single-field clear against the matching checkout stays allowed.
+    svc.update_project("CM", {"github_repo": ""})
+    assert svc.get_project("CM").github_repo is None
+
+
+def test_push_helper_skips_same_state_moves(tmp_path, monkeypatch):
+    """The backend no-ops (or reorders) a move to the ticket's CURRENT state before
+    any git side effect — the client half must not push where the server won't."""
+    monkeypatch.setattr(
+        "solopm.cli.client.GitHub.push_branch",
+        lambda self, repo, branch: pytest.fail("pushed on a same-state no-op move"),
+    )
+    api = _StubApi(
+        {"project": "CM", "branch": "CM-8-fix", "state": "in-ai-review"},
+        {"github_repo": SLUG, "repo": "/x"},
+    )
+    push_branch_for_remote_move(api, "CM-8", "in-ai-review", None)
+    assert len(api.gets) == 1  # looked at the ticket, saw the no-op, stopped

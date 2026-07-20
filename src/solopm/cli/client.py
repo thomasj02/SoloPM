@@ -155,6 +155,10 @@ def push_branch_for_remote_move(api: Api, ticket_id: str, state: str, branch: st
     if not actor or actor == "human":
         return  # agent-only, matching the backend's actor gate
     ticket = api.get(f"/api/tickets/{_path_seg(ticket_id)}")
+    if str((ticket or {}).get("state") or "") == state:
+        # A move to the ticket's CURRENT state is a backend no-op (or a pure reorder
+        # with `after`) — no git side effect runs server-side, so none may run here.
+        return
     branch = branch or str((ticket or {}).get("branch") or "") or None
     if not branch:
         return  # genuinely branchless move: there is no push half anywhere
