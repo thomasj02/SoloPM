@@ -98,6 +98,12 @@ def render_project(p: dict) -> None:
     lines = [
         f"[bold]{p['key']}[/] — {p['name']}",
         f"repo:            {p.get('repo') or '—'}",
+        # Remote mode changes the whole PR lifecycle — it must be visible here.
+        *(
+            [f"github repo:     {p['github_repo']} [grey62](remote — PR lifecycle via GitHub API)[/]"]
+            if p.get("github_repo")
+            else []
+        ),
         f"master branch:   {p['master_branch']}",
         f"branch convention: {p['branch_convention']}",
         f"implementer:     {_assignee_label(p['default_implementer'])}",
@@ -115,6 +121,11 @@ def render_prune(r: dict) -> None:
     pruned = r.get("pruned", [])
     skipped = r.get("skipped", [])
     applied = r.get("applied", False)
+    if r.get("note"):
+        # The service declined (e.g. a remote project) — that must not render as a
+        # clean "nothing to prune", which would imply the repo was scanned.
+        console.print(f"[yellow]⚠[/] {r['note']}")
+        return
     if not pruned and not skipped:
         console.print("[green]✓[/] No merged local branches to prune.")
         return

@@ -179,8 +179,11 @@ class Service:
             pass
         else:
             raise DuplicateError(f"Project {key!r} already exists.")
-        self._require_repo_unclaimed(repo, exclude_key=key)
         github_repo = self._prepare_github_repo(github_repo, exclude_key=key)
+        if not github_repo:
+            # Local project: claim the checkout path. A remote project claims its slug
+            # instead — its path names a directory on another machine (SOLO-29).
+            self._require_repo_unclaimed(repo, exclude_key=key)
         now = _now()
         project = Project(
             key=key,
@@ -219,13 +222,20 @@ class Service:
             )
         if "name" in fields and not str(fields["name"]).strip():
             raise ValidationError("Project name cannot be blank.")
-        if "repo" in fields:
-            self._require_repo_unclaimed(fields["repo"], exclude_key=key)
         if "github_repo" in fields:
             fields = {
                 **fields,
                 "github_repo": self._prepare_github_repo(fields["github_repo"], exclude_key=key),
             }
+        # Path claims apply to the project's EFFECTIVE post-update state: a remote
+        # project's path is not a local identity, but a project going (or staying)
+        # local must hold the claim — including when clearing github_repo re-localizes
+        # a path some other local project has since taken.
+        current = self.get_project(key)
+        effective_slug = fields["github_repo"] if "github_repo" in fields else current.github_repo
+        effective_repo = fields["repo"] if "repo" in fields else current.repo
+        if not effective_slug and ("repo" in fields or "github_repo" in fields):
+            self._require_repo_unclaimed(effective_repo, exclude_key=key)
         self.store.update_project(key, fields, _now())
         return self.get_project(key)
 
@@ -296,13 +306,20 @@ class Service:
     def _require_repo_unclaimed(self, repo: str | None, *, exclude_key: str | None = None) -> None:
         """Enforce the documented project ↔ repo 1:1 mapping. Every repo-scoped feature
         (PR ownership/discovery, prune, radar, status) reasons per-project and would
-        silently cross wires if two projects shared a repository."""
+        silently cross wires if two projects shared a repository.
+
+        Path claims hold between LOCAL projects only, matching ``_repo_identities``:
+        a remote project's ``repo`` names a directory on another machine, where an
+        equal path string need not be the same repository — remote projects claim
+        their GitHub slug instead (``_prepare_github_repo``)."""
         if not repo:
             return
         target = _canonical_path(repo)
         for p in self.list_projects():
             if exclude_key is not None and p.key == exclude_key:
                 continue
+            if p.github_repo:
+                continue  # remote project: its path is not a local identity (SOLO-29)
             if p.repo and _canonical_path(p.repo) == target:
                 raise ValidationError(
                     f"Repo {repo!r} is already mapped to project {p.key} — "

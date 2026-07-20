@@ -136,14 +136,20 @@ def radar(
 
     def render(data: dict) -> None:
         overlaps = data.get("overlaps", [])
-        if not overlaps:
+        skipped = data.get("skipped", [])
+        if overlaps:
+            output.console.print(f"[yellow]⚠ {len(overlaps)} overlap(s):[/]")
+            for ov in overlaps:
+                a = ov["a"]["ticket"] or ov["a"]["branch"]
+                b = ov["b"]["ticket"] or ov["b"]["branch"]
+                output.console.print(f"  [bold]{a}[/] ⇄ [bold]{b}[/] — {', '.join(ov['files'])}")
+        elif not skipped:
             output.console.print("[green]✓[/] No overlaps among active worktrees.")
-            return
-        output.console.print(f"[yellow]⚠ {len(overlaps)} overlap(s):[/]")
-        for ov in overlaps:
-            a = ov["a"]["ticket"] or ov["a"]["branch"]
-            b = ov["b"]["ticket"] or ov["b"]["branch"]
-            output.console.print(f"  [bold]{a}[/] ⇄ [bold]{b}[/] — {', '.join(ov['files'])}")
+        # Unscanned projects must not hide inside a clean result (SOLO-29).
+        for s in skipped:
+            output.console.print(f"[grey62]not scanned: {s['project']} — {s['reason']}[/]")
+        if not overlaps and skipped:
+            output.console.print("[green]✓[/] No overlaps among scanned worktrees.")
 
     _run(call, lambda api: api.get(path), render)
 

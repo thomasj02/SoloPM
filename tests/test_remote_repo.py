@@ -184,6 +184,8 @@ def test_remote_done_merges_recorded_pr_via_api(tmp_path):
     done = svc.move_ticket(tid, "done", actor="human")
     assert ("api_merge", SLUG, 17) in gh.calls
     assert done.pr_state == "merged"
+    # Cleanup targets the freshly resolved PR head, threaded through to the merge.
+    assert gh.merge_branch == "CM-1-fix"
     note = _comments(svc, tid)[-1]
     assert "Merged PR #17" in note
     # honest remote wording: the checkout lives on the dev machine, not here
@@ -296,6 +298,12 @@ def test_remote_cancelled_closes_pr_via_api(tmp_path):
     cancelled = svc.move_ticket(tid, "cancelled", actor="claude")
     assert ("api_close", SLUG, 17) in gh.calls
     assert cancelled.pr_state == "closed"
+    assert gh.close_branch == "CM-1-fix"  # cleanup targets the resolved PR head
+    note = _comments(svc, tid)[-1]
+    assert "Closed PR #17" in note
+    # Remote wording: only the ORIGIN ref was cleaned; the dev machine is untouched.
+    assert "Origin branch" in note and "dev machine" in note
+    assert "worktree" not in note
     _assert_no_cwd_git(gh)
 
 
@@ -435,8 +443,9 @@ def test_api_slug_is_validated_before_any_command(monkeypatch):
 class _StubApi:
     """Just enough of Api for push_branch_for_remote_move: canned GET responses."""
 
-    def __init__(self, ticket, project):
+    def __init__(self, ticket, project, agent="claude"):
         self._responses = {"ticket": ticket, "project": project}
+        self.agent = agent
         self.gets: list[str] = []
 
     def get(self, path, **kwargs):
@@ -456,6 +465,48 @@ def test_push_helper_pushes_for_remote_project(tmp_path, monkeypatch):
     assert pushes == [(str(repo), "CM-8-fix")]
 
 
+def test_push_helper_falls_back_to_the_recorded_branch(tmp_path, monkeypatch):
+    """A re-review move legally omits the (already pinned) branch — the server falls
+    back to ticket.branch, and the client half must push the same branch or the PR is
+    reviewed and merged stale."""
+    pushes = []
+    monkeypatch.setattr(
+        "solopm.cli.client.GitHub.push_branch", lambda self, repo, branch: pushes.append((repo, branch))
+    )
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    api = _StubApi(
+        {"project": "CM", "branch": "CM-8-fix"}, {"github_repo": SLUG, "repo": str(repo)}
+    )
+    push_branch_for_remote_move(api, "CM-8", "in-ai-review", None)
+    assert pushes == [(str(repo), "CM-8-fix")]
+
+
+def test_push_helper_skips_human_moves(tmp_path, monkeypatch):
+    """Git automation is agent-only: the backend skips it for human actors, and the
+    client half must too — a human recording a branch may not even have the checkout."""
+    monkeypatch.setattr(
+        "solopm.cli.client.GitHub.push_branch",
+        lambda self, repo, branch: pytest.fail("pushed for a human move"),
+    )
+    for actor in (None, "human"):
+        api = _StubApi(
+            {"project": "CM", "branch": "b"}, {"github_repo": SLUG, "repo": "/gone"}, agent=actor
+        )
+        push_branch_for_remote_move(api, "CM-8", "in-ai-review", "CM-8-fix")
+        assert api.gets == []  # not even a lookup round-trip
+
+
+def test_push_helper_rejects_pathological_ids_before_any_request(tmp_path):
+    """Review-memory standard: identifiers in URL paths reject empty/'/'/'.'/'..'
+    outright — quote() alone lets httpx dot-normalize them onto different routes."""
+    api = _StubApi({}, {})
+    for bad in ("", ".", "..", "CM/8"):
+        with pytest.raises(ApiError, match="Invalid path value"):
+            push_branch_for_remote_move(api, bad, "in-ai-review", "b")
+    assert api.gets == []
+
+
 def test_push_helper_noop_for_local_projects_and_other_states(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "solopm.cli.client.GitHub.push_branch",
@@ -465,8 +516,11 @@ def test_push_helper_noop_for_local_projects_and_other_states(tmp_path, monkeypa
     push_branch_for_remote_move(api, "CM-8", "in-ai-review", "CM-8-fix")  # local → no push
     idle = _StubApi({}, {})
     push_branch_for_remote_move(idle, "CM-8", "done", "CM-8-fix")  # wrong state
-    push_branch_for_remote_move(idle, "CM-8", "in-ai-review", None)  # no branch
     assert idle.gets == []  # not even a lookup round-trip
+    # No explicit branch and none recorded on the ticket → nothing to push.
+    branchless = _StubApi({"project": "CM", "branch": None}, {"github_repo": SLUG, "repo": "/x"})
+    push_branch_for_remote_move(branchless, "CM-8", "in-ai-review", None)
+    assert len(branchless.gets) == 1  # looked at the ticket, then stopped
 
 
 def test_push_helper_missing_repo_dir_fails_before_the_move(tmp_path, monkeypatch):
@@ -527,3 +581,193 @@ def test_http_move_ticket_pushes_before_the_move_and_aborts_on_failure(tmp_path,
     failed = tools.move_ticket(t["id"], "in-ai-review", branch="CM-1-fix")
     assert failed["error"]["message"] == "push exploded"
     assert tools.show_ticket(t["id"])["state"] == "in-progress"
+
+    # The review-loop resubmission: the branch is already recorded and pinned, so the
+    # move legally omits it — the client must still push the RECORDED branch, or the
+    # fix commits never reach the PR and a later done merges stale code.
+    pushes.clear()
+    monkeypatch.setattr(
+        "solopm.cli.client.GitHub.push_branch", lambda self, r, b: pushes.append((r, b))
+    )
+    removed = tools.move_ticket(t["id"], "in-ai-review")
+    assert "error" not in removed
+    assert pushes == [(str(repo), "CM-1-fix")]
+
+
+# --- claim model: paths are local identities, slugs are remote ones ---------------
+
+
+def test_remote_repo_paths_are_not_local_claims(tmp_path):
+    """A remote project's repo names a directory on ANOTHER machine — an equal path
+    string is not the same repository, so it neither claims nor blocks local paths."""
+    svc = _svc(tmp_path)
+    _remote_project(svc)  # CM: remote, repo=/home/dev/chessmimic (a dev-machine path)
+    # A LOCAL project may use the same path string — it's a different machine's dir.
+    svc.add_project(key="LOC", name="Local", repo="/home/dev/chessmimic")
+    # And another REMOTE project (different slug) may too — think standardized
+    # dev-container paths on two different machines.
+    svc.add_project(
+        key="RM2", name="Other", repo="/home/dev/chessmimic", github_repo="acme/gadget"
+    )
+    # Local ↔ local still enforces the 1:1 claim.
+    with pytest.raises(ValidationError, match="1:1"):
+        svc.add_project(key="LOC2", name="Local2", repo="/home/dev/chessmimic")
+
+
+def test_clearing_github_repo_rechecks_the_path_claim(tmp_path):
+    """Going remote → local re-localizes the path: if another local project has since
+    claimed it, the clear must be refused, or two local projects would share a repo."""
+    svc = _svc(tmp_path)
+    _remote_project(svc)
+    svc.add_project(key="LOC", name="Local", repo="/home/dev/chessmimic")  # ok: CM remote
+    with pytest.raises(ValidationError, match="1:1"):
+        svc.update_project("CM", {"github_repo": ""})
+
+
+# --- API-mode command shapes for the mutating commands -----------------------------
+
+
+def test_api_mutating_commands_carry_the_slug():
+    """A dropped --repo on a cwd-less command would make gh act on whatever checkout
+    the backend process happens to run in — every mutating command must carry the slug."""
+    gh = GitHub()
+    seen = []
+
+    class Script:
+        def __init__(self):
+            self.no_pr_once = True
+
+        def __call__(self, args, cwd, *, check=True):
+            seen.append((args, cwd))
+            if args[:3] == ["gh", "pr", "view"] and args[3] == "b-fix":  # find by branch
+                if self.no_pr_once:
+                    self.no_pr_once = False
+                    return _Proc(1, stderr="no pull requests found")
+                return _Proc(0, '{"number": 7, "url": "u", "state": "OPEN"}')
+            if args[:3] == ["gh", "pr", "view"]:  # by number: preflight/readback
+                return _Proc(0, '{"state": "MERGED", "mergeCommit": {"oid": "abc"}}')
+            return _Proc(0, "{}")
+
+    gh._run = Script()
+
+    pr = gh.api_open_or_refresh_pr(SLUG, "b-fix", "main", "t", "")
+    assert pr.number == 7
+    merged = gh.api_merge_pr(SLUG, 7, "b-fix")  # already-MERGED preflight path
+    assert merged.state == "merged" and merged.sha == "abc" and merged.branch_deleted
+    gh.api_close_pr(SLUG, 8, "b2")  # MERGED != CLOSED -> gh pr close runs
+    gh.api_check_repo(SLUG)
+
+    assert len(seen) >= 8
+    for args, cwd in seen:
+        assert cwd is None, args
+        via_repo_flag = "--repo" in args and SLUG in args
+        via_api_path = args[:2] == ["gh", "api"] and any(
+            f"repos/{SLUG}/" in str(a) for a in args
+        )
+        via_repo_view = args[:3] == ["gh", "repo", "view"] and SLUG in args
+        assert via_repo_flag or via_api_path or via_repo_view, args
+
+
+def test_api_delete_remote_branch_semantics():
+    gh = GitHub()
+    calls = []
+
+    def runner(args, cwd, *, check=True):
+        calls.append((args, cwd))
+        return runner.proc
+
+    gh._run = runner
+    runner.proc = _Proc(0)
+    assert gh._api_delete_remote_branch(SLUG, "feature/x") is True
+    args, cwd = calls[-1]
+    assert cwd is None and args[:4] == ["gh", "api", "-X", "DELETE"]
+    assert args[4] == f"repos/{SLUG}/git/refs/heads/feature/x"
+    # An already-absent ref is a clean state (auto-delete-on-merge beat us), not a failure.
+    runner.proc = _Proc(1, stderr="gh: Reference does not exist (HTTP 422)")
+    assert gh._api_delete_remote_branch(SLUG, "b") is True
+    runner.proc = _Proc(1, stderr="HTTP 403")
+    assert gh._api_delete_remote_branch(SLUG, "b") is False
+    ran = len(calls)
+    assert gh._api_delete_remote_branch(SLUG, None) is False  # nothing to delete
+    assert gh._api_delete_remote_branch(SLUG, "-bad") is False  # never feed git an option
+    assert len(calls) == ran  # neither reached a command
+
+
+# --- CLI wiring -------------------------------------------------------------------
+
+
+def _cli(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from typer.testing import CliRunner
+
+    from solopm.cli import main as cli_main
+    from solopm.server.app import create_app
+
+    store = Store(tmp_path / "cli.db")
+    store.init()
+    app = create_app(Service(store), allowed_hosts=["*"])
+    monkeypatch.setattr(
+        cli_main,
+        "make_api",
+        lambda call: Api("http://test", agent=call.agent, client=TestClient(app)),
+    )
+    runner = CliRunner()
+    return runner, cli_main
+
+
+def test_cli_move_pushes_for_remote_project(tmp_path, monkeypatch):
+    runner, cli_main = _cli(tmp_path, monkeypatch)
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    r = runner.invoke(
+        cli_main.app,
+        ["project", "add", "--key", "CM", "--name", "C", "--repo", str(repo),
+         "--github-repo", SLUG, "--json"],
+    )
+    assert r.exit_code == 0, r.output
+    runner.invoke(cli_main.app, ["ticket", "create", "--project", "CM", "--title", "x", "--json"])
+    runner.invoke(cli_main.app, ["ticket", "move", "CM-1", "in-progress", "--json"])
+
+    pushes = []
+    monkeypatch.setattr(
+        "solopm.cli.client.GitHub.push_branch", lambda self, rp, b: pushes.append((rp, b))
+    )
+    r = runner.invoke(
+        cli_main.app,
+        ["ticket", "move", "CM-1", "in-ai-review", "--branch", "CM-1-fix",
+         "--agent", "claude", "--json"],
+    )
+    assert r.exit_code == 0, r.output
+    assert pushes == [(str(repo), "CM-1-fix")]
+
+    # A HUMAN move (no --agent) records the branch but never touches git.
+    runner.invoke(cli_main.app, ["ticket", "move", "CM-1", "in-progress", "--json"])
+    monkeypatch.setattr(
+        "solopm.cli.client.GitHub.push_branch",
+        lambda self, rp, b: pytest.fail("a human move pushed"),
+    )
+    r = runner.invoke(
+        cli_main.app,
+        ["ticket", "move", "CM-1", "in-ai-review", "--branch", "CM-1-fix", "--json"],
+    )
+    assert r.exit_code == 0, r.output
+
+
+def test_cli_renders_remote_declines(tmp_path, monkeypatch):
+    """The honest declines must survive the human-readable renderers — a remote
+    project's prune/radar must not print as a clean scanned-and-empty result."""
+    runner, cli_main = _cli(tmp_path, monkeypatch)
+    r = runner.invoke(
+        cli_main.app,
+        ["project", "add", "--key", "CM", "--name", "C", "--repo", "/home/dev/x",
+         "--github-repo", SLUG, "--json"],
+    )
+    assert r.exit_code == 0, r.output
+    r = runner.invoke(cli_main.app, ["project", "prune", "CM"])
+    assert "dev machine" in r.output
+    assert "No merged local branches" not in r.output
+    r = runner.invoke(cli_main.app, ["radar"])
+    assert "not scanned" in r.output
+    assert "CM" in r.output
+    r = runner.invoke(cli_main.app, ["project", "show", "CM"])
+    assert SLUG in r.output  # remote mode is visible in the project view

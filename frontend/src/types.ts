@@ -262,6 +262,8 @@ export interface PruneResult {
   applied: boolean;
   pruned: PruneEntry[];
   skipped: PruneSkip[];
+  /** Set when the service declined to scan (e.g. a remote project, SOLO-29). */
+  note?: string;
 }
 
 export interface TicketCreate {

@@ -548,7 +548,10 @@ async function confirmPruneBranches(key: string): Promise<void> {
   const skipped = dry.skipped ?? [];
 
   const body = el("div", { class: "form" });
-  if (!pruned.length && !skipped.length) {
+  if (dry.note) {
+    // The service declined to scan (remote project) — don't render it as "clean".
+    body.append(el("p", { class: "muted" }, `⚠ ${dry.note}`));
+  } else if (!pruned.length && !skipped.length) {
     body.append(el("p", { class: "muted" }, "No merged local branches to prune."));
   } else {
     if (pruned.length) {

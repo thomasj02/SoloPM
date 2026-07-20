@@ -133,13 +133,16 @@ class FakeGitHub:
         self.merge_branch = branch
         if self.merge_state == "queued":
             return MergeResult("queued")
-        return MergeResult("merged", self.merge_sha, branch_deleted=self.branch_deleted)
+        # Mirror the real semantics: with no branch there is nothing to clean up,
+        # so branch_deleted can never be True.
+        deleted = self.branch_deleted and branch is not None
+        return MergeResult("merged", self.merge_sha, branch_deleted=deleted)
 
     def api_close_pr(self, slug, number, branch=None):
         self._maybe_fail("api_close_pr")
         self.calls.append(("api_close", slug, number))
         self.close_branch = branch
-        return CloseResult(branch_deleted=self.branch_deleted)
+        return CloseResult(branch_deleted=self.branch_deleted and branch is not None)
 
 
 def _svc(tmp_path, github=None, repo="/tmp/repo"):
