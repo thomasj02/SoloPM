@@ -1065,3 +1065,31 @@ def test_discovery_claims_scoped_to_the_current_slug_after_a_repoint(tmp_path):
     assert done.pr_number == 17
     assert done.pr_state == "merged"
     assert ("api_merge", "acme/new", 17) in gh.calls
+
+
+# --- gpt-review round 6 fix ----------------------------------------------------------
+
+
+def test_local_discovery_claims_scoped_by_checkout_origin_after_conversion(tmp_path):
+    """The local-mode mirror of the round-5 fix: after a legal remote→local conversion
+    (all old tickets terminal), a terminal ticket's old-slug PR record must not veto
+    local discovery when the checkout's origin is knowable and names a different repo.
+    An unknowable origin stays conservative."""
+    gh = FakeGitHub(pr_number=17)
+    svc = _svc(tmp_path, github=gh)
+    svc.add_project(key="CM", name="C", repo="/home/dev/x", github_repo="acme/old")
+    tid, _ = _to_ai_review(svc)  # PR #17 recorded at github.com/acme/widget (fake URL)
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    svc.move_ticket(tid, "done", actor="human")  # terminal → conversion is legal
+    svc.update_project("CM", {"github_repo": ""})  # now a local project
+    # The local checkout's origin names a DIFFERENT repo than the old claims' URLs,
+    # and its open-PR listing reuses number 17 with a convention-matching head.
+    gh.remote_urls["/home/dev/x"] = "git@github.com:acme/new.git"
+    gh.open_prs = [_pr(17, head="CM-2-fix")]
+    t2 = svc.create_ticket(project="CM", title="y")
+    svc.move_ticket(t2.id, "in-progress")
+    svc.move_ticket(t2.id, "in-ai-review", actor="claude")  # branchless (no record)
+    svc.move_ticket(t2.id, "in-human-review", actor="codex")
+    done = svc.move_ticket(t2.id, "done", actor="human")
+    assert done.pr_number == 17
+    assert done.pr_state == "merged"

@@ -943,13 +943,21 @@ class Service:
                 # A sibling's PR/branch claim only vetoes discovery when it belongs to
                 # THIS repository: after a legal re-point (all old tickets terminal),
                 # a terminal ticket's old-repo PR number would otherwise deterministically
-                # suppress a new-repo PR that happens to reuse the number. A claim whose
-                # pr_url names another repo is the old era's; one with no URL at all
+                # suppress a new-repo PR that happens to reuse the number. The anchor is
+                # the project's slug (remote mode) or the checkout origin's owner/name
+                # (local mode). A claim with no URL, or an unknowable local identity,
                 # can't be attributed and stays conservative (still counts).
+                claim_anchor = ops.slug
+                if not ops.remote:
+                    claim_anchor = None
+                    origin_parts = (self._normalized_remote(ops.repo) or "").split("/")
+                    if len(origin_parts) >= 3:  # host + at least owner/name
+                        claim_anchor = "/".join(origin_parts[-2:])
+
                 def _claims_here(t: Ticket) -> bool:
-                    if not ops.remote or t.pr_url is None:
+                    if t.pr_url is None or claim_anchor is None:
                         return True
-                    return _pr_url_matches_slug(t.pr_url, ops.slug)
+                    return _pr_url_matches_slug(t.pr_url, claim_anchor)
 
                 claimed_numbers = {
                     t.pr_number for t in siblings if t.pr_number is not None and _claims_here(t)
