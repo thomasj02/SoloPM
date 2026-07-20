@@ -16,7 +16,7 @@ import functools
 from typing import Callable
 from urllib.parse import quote
 
-from ..cli.client import Api, ApiError
+from ..cli.client import Api, ApiError, push_branch_for_remote_move
 from ..core.errors import SoloPMError, ValidationError
 from ..core.models import DEFAULT_BRANCH_CONVENTION, DEFAULT_REVIEW_PROMPT
 from . import tools as _tools
@@ -74,6 +74,7 @@ class HttpSoloPMTools:
         key: str,
         name: str,
         repo: str | None = None,
+        github_repo: str | None = None,
         master: str = "main",
         branch_convention: str = DEFAULT_BRANCH_CONVENTION,
         default_implementer: str = "claude",
@@ -86,6 +87,7 @@ class HttpSoloPMTools:
                 "key": key,
                 "name": name,
                 "repo": repo,
+                "github_repo": github_repo,
                 "master": master,
                 "branch_convention": branch_convention,
                 "default_implementer": default_implementer,
@@ -100,6 +102,7 @@ class HttpSoloPMTools:
         key: str,
         name: str | None = None,
         repo: str | None = None,
+        github_repo: str | None = None,
         master_branch: str | None = None,
         branch_convention: str | None = None,
         default_implementer: str | None = None,
@@ -110,6 +113,7 @@ class HttpSoloPMTools:
             {
                 "name": name,
                 "repo": repo,
+                "github_repo": github_repo,
                 "master_branch": master_branch,
                 "branch_convention": branch_convention,
                 "default_implementer": default_implementer,
@@ -119,8 +123,9 @@ class HttpSoloPMTools:
         )
         if not fields:
             raise ValidationError(
-                "Provide at least one field to edit: name, repo, master_branch, "
-                "branch_convention, default_implementer, default_reviewer, review_prompt."
+                "Provide at least one field to edit: name, repo, github_repo, "
+                "master_branch, branch_convention, default_implementer, "
+                "default_reviewer, review_prompt."
             )
         return self.api.patch(f"/api/projects/{_seg(key)}", json=fields)
 
@@ -186,6 +191,10 @@ class HttpSoloPMTools:
     def move_ticket(
         self, ticket_id: str, state: str, branch: str | None = None, after: str | None = None
     ) -> dict:
+        # SOLO-29: for a remote project (github_repo set) the commits live on THIS
+        # machine, not the backend's — push the branch from here first; a push failure
+        # raises and the move endpoint is never called.
+        push_branch_for_remote_move(self.api, ticket_id, state, branch)
         # `after` must be OMITTED when None: the endpoint reads model_fields_set, and an
         # explicit null means "top of column" while an absent key means "bottom" — the
         # same distinction tools.py preserves by dropping the kwarg (see tools.py:175).

@@ -207,9 +207,37 @@ SOLOPM_HOST=0.0.0.0 SOLOPM_ALLOWED_HOSTS=workstation,192.168.1.50 solopm serve
 ```
 
 Repo-filesystem tools (`radar`, `prune_merged_branches`, PR automation on
-`move_ticket`) execute on the backend's machine, which is where the repos live; and
-`--channel` requires the local store, so it can't be combined with `--url` (the API has
-no activity feed to poll — yet).
+`move_ticket`) execute on the backend's machine, which is where the repos live — unless
+the project is marked **remote** (below); and `--channel` requires the local store, so
+it can't be combined with `--url` (the API has no activity feed to poll — yet).
+
+### Remote-repo projects (`github_repo`)
+
+A project whose checkout lives on a **different machine than the backend** (e.g. you
+run `solopm serve` on a workstation but develop that repo on a server over the HTTP
+MCP) sets `github_repo` to the repo's `owner/name` GitHub slug:
+
+```bash
+solopm project set CM github_repo acme/widget
+```
+
+This splits the PR lifecycle by locality, with GitHub as the rendezvous:
+
+- The **backend** stops running cwd-based `git`/`gh` for the project entirely and
+  drives PRs through the GitHub API (`gh --repo <slug>`): it opens the PR on
+  `in-ai-review` (after verifying the branch is on origin), squash-merges on `done`,
+  closes on `cancelled`, and discovers unrecorded PRs via the API listing. The
+  backend's `gh` account therefore needs **write access to the slug** — checked when
+  you set `github_repo`, so access problems surface at config time.
+- The **SoloPM client half** (the HTTP-mode MCP or the CLI, running on the machine
+  that has the commits) pushes the branch before a move to `in-ai-review` — the one
+  operation that genuinely needs the checkout. `repo` stays set to the checkout path
+  *on that machine*. Agents don't change anything: the same move-with-`branch` call
+  does the right thing in both modes.
+- Inherently machine-local helpers decline honestly instead of scanning nothing:
+  `radar` reports the project under `skipped`, `prune_merged_branches` returns a
+  `note` (branches live on the dev machine), and the board's unpushed-commits count
+  stays 0.
 
 ### Channel mode (proactive notifications)
 

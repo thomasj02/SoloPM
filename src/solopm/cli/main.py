@@ -16,7 +16,7 @@ import typer
 from typing_extensions import Annotated
 
 from .. import __version__, config
-from . import output
+from . import client, output
 from .client import Api, ApiError
 
 app = typer.Typer(
@@ -136,14 +136,20 @@ def radar(
 
     def render(data: dict) -> None:
         overlaps = data.get("overlaps", [])
-        if not overlaps:
+        skipped = data.get("skipped", [])
+        if overlaps:
+            output.console.print(f"[yellow]⚠ {len(overlaps)} overlap(s):[/]")
+            for ov in overlaps:
+                a = ov["a"]["ticket"] or ov["a"]["branch"]
+                b = ov["b"]["ticket"] or ov["b"]["branch"]
+                output.console.print(f"  [bold]{a}[/] ⇄ [bold]{b}[/] — {', '.join(ov['files'])}")
+        elif not skipped:
             output.console.print("[green]✓[/] No overlaps among active worktrees.")
-            return
-        output.console.print(f"[yellow]⚠ {len(overlaps)} overlap(s):[/]")
-        for ov in overlaps:
-            a = ov["a"]["ticket"] or ov["a"]["branch"]
-            b = ov["b"]["ticket"] or ov["b"]["branch"]
-            output.console.print(f"  [bold]{a}[/] ⇄ [bold]{b}[/] — {', '.join(ov['files'])}")
+        # Unscanned projects must not hide inside a clean result (SOLO-29).
+        for s in skipped:
+            output.console.print(f"[grey62]not scanned: {s['project']} — {s['reason']}[/]")
+        if not overlaps and skipped:
+            output.console.print("[green]✓[/] No overlaps among scanned worktrees.")
 
     _run(call, lambda api: api.get(path), render)
 
@@ -293,14 +299,22 @@ def mcp_cmd(
 def project_add(
     key: Annotated[str, typer.Option("--key", help="Project key, e.g. SOLO.")],
     name: Annotated[str, typer.Option("--name", help="Project name.")],
-    repo: Annotated[Optional[str], typer.Option("--repo", help="Local repo path.")] = None,
+    repo: Annotated[Optional[str], typer.Option("--repo", help="Repo checkout path.")] = None,
+    github_repo: Annotated[
+        Optional[str],
+        typer.Option(
+            "--github-repo",
+            help="owner/name slug for a repo whose checkout lives on another machine "
+            "than the backend (PR lifecycle then runs via the GitHub API).",
+        ),
+    ] = None,
     master: Annotated[str, typer.Option("--master", help="Master branch.")] = "main",
     json_out: JsonOpt = False,
     url: UrlOpt = None,
 ) -> None:
     """Register a project."""
     call = Call(json_out, None, url)
-    body = {"key": key, "name": name, "repo": repo, "master": master}
+    body = {"key": key, "name": name, "repo": repo, "github_repo": github_repo, "master": master}
     _run(call, lambda api: api.post("/api/projects", json=body), output.render_project)
 
 
@@ -545,11 +559,13 @@ def ticket_move(
     def render(t: dict) -> None:
         output.console.print(f"[green]✓[/] {t['id']} → [bold]{t['state']}[/]")
 
-    _run(
-        call,
-        lambda api: api.post(f"/api/tickets/{ticket_id}/move", json=body),
-        render,
-    )
+    def do_move(api: client.Api) -> dict:
+        # SOLO-29: for a remote project (github_repo set) the commits live on THIS
+        # machine — push the branch from here first; a failure aborts before the move.
+        client.push_branch_for_remote_move(api, ticket_id, state, branch)
+        return api.post(f"/api/tickets/{ticket_id}/move", json=body)
+
+    _run(call, do_move, render)
 
 
 @ticket_app.command("assign")

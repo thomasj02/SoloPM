@@ -26,6 +26,7 @@ class FakeGitHub:
         open_prs: list | None = None,
         has_pr_for_branch: bool = True,
         remote_urls: dict | None = None,
+        branch_on_origin: bool = True,
     ):
         self.calls: list[tuple] = []
         self.pr_number = pr_number
@@ -35,7 +36,9 @@ class FakeGitHub:
         self.branch_deleted = branch_deleted
         self.open_prs = list(open_prs or [])  # what list_open_prs reports (SOLO-27)
         self.has_pr_for_branch = has_pr_for_branch  # find_pr returns None when False
-        self.remote_urls = dict(remote_urls or {})  # repo path -> origin URL
+        self.remote_urls = dict(remote_urls or {})  # repo path -> origin (fetch) URL
+        self.remote_push_urls: dict = {}  # repo path -> origin push URL (when split)
+        self.branch_on_origin = branch_on_origin  # what api_branch_exists reports (SOLO-29)
         self.head_branch = None  # the PR head, recorded when a PR is opened/found
         self.merge_branch = None  # branch the client was last asked to clean up
         self.close_branch = None
@@ -65,6 +68,11 @@ class FakeGitHub:
         self._maybe_fail("remote_url")
         return (self.remote_urls or {}).get(repo)
 
+    def remote_push_url(self, repo):
+        self._maybe_fail("remote_push_url")
+        # Like git: the push URL defaults to the fetch URL unless split explicitly.
+        return self.remote_push_urls.get(repo) or self.remote_urls.get(repo)
+
     def open_or_refresh_pr(self, repo, branch, base, title, body):
         self._maybe_fail("open_or_refresh_pr")
         self.calls.append(("pr", branch, base, title))
@@ -89,6 +97,58 @@ class FakeGitHub:
         self.calls.append(("close", number))
         self.close_branch = branch
         return CloseResult(branch_deleted=self.branch_deleted)
+
+    # --- API-mode surface (SOLO-29): remote projects, addressed by slug -------
+
+    def api_check_repo(self, slug):
+        self._maybe_fail("api_check_repo")
+        self.calls.append(("api_check_repo", slug))
+
+    def api_branch_exists(self, slug, branch):
+        self._maybe_fail("api_branch_exists")
+        self.calls.append(("api_branch_exists", slug, branch))
+        return self.branch_on_origin
+
+    def api_find_pr(self, slug, branch):
+        self._maybe_fail("api_find_pr")
+        self.calls.append(("api_find", slug, branch))
+        if not self.has_pr_for_branch:
+            return None
+        self.head_branch = branch
+        return PR(number=self.pr_number, url=f"https://github.com/acme/widget/pull/{self.pr_number}", state="open")
+
+    def api_list_open_prs(self, slug):
+        self._maybe_fail("api_list_open_prs")
+        self.calls.append(("api_list_open", slug))
+        return list(self.open_prs)
+
+    def api_open_or_refresh_pr(self, slug, branch, base, title, body):
+        self._maybe_fail("api_open_or_refresh_pr")
+        self.calls.append(("api_pr", slug, branch, base, title))
+        self.head_branch = branch
+        return PR(number=self.pr_number, url=f"https://github.com/acme/widget/pull/{self.pr_number}", state="open")
+
+    def api_pr_head(self, slug, number):
+        self._maybe_fail("api_pr_head")
+        self.calls.append(("api_head", slug, number))
+        return self.head_branch
+
+    def api_merge_pr(self, slug, number, branch=None):
+        self._maybe_fail("api_merge_pr")
+        self.calls.append(("api_merge", slug, number))
+        self.merge_branch = branch
+        if self.merge_state == "queued":
+            return MergeResult("queued")
+        # Mirror the real semantics: with no branch there is nothing to clean up,
+        # so branch_deleted can never be True.
+        deleted = self.branch_deleted and branch is not None
+        return MergeResult("merged", self.merge_sha, branch_deleted=deleted)
+
+    def api_close_pr(self, slug, number, branch=None):
+        self._maybe_fail("api_close_pr")
+        self.calls.append(("api_close", slug, number))
+        self.close_branch = branch
+        return CloseResult(branch_deleted=self.branch_deleted and branch is not None)
 
 
 def _svc(tmp_path, github=None, repo="/tmp/repo"):

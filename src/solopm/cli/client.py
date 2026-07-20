@@ -6,9 +6,14 @@ Translates HTTP failures into :class:`ApiError`, which carries the backend's
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
+
+from ..core.errors import SoloPMError
+from ..core.github import GitHub, normalize_remote_url
 
 
 class ApiError(Exception):
@@ -103,3 +108,104 @@ def _safe_json(resp: httpx.Response) -> Any:
         return resp.json()
     except Exception:
         return None
+
+
+def _path_seg(value: str) -> str:
+    """Percent-encode a URL path segment, rejecting empty / '/' / '.' / '..' outright.
+
+    The same rule as ``http_tools._seg`` (project standard from SOLO-26): quoting alone
+    is insufficient — ASGI decodes %2F before routing and httpx dot-normalizes the
+    path, so these values silently change the route instead of erroring. Raised as
+    :class:`ApiError` (code ``validation``, same message shape) — this layer's native
+    failure, rendered uniformly by the CLI and the HTTP MCP.
+    """
+    value = str(value)
+    if not value or "/" in value or value in (".", ".."):
+        raise ApiError("validation", f"Invalid path value {value!r}.")
+    return quote(value, safe="")
+
+
+def push_branch_for_remote_move(api: Api, ticket_id: str, state: str, branch: str | None) -> None:
+    """The client half of the remote-project PR lifecycle (SOLO-29).
+
+    For a project with ``github_repo`` set the backend has no checkout — the commits
+    exist only on the machine running this client — so an agent move to
+    ``in-ai-review`` must push the ticket's branch from HERE before the move API call
+    (the backend then verifies it on origin and opens or refreshes the PR). The branch
+    to push is the explicit ``branch`` argument or, mirroring the server's
+    ``branch or ticket.branch`` fallback, the ticket's recorded branch — a re-review
+    move that omits the (already pinned) branch must still push the fix commits, or
+    the PR would be reviewed and merged stale.
+
+    A no-op for every other transition, for local projects, and for HUMAN moves: git
+    automation is agent-only (the backend's actor gate skips it for humans too), and a
+    human recording a branch may be on a machine without the checkout. Raises
+    :class:`ApiError` on any failure so the caller never reaches the move: pushing
+    after a failed move (or moving after a failed push) would leave the lifecycle
+    half-run.
+
+    Trade-off: if the move itself is later rejected (bad transition, validation), the
+    branch has already been pushed — harmless, it just sits on origin with no PR.
+    """
+    if state != "in-ai-review":
+        return
+    # The backend strips + lowercases the actor header — normalize identically, or a
+    # `--agent HUMAN` move would push here while the server treats it as a human move.
+    actor = (api.agent or "").strip().lower()
+    if not actor or actor == "human":
+        return  # agent-only, matching the backend's actor gate
+    ticket = api.get(f"/api/tickets/{_path_seg(ticket_id)}")
+    if str((ticket or {}).get("state") or "") == state:
+        # A move to the ticket's CURRENT state is a backend no-op (or a pure reorder
+        # with `after`) — no git side effect runs server-side, so none may run here.
+        return
+    branch = branch or str((ticket or {}).get("branch") or "") or None
+    if not branch:
+        return  # genuinely branchless move: there is no push half anywhere
+    project_key = str((ticket or {}).get("project") or "")
+    if not project_key:
+        return  # malformed payload — let the move endpoint produce the real error
+    project = api.get(f"/api/projects/{_path_seg(project_key)}")
+    slug = str((project or {}).get("github_repo") or "")
+    if not slug:
+        return  # local project: the backend pushes from its own checkout, as always
+    repo = str(project.get("repo") or "")
+    try:
+        repo_path = Path(repo).expanduser() if repo else None
+    except (RuntimeError, ValueError, OSError):
+        # e.g. `~nosuchuser/...` — an unexpandable path is a missing checkout, not an
+        # internal error; fall through to the structured failure below.
+        repo_path = None
+    if repo_path is None or not repo_path.is_dir():
+        raise ApiError(
+            "github",
+            f"Project {project_key} is remote (github_repo set) and its repo path "
+            f"{repo!r} was not found on this machine — the branch push must run where "
+            f"the commits live. Fix the project's repo to this machine's checkout path "
+            f"(`solopm project set {project_key} repo <path>`), or run the move from "
+            "the machine that has the checkout.",
+        )
+    github = GitHub()
+    # Never push a checkout that isn't the project's repository: compare the origin's
+    # owner/name against the slug (host differences are tolerated — SSH host aliases
+    # for multi-account setups are routine). The PUSH URL is what matters — a
+    # remote.origin.pushurl can send commits somewhere the fetch URL doesn't say.
+    # Best-effort: an unreadable origin doesn't block; the push itself and the
+    # backend's branch-on-origin gate still stand.
+    origin = normalize_remote_url(github.remote_push_url(str(repo_path)))
+    if origin is not None:
+        parts = origin.split("/")
+        if len(parts) >= 2 and "/".join(parts[-2:]) != slug.lower():
+            raise ApiError(
+                "github",
+                f"The checkout at {repo!r} has origin `{origin}`, which is not this "
+                f"project's github_repo ({slug}) — refusing to push a fork or an "
+                "unrelated repository. Fix the project's repo path or the checkout's "
+                "origin.",
+            )
+    try:
+        github.push_branch(str(repo_path), branch)
+    except SoloPMError as exc:
+        # GitHubError (push failed) or ValidationError (bad branch name) — either way
+        # ApiError is this layer's native failure, rendered uniformly by CLI and MCP.
+        raise ApiError(getattr(exc, "code", "github"), str(exc)) from exc

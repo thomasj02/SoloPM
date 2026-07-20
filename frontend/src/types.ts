@@ -67,6 +67,13 @@ export interface RadarOverlap {
 
 export interface RadarReport {
   overlaps: RadarOverlap[];
+  /** Projects the radar could not scan (e.g. remote projects, SOLO-29). */
+  skipped?: RadarSkip[];
+}
+
+export interface RadarSkip {
+  project: string;
+  reason: string;
 }
 
 // SOLO-14: dependency-graph projection of ticket relationships.
@@ -262,6 +269,8 @@ export interface PruneResult {
   applied: boolean;
   pruned: PruneEntry[];
   skipped: PruneSkip[];
+  /** Set when the service declined to scan (e.g. a remote project, SOLO-29). */
+  note?: string;
 }
 
 export interface TicketCreate {

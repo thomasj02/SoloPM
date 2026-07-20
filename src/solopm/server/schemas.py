@@ -11,6 +11,7 @@ class ProjectCreate(BaseModel):
     key: str
     name: str
     repo: str | None = None
+    github_repo: str | None = None
     master: str = "main"
     branch_convention: str = DEFAULT_BRANCH_CONVENTION
     default_implementer: str = "claude"
