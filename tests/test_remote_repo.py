@@ -870,7 +870,7 @@ def test_push_helper_refuses_a_checkout_whose_origin_is_another_repo(tmp_path, m
 
     # Fork / unrelated origin → refuse before pushing.
     monkeypatch.setattr(
-        "solopm.cli.client.GitHub.remote_url", lambda self, r: "git@github.com:evil/fork.git"
+        "solopm.cli.client.GitHub.remote_push_url", lambda self, r: "git@github.com:evil/fork.git"
     )
     with pytest.raises(ApiError, match="(?i)origin"):
         push_branch_for_remote_move(api_for(), "CM-8", "in-ai-review", "CM-8-fix")
@@ -879,14 +879,14 @@ def test_push_helper_refuses_a_checkout_whose_origin_is_another_repo(tmp_path, m
     # An SSH host alias for the same owner/name is the SAME repo — must pass
     # (this is exactly how multi-account setups address GitHub).
     monkeypatch.setattr(
-        "solopm.cli.client.GitHub.remote_url",
+        "solopm.cli.client.GitHub.remote_push_url",
         lambda self, r: "git@github-widget:ACME/Widget.git",
     )
     push_branch_for_remote_move(api_for(), "CM-8", "in-ai-review", "CM-8-fix")
     assert pushes == ["CM-8-fix"]
 
     # Unreadable origin degrades to best-effort: push and let git/the backend decide.
-    monkeypatch.setattr("solopm.cli.client.GitHub.remote_url", lambda self, r: None)
+    monkeypatch.setattr("solopm.cli.client.GitHub.remote_push_url", lambda self, r: None)
     push_branch_for_remote_move(api_for(), "CM-8", "in-ai-review", "CM-8-fix")
     assert pushes == ["CM-8-fix", "CM-8-fix"]
 
@@ -944,3 +944,63 @@ def test_local_to_remote_conversion_allowed_when_origin_matches(tmp_path):
     svc.store.update_project("CM", {"github_repo": None}, "t")  # back to local (bypass)
     with pytest.raises(ValidationError, match="CM-1"):
         svc.update_project("CM", {"github_repo": "other/repo"})
+
+
+# --- gpt-review round 3: symmetric gate, push URL, alias-aware identities ------------
+
+
+def test_clearing_github_repo_gated_by_live_records_unless_checkout_matches(tmp_path):
+    """Clearing the slug re-localizes the project — the stale-identity hazard in the
+    other direction. Ungated only when the local checkout verifiably IS the old slug's
+    repo (converting back in place)."""
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    _remote_project(svc)
+    tid, _ = _to_ai_review(svc)  # live branch + PR records
+    with pytest.raises(ValidationError, match="CM-1"):
+        svc.update_project("CM", {"github_repo": ""})  # origin unreadable → gated
+    # With the checkout provably being the old slug's repo, clearing is the routine
+    # remote→local conversion and the records stay meaningful.
+    gh.remote_urls["/home/dev/chessmimic"] = "git@github.com:acme/widget.git"
+    svc.update_project("CM", {"github_repo": ""})
+    assert svc.get_project("CM").github_repo is None
+
+
+def test_push_helper_verifies_the_push_url_not_the_fetch_url(tmp_path, monkeypatch):
+    """`git push origin` uses remote.origin.pushurl when set — a fetch URL matching
+    the slug must not vouch for a push that goes somewhere else."""
+    pushes = []
+    monkeypatch.setattr(
+        "solopm.cli.client.GitHub.push_branch", lambda self, repo, branch: pushes.append(branch)
+    )
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    api = _StubApi({"project": "CM"}, {"github_repo": SLUG, "repo": str(repo)})
+    monkeypatch.setattr(
+        "solopm.cli.client.GitHub.remote_push_url",
+        lambda self, r: "git@github.com:evil/fork.git",  # pushurl → a fork
+    )
+    with pytest.raises(ApiError, match="(?i)origin"):
+        push_branch_for_remote_move(api, "CM-8", "in-ai-review", "CM-8-fix")
+    assert pushes == []
+
+
+def test_remote_discovery_declines_alias_addressed_local_clone(tmp_path):
+    """A local clone whose origin uses an SSH host alias (git@github-work:owner/name)
+    is the SAME GitHub repo as a remote project's slug — the shared-repo decline must
+    compare owner/name independently of the transport host."""
+    gh = FakeGitHub(
+        open_prs=[_pr(41, head="CM-1-x")],
+        remote_urls={"/tmp/widget-alias": "git@github-widget:ACME/Widget.git"},
+    )
+    svc = _svc(tmp_path, github=gh)
+    _remote_project(svc)
+    svc.add_project(key="LOC", name="AliasClone", repo="/tmp/widget-alias")
+    t = svc.create_ticket(project="CM", title="x")
+    svc.move_ticket(t.id, "in-progress")
+    svc.move_ticket(t.id, "in-ai-review", actor="claude")
+    svc.move_ticket(t.id, "in-human-review", actor="codex")
+    done = svc.move_ticket(t.id, "done", actor="human")
+    assert done.pr_number is None
+    assert not any(c[0] == "api_merge" for c in gh.calls)
+    assert any("share this repo" in c for c in _comments(svc, t.id))

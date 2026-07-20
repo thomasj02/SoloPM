@@ -36,7 +36,8 @@ class FakeGitHub:
         self.branch_deleted = branch_deleted
         self.open_prs = list(open_prs or [])  # what list_open_prs reports (SOLO-27)
         self.has_pr_for_branch = has_pr_for_branch  # find_pr returns None when False
-        self.remote_urls = dict(remote_urls or {})  # repo path -> origin URL
+        self.remote_urls = dict(remote_urls or {})  # repo path -> origin (fetch) URL
+        self.remote_push_urls: dict = {}  # repo path -> origin push URL (when split)
         self.branch_on_origin = branch_on_origin  # what api_branch_exists reports (SOLO-29)
         self.head_branch = None  # the PR head, recorded when a PR is opened/found
         self.merge_branch = None  # branch the client was last asked to clean up
@@ -66,6 +67,11 @@ class FakeGitHub:
     def remote_url(self, repo):
         self._maybe_fail("remote_url")
         return (self.remote_urls or {}).get(repo)
+
+    def remote_push_url(self, repo):
+        self._maybe_fail("remote_push_url")
+        # Like git: the push URL defaults to the fetch URL unless split explicitly.
+        return self.remote_push_urls.get(repo) or self.remote_urls.get(repo)
 
     def open_or_refresh_pr(self, repo, branch, base, title, body):
         self._maybe_fail("open_or_refresh_pr")

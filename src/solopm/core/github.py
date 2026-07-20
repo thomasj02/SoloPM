@@ -169,6 +169,8 @@ class GitHubClient(Protocol):
 
     def remote_url(self, repo: str) -> str | None: ...
 
+    def remote_push_url(self, repo: str) -> str | None: ...
+
     def open_or_refresh_pr(
         self, repo: str, branch: str, base: str, title: str, body: str
     ) -> PR: ...
@@ -404,8 +406,20 @@ class GitHub:
         separate clones of one GitHub repository resolve to different filesystem
         paths but share this URL. Never raises — identity checks degrade, they
         don't block."""
+        return self._get_remote_url(repo, push=False)
+
+    def remote_push_url(self, repo: str) -> str | None:
+        """The URL ``git push origin`` actually targets, or None if unreadable.
+
+        Distinct from :meth:`remote_url`: a ``remote.origin.pushurl`` splits fetch and
+        push destinations, so a guard on where commits will LAND must read the push
+        side (git falls back to the fetch URL itself when no pushurl is set)."""
+        return self._get_remote_url(repo, push=True)
+
+    def _get_remote_url(self, repo: str, *, push: bool) -> str | None:
+        args = ["git", "remote", "get-url", *(["--push"] if push else []), "origin"]
         try:
-            proc = self._run(["git", "remote", "get-url", "origin"], cwd=repo, check=False)
+            proc = self._run(args, cwd=repo, check=False)
         except GitHubError:
             return None
         if proc.returncode != 0:

@@ -265,21 +265,23 @@ class Service:
         Gating the TRANSITION closes the whole class; the action-time pr_url check
         stays only as the legacy-store backstop.
 
-        Ungated: clearing the slug (local mode validates paths itself), a case-only
-        rename (same repo), and a local→remote conversion whose checkout origin
-        verifiably IS the new slug — the routine migration path, where the recorded
-        identities agree by construction."""
+        Ungated: a case-only rename (same repo), and a LOCAL↔REMOTE conversion whose
+        checkout origin verifiably IS the slug side of the transition — the routine
+        migration paths, where the recorded identities agree by construction. A
+        remote→remote re-point gets no such escape hatch: the project's checkout lives
+        on another machine, so nothing local can vouch for it."""
         old_slug = project.github_repo
-        if not new_slug:
-            return
-        if old_slug and old_slug.lower() == new_slug.lower():
-            return
-        if not old_slug and project.repo:
+        if (old_slug or "").lower() == (new_slug or "").lower():
+            return  # no identity change (covers case-only renames and no-op clears)
+        if bool(old_slug) != bool(new_slug) and project.repo:
+            # local→remote: the checkout must be the NEW slug's repo; remote→local
+            # (clearing): the checkout must be the OLD slug's repo.
+            anchor = (new_slug or old_slug or "").lower()
             origin = self._normalized_remote(project.repo)
             if origin is not None:
                 parts = origin.split("/")
-                if len(parts) >= 2 and "/".join(parts[-2:]) == new_slug.lower():
-                    return  # converting in place: the checkout IS the new slug
+                if len(parts) >= 2 and "/".join(parts[-2:]) == anchor:
+                    return  # converting in place: the checkout IS that repo
         live = sorted(
             t.id
             for t in self.store.list_tickets(project=project.key)
@@ -333,19 +335,25 @@ class Service:
         """Comparable identities for a project's repository (the shared-repo guard).
 
         A remote project (SOLO-29) is identified by its GitHub slug; a local one by its
-        canonical checkout path plus — best-effort — its normalized origin URL, so two
-        checkouts of one repository, or a local clone of a remote project's GitHub repo,
-        compare equal. A remote project's ``repo`` PATH is deliberately NOT an identity:
-        it names a directory on another machine, where an equal string need not be the
+        canonical checkout path plus — best-effort — its normalized origin URL AND that
+        origin's host-independent ``owner/name``: SSH host aliases (git@github-work:…)
+        are how multi-account setups routinely address one GitHub repo, so the slug
+        comparison must not depend on the transport host. Over-matching (two different
+        hosts with the same owner/name) errs toward the ambiguity DECLINE, the safe
+        direction. A remote project's ``repo`` PATH is deliberately NOT an identity: it
+        names a directory on another machine, where an equal string need not be the
         same repository."""
         if project.github_repo:
-            return {f"github.com/{project.github_repo.lower()}"}
+            return {f"slug:{project.github_repo.lower()}"}
         idents: set[str] = set()
         if project.repo:
             idents.add(f"path:{_canonical_path(project.repo)}")
             remote = self._normalized_remote(project.repo)
             if remote is not None:
-                idents.add(remote)
+                idents.add(f"remote:{remote}")
+                parts = remote.split("/")
+                if len(parts) >= 3:  # host + at least owner/name
+                    idents.add(f"slug:{'/'.join(parts[-2:])}")
         return idents
 
     def _require_repo_unclaimed(self, repo: str | None, *, exclude_key: str | None = None) -> None:

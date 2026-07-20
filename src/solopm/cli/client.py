@@ -184,9 +184,11 @@ def push_branch_for_remote_move(api: Api, ticket_id: str, state: str, branch: st
     github = GitHub()
     # Never push a checkout that isn't the project's repository: compare the origin's
     # owner/name against the slug (host differences are tolerated — SSH host aliases
-    # for multi-account setups are routine). Best-effort: an unreadable origin doesn't
-    # block; the push itself and the backend's branch-on-origin gate still stand.
-    origin = normalize_remote_url(github.remote_url(str(repo_path)))
+    # for multi-account setups are routine). The PUSH URL is what matters — a
+    # remote.origin.pushurl can send commits somewhere the fetch URL doesn't say.
+    # Best-effort: an unreadable origin doesn't block; the push itself and the
+    # backend's branch-on-origin gate still stand.
+    origin = normalize_remote_url(github.remote_push_url(str(repo_path)))
     if origin is not None:
         parts = origin.split("/")
         if len(parts) >= 2 and "/".join(parts[-2:]) != slug.lower():
