@@ -233,7 +233,7 @@ class Service:
 
     def update_project(self, key: str, fields: dict) -> Project:
         key = normalize_project_key(key)
-        self.get_project(key)  # existence check
+        current = self.get_project(key)  # existence check
         unknown = set(fields) - _PROJECT_SETTABLE
         if unknown:
             raise ValidationError(
@@ -243,21 +243,56 @@ class Service:
         if "name" in fields and not str(fields["name"]).strip():
             raise ValidationError("Project name cannot be blank.")
         if "github_repo" in fields:
-            fields = {
-                **fields,
-                "github_repo": self._prepare_github_repo(fields["github_repo"], exclude_key=key),
-            }
+            prepared = self._prepare_github_repo(fields["github_repo"], exclude_key=key)
+            self._require_no_stale_repo_identities(current, prepared)
+            fields = {**fields, "github_repo": prepared}
         # Path claims apply to the project's EFFECTIVE post-update state: a remote
         # project's path is not a local identity, but a project going (or staying)
         # local must hold the claim — including when clearing github_repo re-localizes
         # a path some other local project has since taken.
-        current = self.get_project(key)
         effective_slug = fields["github_repo"] if "github_repo" in fields else current.github_repo
         effective_repo = fields["repo"] if "repo" in fields else current.repo
         if not effective_slug and ("repo" in fields or "github_repo" in fields):
             self._require_repo_unclaimed(effective_repo, exclude_key=key)
         self.store.update_project(key, fields, _now())
         return self.get_project(key)
+
+    def _require_no_stale_repo_identities(self, project: Project, new_slug: str | None) -> None:
+        """Refuse re-pointing a project's GitHub identity while live tickets still
+        carry branch/PR records tied to the OLD identity (SOLO-29). PR numbers and
+        branch names are only meaningful within one repository — after a re-point, a
+        later done/cancel would act on same-named/numbered strangers in the new repo.
+        Gating the TRANSITION closes the whole class; the action-time pr_url check
+        stays only as the legacy-store backstop.
+
+        Ungated: clearing the slug (local mode validates paths itself), a case-only
+        rename (same repo), and a local→remote conversion whose checkout origin
+        verifiably IS the new slug — the routine migration path, where the recorded
+        identities agree by construction."""
+        old_slug = project.github_repo
+        if not new_slug:
+            return
+        if old_slug and old_slug.lower() == new_slug.lower():
+            return
+        if not old_slug and project.repo:
+            origin = self._normalized_remote(project.repo)
+            if origin is not None:
+                parts = origin.split("/")
+                if len(parts) >= 2 and "/".join(parts[-2:]) == new_slug.lower():
+                    return  # converting in place: the checkout IS the new slug
+        live = sorted(
+            t.id
+            for t in self.store.list_tickets(project=project.key)
+            if t.state not in self._CLOSED_STATES and (t.branch or t.pr_number is not None)
+        )
+        if live:
+            raise ValidationError(
+                f"Cannot point {project.key} at {new_slug!r}: ticket(s) "
+                f"{', '.join(live)} still carry branch/PR records from the project's "
+                "previous repository identity — a PR number or branch name is only "
+                "meaningful within one repo. Resolve those tickets (or clear their "
+                "records) first."
+            )
 
     def _prepare_github_repo(self, value, *, exclude_key: str) -> str | None:
         """Validate + claim a ``github_repo`` slug before it is stored (SOLO-29).

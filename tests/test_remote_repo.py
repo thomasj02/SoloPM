@@ -787,7 +787,8 @@ def test_remote_done_declines_recorded_pr_from_another_repo(tmp_path):
     _remote_project(svc)
     tid, _ = _to_ai_review(svc)  # records PR #17 at github.com/acme/widget
     svc.move_ticket(tid, "in-human-review", actor="codex")
-    svc.update_project("CM", {"github_repo": "other/repo"})  # slug re-pointed
+    # Bypass the config-time gate the way a legacy store would present it.
+    svc.store.update_project("CM", {"github_repo": "other/repo"}, "t")
     done = svc.move_ticket(tid, "done", actor="human")
     assert not any(c[0] == "api_merge" for c in gh.calls)
     assert done.pr_state != "merged"
@@ -800,7 +801,7 @@ def test_remote_cancel_declines_recorded_pr_from_another_repo(tmp_path):
     svc = _svc(tmp_path, github=gh)
     _remote_project(svc)
     tid, _ = _to_ai_review(svc)
-    svc.update_project("CM", {"github_repo": "other/repo"})
+    svc.store.update_project("CM", {"github_repo": "other/repo"}, "t")
     cancelled = svc.move_ticket(tid, "cancelled", actor="claude")
     assert not any(c[0] == "api_close" for c in gh.calls)
     assert any("no PR was closed" in c for c in _comments(svc, tid))
@@ -888,3 +889,58 @@ def test_push_helper_refuses_a_checkout_whose_origin_is_another_repo(tmp_path, m
     monkeypatch.setattr("solopm.cli.client.GitHub.remote_url", lambda self, r: None)
     push_branch_for_remote_move(api_for(), "CM-8", "in-ai-review", "CM-8-fix")
     assert pushes == ["CM-8-fix", "CM-8-fix"]
+
+
+# --- gpt-review round 2: close the stale-identity class at config time --------------
+
+
+def test_repointing_github_repo_refused_while_tickets_carry_records(tmp_path):
+    """PR numbers AND branch names are only meaningful within one repository. Changing
+    a project's GitHub identity while non-terminal tickets still carry either would let
+    a later done/cancel act on same-named/numbered strangers in the new repo — refuse
+    at config time, naming the tickets, instead of gating variant-by-variant at action
+    time."""
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    _remote_project(svc)
+    tid, _ = _to_ai_review(svc)  # CM-1: recorded branch + PR
+    with pytest.raises(ValidationError, match="CM-1"):
+        svc.update_project("CM", {"github_repo": "other/repo"})
+    # A branch-only record (no PR — the human/manual flow) is gated too.
+    t2 = svc.create_ticket(project="CM", title="y")
+    svc.move_ticket(t2.id, "in-progress")
+    svc.move_ticket(t2.id, "in-ai-review", branch="CM-2-fix", actor="human")
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    svc.move_ticket(tid, "done", actor="human")  # CM-1 resolves...
+    with pytest.raises(ValidationError, match="CM-2"):  # ...but CM-2 still gates
+        svc.update_project("CM", {"github_repo": "other/repo"})
+    svc.move_ticket(t2.id, "cancelled", actor="human")
+    svc.update_project("CM", {"github_repo": "other/repo"})  # all resolved → allowed
+    assert svc.get_project("CM").github_repo == "other/repo"
+
+
+def test_case_only_slug_rename_is_not_a_repoint(tmp_path):
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    _remote_project(svc)
+    _to_ai_review(svc)  # live records exist
+    svc.update_project("CM", {"github_repo": "ACME/Widget"})  # same repo, new casing
+    assert svc.get_project("CM").github_repo == "ACME/Widget"
+
+
+def test_local_to_remote_conversion_allowed_when_origin_matches(tmp_path):
+    """The routine migration: a LOCAL project (whose tickets carry branches from the
+    local flow) converts to remote with its true slug — the checkout's origin proves
+    the identities agree, so the records are not stale."""
+    gh = FakeGitHub(remote_urls={"/tmp/widget": "git@github.com:acme/widget.git"})
+    svc = _svc(tmp_path, github=gh)
+    svc.add_project(key="CM", name="C", repo="/tmp/widget")
+    t = svc.create_ticket(project="CM", title="x")
+    svc.move_ticket(t.id, "in-progress")
+    svc.move_ticket(t.id, "in-ai-review", branch="CM-1-fix", actor="claude")  # local push
+    svc.update_project("CM", {"github_repo": SLUG})  # origin == slug → allowed
+    assert svc.get_project("CM").github_repo == SLUG
+    # But converting to a DIFFERENT repo with the same live records is refused.
+    svc.store.update_project("CM", {"github_repo": None}, "t")  # back to local (bypass)
+    with pytest.raises(ValidationError, match="CM-1"):
+        svc.update_project("CM", {"github_repo": "other/repo"})
