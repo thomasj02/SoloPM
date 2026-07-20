@@ -156,11 +156,18 @@ function renderTopbar(): void {
 function updateRadarBadge(): void {
   if (!radarBadge) return;
   const overlaps = state.radar;
-  if (!overlaps.length) {
+  const skipped = state.radarSkipped;
+  if (!overlaps.length && !skipped.length) {
     radarBadge.style.display = "none";
     return;
   }
   radarBadge.style.display = "";
+  if (!overlaps.length) {
+    // Unscanned (e.g. a remote project, SOLO-29): must not look scanned-and-clean.
+    radarBadge.textContent = "○ radar: not scanned";
+    radarBadge.title = skipped.map((s) => `${s.project}: ${s.reason}`).join("\n");
+    return;
+  }
   radarBadge.textContent = `⚠ ${overlaps.length} overlap${overlaps.length === 1 ? "" : "s"}`;
   radarBadge.title =
     "Active worktrees touching the same files (click to open the first):\n" +
@@ -677,6 +684,7 @@ async function openProjectSettings(): Promise<void> {
       // indefinitely if that refresh fails.
       state.tickets = [];
       state.radar = [];
+      state.radarSkipped = [];
       state.status = null;
       emit("tickets");
       await loadProjects(); // drops the deleted project; defaults to the first remaining

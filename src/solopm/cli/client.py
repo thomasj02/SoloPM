@@ -13,7 +13,7 @@ from urllib.parse import quote
 import httpx
 
 from ..core.errors import SoloPMError
-from ..core.github import GitHub
+from ..core.github import GitHub, normalize_remote_url
 
 
 class ApiError(Exception):
@@ -149,7 +149,10 @@ def push_branch_for_remote_move(api: Api, ticket_id: str, state: str, branch: st
     """
     if state != "in-ai-review":
         return
-    if not api.agent or api.agent == "human":
+    # The backend strips + lowercases the actor header — normalize identically, or a
+    # `--agent HUMAN` move would push here while the server treats it as a human move.
+    actor = (api.agent or "").strip().lower()
+    if not actor or actor == "human":
         return  # agent-only, matching the backend's actor gate
     ticket = api.get(f"/api/tickets/{_path_seg(ticket_id)}")
     branch = branch or str((ticket or {}).get("branch") or "") or None
@@ -159,10 +162,16 @@ def push_branch_for_remote_move(api: Api, ticket_id: str, state: str, branch: st
     if not project_key:
         return  # malformed payload — let the move endpoint produce the real error
     project = api.get(f"/api/projects/{_path_seg(project_key)}")
-    if not (project or {}).get("github_repo"):
+    slug = str((project or {}).get("github_repo") or "")
+    if not slug:
         return  # local project: the backend pushes from its own checkout, as always
     repo = str(project.get("repo") or "")
-    repo_path = Path(repo).expanduser() if repo else None
+    try:
+        repo_path = Path(repo).expanduser() if repo else None
+    except (RuntimeError, ValueError, OSError):
+        # e.g. `~nosuchuser/...` — an unexpandable path is a missing checkout, not an
+        # internal error; fall through to the structured failure below.
+        repo_path = None
     if repo_path is None or not repo_path.is_dir():
         raise ApiError(
             "github",
@@ -172,8 +181,24 @@ def push_branch_for_remote_move(api: Api, ticket_id: str, state: str, branch: st
             f"(`solopm project set {project_key} repo <path>`), or run the move from "
             "the machine that has the checkout.",
         )
+    github = GitHub()
+    # Never push a checkout that isn't the project's repository: compare the origin's
+    # owner/name against the slug (host differences are tolerated — SSH host aliases
+    # for multi-account setups are routine). Best-effort: an unreadable origin doesn't
+    # block; the push itself and the backend's branch-on-origin gate still stand.
+    origin = normalize_remote_url(github.remote_url(str(repo_path)))
+    if origin is not None:
+        parts = origin.split("/")
+        if len(parts) >= 2 and "/".join(parts[-2:]) != slug.lower():
+            raise ApiError(
+                "github",
+                f"The checkout at {repo!r} has origin `{origin}`, which is not this "
+                f"project's github_repo ({slug}) — refusing to push a fork or an "
+                "unrelated repository. Fix the project's repo path or the checkout's "
+                "origin.",
+            )
     try:
-        GitHub().push_branch(str(repo_path), branch)
+        github.push_branch(str(repo_path), branch)
     except SoloPMError as exc:
         # GitHubError (push failed) or ValidationError (bad branch name) — either way
         # ApiError is this layer's native failure, rendered uniformly by CLI and MCP.

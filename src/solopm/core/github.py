@@ -75,6 +75,26 @@ def validate_github_repo(slug: str) -> str:
     return slug
 
 
+def normalize_remote_url(url: str | None) -> str | None:
+    """A git remote URL as a comparable ``host/path`` identity, or ``None``.
+
+    One form across transports: ``git@host:path``, ``ssh://``, and ``https://`` clones
+    of one repository must compare equal (plus case, trailing ``/``, and ``.git``
+    differences). Extracted from the service's repo-identity logic (SOLO-27) so the
+    client half (SOLO-29) can compare a checkout's origin against a project's slug.
+    """
+    url = (url or "").strip()
+    if not url:
+        return None
+    if "://" in url:
+        m = re.match(r"^[a-z+]+://(?:[^@/]+@)?([\w.\-]+)(?::\d+)?/(.+)$", url, re.IGNORECASE)
+    else:
+        m = re.match(r"^(?:[\w.\-]+@)?([\w.\-]+):(.+)$", url)  # scp-like git@host:path
+    ident = f"{m.group(1)}/{m.group(2)}" if m else url
+    ident = ident.strip().lower().rstrip("/")
+    return ident[:-4] if ident.endswith(".git") else ident
+
+
 @dataclass
 class PR:
     number: int
@@ -252,14 +272,30 @@ class GitHub:
         self._run(["git", "push", "-u", "origin", refspec], cwd=repo)
 
     def api_check_repo(self, slug: str) -> None:
-        """Verify this machine's ``gh`` can see ``slug`` — the config-time preflight for
-        remote projects (SOLO-29), so an access problem surfaces when ``github_repo`` is
-        set instead of on the first move. Raises :class:`GitHubError` with gh's detail."""
+        """Verify this machine's ``gh`` can WRITE to ``slug`` — the config-time
+        preflight for remote projects (SOLO-29), so an access problem surfaces when
+        ``github_repo`` is set instead of on the first move. Visibility is not enough:
+        ``gh repo view`` succeeds with read access on a public repo, while merge, close,
+        and branch deletion later need push permission — so the viewer's permission
+        level is checked explicitly. Raises :class:`GitHubError` with the detail."""
         validate_github_repo(slug)
-        proc = self._run(["gh", "repo", "view", slug, "--json", "name"], cwd=None, check=False)
+        proc = self._run(
+            ["gh", "repo", "view", slug, "--json", "name,viewerPermission"],
+            cwd=None,
+            check=False,
+        )
         if proc.returncode != 0:
             raise GitHubError(
                 f"gh cannot access {slug!r}: {(proc.stderr or proc.stdout or '').strip()}"
+            )
+        try:
+            permission = str((json.loads(proc.stdout) or {}).get("viewerPermission") or "")
+        except (ValueError, TypeError) as exc:
+            raise GitHubError(f"Could not read gh's permission answer for {slug!r}.") from exc
+        if permission.upper() not in ("ADMIN", "MAINTAIN", "WRITE"):
+            raise GitHubError(
+                f"gh has {permission or 'no'} permission on {slug!r} but SoloPM needs "
+                "write access (merge/close/branch cleanup run through this account)."
             )
 
     def api_branch_exists(self, slug: str, branch: str) -> bool:

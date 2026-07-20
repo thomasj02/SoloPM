@@ -2,7 +2,7 @@
 // Views subscribe to events and re-render; actions mutate `state` then emit.
 
 import { api, ApiError } from "./api";
-import type { Meta, Project, ProjectStatus, RadarOverlap, TicketSummary } from "./types";
+import type { Meta, Project, ProjectStatus, RadarOverlap, RadarSkip, TicketSummary } from "./types";
 
 // Fallback enums so the UI stays usable even if GET /api/meta is unreachable.
 const FALLBACK_META: Meta = {
@@ -41,6 +41,7 @@ export interface AppState {
   ticketsError: ApiError | null;
   backendDown: boolean;
   radar: RadarOverlap[];
+  radarSkipped: RadarSkip[];
   status: ProjectStatus | null;
 }
 
@@ -53,6 +54,7 @@ export const state: AppState = {
   ticketsError: null,
   backendDown: false,
   radar: [],
+  radarSkipped: [],
   status: null,
 };
 
@@ -111,6 +113,7 @@ export function setProject(key: string): void {
   state.currentProject = key;
   state.tickets = [];
   state.radar = []; // drop the old project's overlaps so the badge can't show/open stale data
+  state.radarSkipped = [];
   state.status = null; // and the old project's git/PR status strip
   persistProject();
   emit("projects");
@@ -128,6 +131,7 @@ export async function refreshTickets({ silent = false }: { silent?: boolean } = 
   if (!state.currentProject) {
     state.tickets = [];
     state.radar = [];
+    state.radarSkipped = [];
     state.status = null;
     emit("tickets");
     emit("radar");
@@ -154,12 +158,15 @@ export async function refreshTickets({ silent = false }: { silent?: boolean } = 
 export async function refreshRadar(): Promise<void> {
   if (!state.currentProject) {
     state.radar = [];
+    state.radarSkipped = [];
     emit("radar");
     return;
   }
   try {
     const data = await api.radar(state.currentProject);
     state.radar = data?.overlaps ?? [];
+    // An unscanned project must not look scanned-and-clean (SOLO-29).
+    state.radarSkipped = data?.skipped ?? [];
   } catch {
     // Radar is informational and best-effort; keep the last-known on error.
   }

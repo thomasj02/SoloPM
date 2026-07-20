@@ -646,6 +646,8 @@ def test_api_mutating_commands_carry_the_slug():
                 return _Proc(0, '{"number": 7, "url": "u", "state": "OPEN"}')
             if args[:3] == ["gh", "pr", "view"]:  # by number: preflight/readback
                 return _Proc(0, '{"state": "MERGED", "mergeCommit": {"oid": "abc"}}')
+            if args[:3] == ["gh", "repo", "view"]:  # config-time write preflight
+                return _Proc(0, '{"name": "widget", "viewerPermission": "WRITE"}')
             return _Proc(0, "{}")
 
     gh._run = Script()
@@ -771,3 +773,118 @@ def test_cli_renders_remote_declines(tmp_path, monkeypatch):
     assert "CM" in r.output
     r = runner.invoke(cli_main.app, ["project", "show", "CM"])
     assert SLUG in r.output  # remote mode is visible in the project view
+
+
+# --- gpt-review round 1 fixes -------------------------------------------------------
+
+
+def test_remote_done_declines_recorded_pr_from_another_repo(tmp_path):
+    """Changing github_repo after a PR was recorded must not route the old PR NUMBER
+    into the new repo — same-numbered PRs are unrelated across repos. The action-time
+    guard compares the recorded pr_url's owner/name against the current slug."""
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    _remote_project(svc)
+    tid, _ = _to_ai_review(svc)  # records PR #17 at github.com/acme/widget
+    svc.move_ticket(tid, "in-human-review", actor="codex")
+    svc.update_project("CM", {"github_repo": "other/repo"})  # slug re-pointed
+    done = svc.move_ticket(tid, "done", actor="human")
+    assert not any(c[0] == "api_merge" for c in gh.calls)
+    assert done.pr_state != "merged"
+    note = _comments(svc, tid)[-1]
+    assert "no PR was merged" in note and "other/repo" in note
+
+
+def test_remote_cancel_declines_recorded_pr_from_another_repo(tmp_path):
+    gh = FakeGitHub()
+    svc = _svc(tmp_path, github=gh)
+    _remote_project(svc)
+    tid, _ = _to_ai_review(svc)
+    svc.update_project("CM", {"github_repo": "other/repo"})
+    cancelled = svc.move_ticket(tid, "cancelled", actor="claude")
+    assert not any(c[0] == "api_close" for c in gh.calls)
+    assert any("no PR was closed" in c for c in _comments(svc, tid))
+
+
+def test_api_check_repo_requires_write_permission():
+    """`gh repo view` succeeds with read access, but merge/close/branch-delete need
+    write — the config-time preflight must reject read-only visibility."""
+    gh = GitHub()
+
+    def run_with(permission):
+        def fake_run(args, cwd, *, check=True):
+            assert cwd is None and "viewerPermission" in " ".join(args)
+            return _Proc(0, f'{{"name": "widget", "viewerPermission": "{permission}"}}')
+        gh._run = fake_run
+
+    for ok in ("ADMIN", "MAINTAIN", "WRITE"):
+        run_with(ok)
+        gh.api_check_repo(SLUG)  # must not raise
+    for insufficient in ("READ", "TRIAGE", "NONE", ""):
+        run_with(insufficient)
+        with pytest.raises(GitHubError, match="(?i)write"):
+            gh.api_check_repo(SLUG)
+
+
+def test_push_helper_normalizes_the_actor(tmp_path, monkeypatch):
+    """The backend strips + lowercases X-SoloPM-Actor, so `--agent HUMAN` is a human
+    move server-side — the client gate must apply the same normalization."""
+    monkeypatch.setattr(
+        "solopm.cli.client.GitHub.push_branch",
+        lambda self, repo, branch: pytest.fail("pushed for a (normalized) human move"),
+    )
+    api = _StubApi({"project": "CM", "branch": "b"}, {"github_repo": SLUG, "repo": "/x"},
+                   agent=" HUMAN ")
+    push_branch_for_remote_move(api, "CM-8", "in-ai-review", "CM-8-fix")
+    assert api.gets == []
+
+
+def test_push_helper_translates_expanduser_failures(tmp_path, monkeypatch):
+    """`~nosuchuser/...` makes Path.expanduser raise RuntimeError — that must surface
+    as the layer's structured ApiError, not an internal exception."""
+    monkeypatch.setattr(
+        "solopm.cli.client.GitHub.push_branch",
+        lambda self, repo, branch: pytest.fail("pushed despite an unexpandable path"),
+    )
+    api = _StubApi(
+        {"project": "CM"},
+        {"github_repo": SLUG, "repo": "~no-such-user-solopm-xyz/repo"},
+    )
+    with pytest.raises(ApiError):
+        push_branch_for_remote_move(api, "CM-8", "in-ai-review", "CM-8-fix")
+
+
+def test_push_helper_refuses_a_checkout_whose_origin_is_another_repo(tmp_path, monkeypatch):
+    """Pushing a fork (or an unrelated checkout that happens to sit at the configured
+    path) would pollute the wrong repository — or worse, leave a same-named stale
+    branch on the real slug to be PR'd. Compare the checkout's origin owner/name
+    against the slug before pushing; host differences (SSH aliases) are tolerated."""
+    pushes = []
+    monkeypatch.setattr(
+        "solopm.cli.client.GitHub.push_branch", lambda self, repo, branch: pushes.append(branch)
+    )
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    api_for = lambda: _StubApi({"project": "CM"}, {"github_repo": SLUG, "repo": str(repo)})
+
+    # Fork / unrelated origin → refuse before pushing.
+    monkeypatch.setattr(
+        "solopm.cli.client.GitHub.remote_url", lambda self, r: "git@github.com:evil/fork.git"
+    )
+    with pytest.raises(ApiError, match="(?i)origin"):
+        push_branch_for_remote_move(api_for(), "CM-8", "in-ai-review", "CM-8-fix")
+    assert pushes == []
+
+    # An SSH host alias for the same owner/name is the SAME repo — must pass
+    # (this is exactly how multi-account setups address GitHub).
+    monkeypatch.setattr(
+        "solopm.cli.client.GitHub.remote_url",
+        lambda self, r: "git@github-widget:ACME/Widget.git",
+    )
+    push_branch_for_remote_move(api_for(), "CM-8", "in-ai-review", "CM-8-fix")
+    assert pushes == ["CM-8-fix"]
+
+    # Unreadable origin degrades to best-effort: push and let git/the backend decide.
+    monkeypatch.setattr("solopm.cli.client.GitHub.remote_url", lambda self, r: None)
+    push_branch_for_remote_move(api_for(), "CM-8", "in-ai-review", "CM-8-fix")
+    assert pushes == ["CM-8-fix", "CM-8-fix"]

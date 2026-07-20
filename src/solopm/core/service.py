@@ -14,7 +14,13 @@ from pathlib import Path
 
 from . import workflow
 from .errors import DuplicateError, ForbiddenTransitionError, NotFoundError, ValidationError
-from .github import GitHubClient, GitHubError, validate_branch_name, validate_github_repo
+from .github import (
+    GitHubClient,
+    GitHubError,
+    normalize_remote_url,
+    validate_branch_name,
+    validate_github_repo,
+)
 from .models import (
     ASSIGNEES,
     ACTORS,
@@ -59,6 +65,20 @@ _UNSET = object()
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _pr_url_matches_slug(url: str | None, slug: str) -> bool:
+    """Whether a recorded PR URL belongs to the GitHub repo ``slug``.
+
+    PR NUMBERS are only meaningful within one repository — after a project's
+    ``github_repo`` is re-pointed, a recorded number could name an unrelated PR in the
+    new repo, so acting on it must be gated on the URL's owner/name matching the slug.
+    An absent or unparseable URL fails the check: identity that can't be confirmed is
+    not identity."""
+    if not url:
+        return False
+    m = re.search(r"://[^/]+/([^/]+/[^/]+)/pull/\d+", url.strip(), re.IGNORECASE)
+    return bool(m) and m.group(1).lower() == slug.lower()
 
 
 def _canonical_path(path: str) -> str:
@@ -268,21 +288,11 @@ class Service:
         return slug
 
     def _normalized_remote(self, repo: str) -> str | None:
-        """The repo's origin identity as ``host/path`` — one comparable form across
-        transports: git@host:path, ssh://, and https:// clones of one repository must
-        compare equal (plus case, trailing ``/``, and ``.git`` differences)."""
+        """The repo's origin identity as ``host/path`` (see
+        :func:`~solopm.core.github.normalize_remote_url`), or ``None``."""
         if self.github is None:
             return None
-        url = (self.github.remote_url(repo) or "").strip()
-        if not url:
-            return None
-        if "://" in url:
-            m = re.match(r"^[a-z+]+://(?:[^@/]+@)?([\w.\-]+)(?::\d+)?/(.+)$", url, re.IGNORECASE)
-        else:
-            m = re.match(r"^(?:[\w.\-]+@)?([\w.\-]+):(.+)$", url)  # scp-like git@host:path
-        ident = f"{m.group(1)}/{m.group(2)}" if m else url
-        ident = ident.strip().lower().rstrip("/")
-        return ident[:-4] if ident.endswith(".git") else ident
+        return normalize_remote_url(self.github.remote_url(repo))
 
     def _repo_identities(self, project: Project) -> set[str]:
         """Comparable identities for a project's repository (the shared-repo guard).
@@ -828,6 +838,18 @@ class Service:
             extra: dict = {}
             number = ticket.pr_number
             url = ticket.pr_url
+            # A recorded PR NUMBER is only meaningful within one repository. If the
+            # project's github_repo was re-pointed after this PR was recorded, the same
+            # number in the NEW repo is an unrelated PR — merging/closing it would act
+            # on someone else's work. Branch-lookup and discovery below are immune
+            # (they query the current slug), so only the recorded-number path is gated.
+            if number is not None and ops.remote and not _pr_url_matches_slug(url, ops.slug):
+                return {}, self._nothing_note(
+                    to_state,
+                    f"recorded PR #{number} ({url or 'no URL recorded'}) does not belong "
+                    f"to this project's github_repo ({ops.slug}) — the slug changed "
+                    "after the PR was recorded; resolve manually",
+                )
             if number is None and branch:
                 found = ops.find_pr(branch)
                 if found is None:
