@@ -32,7 +32,10 @@ INSTRUCTIONS = (
     "ticket to 'done'. Never push branches or open/merge PRs yourself with `gh`: "
     "recording the branch is the reliable path — an unrecorded ticket falls back to "
     "best-effort PR discovery on done, which only works for default-branch-convention "
-    "projects and declines whenever ownership is ambiguous.\n\n"
+    "projects and declines whenever ownership is ambiguous. This applies equally to "
+    "remote projects (`github_repo` set — the repo's checkout is on your machine, not "
+    "the backend's): the same move-with-branch runs the push from your machine and the "
+    "PR lifecycle through the GitHub API.\n\n"
     "Review adjudications: before reviewing a ticket's changes, fetch review_prompt — it "
     "embeds the project's active review-memory checklist, including items prefixed "
     "'ACCEPTED-RISK:', which are findings the human has already adjudicated and accepted. "
@@ -71,6 +74,7 @@ def build_server(
         key: str,
         name: str,
         repo: str | None = None,
+        github_repo: str | None = None,
         master: str = "main",
         branch_convention: str = DEFAULT_BRANCH_CONVENTION,
         default_implementer: str = "claude",
@@ -78,13 +82,18 @@ def build_server(
         review_prompt: str = DEFAULT_REVIEW_PROMPT,
     ) -> dict:
         """Register a new project. `key` is the uppercase ticket prefix (e.g. SOLO; lowercase
-        is normalized). `repo` is an optional local git-repo path (project ↔ repo is 1:1) and
-        `master` its base branch. The branch convention, default implementer/reviewer, and
-        review prompt have sane defaults and are editable later. Returns the new project."""
+        is normalized). `repo` is an optional git-repo path (project ↔ repo is 1:1) and
+        `master` its base branch. Set `github_repo` (an "owner/name" slug) when the repo's
+        checkout lives on a different machine than the SoloPM backend: the PR lifecycle then
+        runs through the GitHub API, and `repo` is the checkout path on the machine where
+        the SoloPM client runs (it pushes branches from there). The branch convention,
+        default implementer/reviewer, and review prompt have sane defaults and are editable
+        later. Returns the new project."""
         return tools.create_project(
             key=key,
             name=name,
             repo=repo,
+            github_repo=github_repo,
             master=master,
             branch_convention=branch_convention,
             default_implementer=default_implementer,
@@ -97,6 +106,7 @@ def build_server(
         key: str,
         name: str | None = None,
         repo: str | None = None,
+        github_repo: str | None = None,
         master_branch: str | None = None,
         branch_convention: str | None = None,
         default_implementer: str | None = None,
@@ -104,13 +114,15 @@ def build_server(
         review_prompt: str | None = None,
     ) -> dict:
         """Update one or more of a project's config fields; pass only the fields to change
-        (omitted fields are left as-is). Editable: name, repo, master_branch,
-        branch_convention, default_implementer, default_reviewer, review_prompt. Returns the
-        updated project."""
+        (omitted fields are left as-is). Editable: name, repo, github_repo (the "owner/name"
+        slug marking a project whose checkout lives on another machine — the PR lifecycle
+        then runs through the GitHub API), master_branch, branch_convention,
+        default_implementer, default_reviewer, review_prompt. Returns the updated project."""
         return tools.edit_project(
             key,
             name=name,
             repo=repo,
+            github_repo=github_repo,
             master_branch=master_branch,
             branch_convention=branch_convention,
             default_implementer=default_implementer,

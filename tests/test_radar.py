@@ -209,13 +209,13 @@ def test_broken_repo_degrades_gracefully(tmp_path):
         def worktree_changed_files(self, path, base):
             return set()
 
-    assert _svc(tmp_path, BrokenGit()).compute_radar("SOLO") == {"overlaps": []}
+    assert _svc(tmp_path, BrokenGit()).compute_radar("SOLO") == {"overlaps": [], "skipped": []}
 
 
 def test_no_github_is_empty(tmp_path):
-    assert _svc(tmp_path, None).compute_radar("SOLO") == {"overlaps": []}
+    assert _svc(tmp_path, None).compute_radar("SOLO") == {"overlaps": [], "skipped": []}
 
 
 def test_no_repo_is_empty(tmp_path):
     gh = FakeRadarGit([Worktree("/wt/a", "solo-1-a")], {"/wt/a": {"x"}})
-    assert _svc(tmp_path, gh, repo=None).compute_radar("SOLO") == {"overlaps": []}
+    assert _svc(tmp_path, gh, repo=None).compute_radar("SOLO") == {"overlaps": [], "skipped": []}

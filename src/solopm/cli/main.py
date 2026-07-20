@@ -16,7 +16,7 @@ import typer
 from typing_extensions import Annotated
 
 from .. import __version__, config
-from . import output
+from . import client, output
 from .client import Api, ApiError
 
 app = typer.Typer(
@@ -545,11 +545,13 @@ def ticket_move(
     def render(t: dict) -> None:
         output.console.print(f"[green]✓[/] {t['id']} → [bold]{t['state']}[/]")
 
-    _run(
-        call,
-        lambda api: api.post(f"/api/tickets/{ticket_id}/move", json=body),
-        render,
-    )
+    def do_move(api: client.Api) -> dict:
+        # SOLO-29: for a remote project (github_repo set) the commits live on THIS
+        # machine — push the branch from here first; a failure aborts before the move.
+        client.push_branch_for_remote_move(api, ticket_id, state, branch)
+        return api.post(f"/api/tickets/{ticket_id}/move", json=body)
+
+    _run(call, do_move, render)
 
 
 @ticket_app.command("assign")

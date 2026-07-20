@@ -69,6 +69,7 @@ class SoloPMTools:
         key: str,
         name: str,
         repo: str | None = None,
+        github_repo: str | None = None,
         master: str = "main",
         branch_convention: str = DEFAULT_BRANCH_CONVENTION,
         default_implementer: str = "claude",
@@ -79,6 +80,7 @@ class SoloPMTools:
             key=key,
             name=name,
             repo=repo,
+            github_repo=github_repo,
             master=master,
             branch_convention=branch_convention,
             default_implementer=default_implementer,
@@ -92,6 +94,7 @@ class SoloPMTools:
         key: str,
         name: str | None = None,
         repo: str | None = None,
+        github_repo: str | None = None,
         master_branch: str | None = None,
         branch_convention: str | None = None,
         default_implementer: str | None = None,
@@ -103,6 +106,7 @@ class SoloPMTools:
             for k, v in {
                 "name": name,
                 "repo": repo,
+                "github_repo": github_repo,
                 "master_branch": master_branch,
                 "branch_convention": branch_convention,
                 "default_implementer": default_implementer,
@@ -113,8 +117,9 @@ class SoloPMTools:
         }
         if not fields:
             raise ValidationError(
-                "Provide at least one field to edit: name, repo, master_branch, "
-                "branch_convention, default_implementer, default_reviewer, review_prompt."
+                "Provide at least one field to edit: name, repo, github_repo, "
+                "master_branch, branch_convention, default_implementer, "
+                "default_reviewer, review_prompt."
             )
         return self.svc.update_project(key, fields).to_dict()
 

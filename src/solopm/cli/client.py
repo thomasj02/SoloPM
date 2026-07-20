@@ -6,9 +6,14 @@ Translates HTTP failures into :class:`ApiError`, which carries the backend's
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
+
+from ..core.errors import SoloPMError
+from ..core.github import GitHub
 
 
 class ApiError(Exception):
@@ -103,3 +108,44 @@ def _safe_json(resp: httpx.Response) -> Any:
         return resp.json()
     except Exception:
         return None
+
+
+def push_branch_for_remote_move(api: Api, ticket_id: str, state: str, branch: str | None) -> None:
+    """The client half of the remote-project PR lifecycle (SOLO-29).
+
+    For a project with ``github_repo`` set the backend has no checkout — the commits
+    exist only on the machine running this client — so a move to ``in-ai-review`` with
+    a branch must push that branch from HERE before the move API call (the backend then
+    verifies it on origin and opens the PR). A no-op for local projects and for every
+    other transition. Raises :class:`ApiError` on any failure so the caller never
+    reaches the move: pushing after a failed move (or moving after a failed push)
+    would leave the lifecycle half-run.
+
+    Trade-off: if the move itself is later rejected (bad transition, validation), the
+    branch has already been pushed — harmless, it just sits on origin with no PR.
+    """
+    if state != "in-ai-review" or not branch:
+        return
+    ticket = api.get(f"/api/tickets/{quote(str(ticket_id), safe='')}")
+    project_key = str((ticket or {}).get("project") or "")
+    if not project_key:
+        return  # malformed payload — let the move endpoint produce the real error
+    project = api.get(f"/api/projects/{quote(project_key, safe='')}")
+    if not (project or {}).get("github_repo"):
+        return  # local project: the backend pushes from its own checkout, as always
+    repo = str(project.get("repo") or "")
+    repo_path = Path(repo).expanduser() if repo else None
+    if repo_path is None or not repo_path.is_dir():
+        raise ApiError(
+            "github",
+            f"Project {project_key} is remote (github_repo set) and its repo path "
+            f"{repo!r} was not found on this machine — the branch push must run where "
+            "the commits live. Run the move from the dev machine, or push the branch "
+            "manually and retry.",
+        )
+    try:
+        GitHub().push_branch(str(repo_path), branch)
+    except SoloPMError as exc:
+        # GitHubError (push failed) or ValidationError (bad branch name) — either way
+        # ApiError is this layer's native failure, rendered uniformly by CLI and MCP.
+        raise ApiError(getattr(exc, "code", "github"), str(exc)) from exc

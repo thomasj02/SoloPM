@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS projects (
     key                 TEXT PRIMARY KEY,
     name                TEXT NOT NULL,
     repo                TEXT,
+    github_repo         TEXT,
     master_branch       TEXT NOT NULL DEFAULT 'main',
     branch_convention   TEXT NOT NULL,
     default_implementer TEXT NOT NULL DEFAULT 'claude',
@@ -108,6 +109,7 @@ _PROJECT_UPDATABLE = frozenset(
     {
         "name",
         "repo",
+        "github_repo",
         "master_branch",
         "branch_convention",
         "default_implementer",
@@ -173,6 +175,9 @@ class Store:
             conn.execute(
                 "ALTER TABLE projects ADD COLUMN review_memory TEXT NOT NULL DEFAULT '[]'"
             )
+        if "github_repo" not in pcols:
+            # SOLO-29: remote-repo projects (PR lifecycle via the GitHub API).
+            conn.execute("ALTER TABLE projects ADD COLUMN github_repo TEXT")
 
     def exists(self) -> bool:
         return self.path.exists()
@@ -185,6 +190,7 @@ class Store:
             key=row["key"],
             name=row["name"],
             repo=row["repo"],
+            github_repo=row["github_repo"],
             master_branch=row["master_branch"],
             branch_convention=row["branch_convention"],
             default_implementer=row["default_implementer"],
@@ -271,14 +277,15 @@ class Store:
             try:
                 conn.execute(
                     """INSERT INTO projects
-                       (key, name, repo, master_branch, branch_convention,
+                       (key, name, repo, github_repo, master_branch, branch_convention,
                         default_implementer, default_reviewer, review_prompt,
                         seq_counter, created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         project.key,
                         project.name,
                         project.repo,
+                        project.github_repo,
                         project.master_branch,
                         project.branch_convention,
                         project.default_implementer,

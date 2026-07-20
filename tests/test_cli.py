@@ -277,7 +277,7 @@ def test_radar_cli(wired):
     invoke("project", "add", "--key", "SOLO", "--name", "SoloPM")
     r = invoke("radar", "--json")
     assert r.exit_code == 0, r.output
-    assert json.loads(r.output) == {"overlaps": []}
+    assert json.loads(r.output) == {"overlaps": [], "skipped": []}
 
 
 def test_links_roundtrip_via_cli(wired):

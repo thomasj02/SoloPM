@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import workflow
 from .errors import DuplicateError, ForbiddenTransitionError, NotFoundError, ValidationError
-from .github import GitHubClient, GitHubError, validate_branch_name
+from .github import GitHubClient, GitHubError, validate_branch_name, validate_github_repo
 from .models import (
     ASSIGNEES,
     ACTORS,
@@ -42,6 +42,7 @@ _PROJECT_SETTABLE = frozenset(
     {
         "name",
         "repo",
+        "github_repo",
         "master_branch",
         "branch_convention",
         "default_implementer",
@@ -80,6 +81,65 @@ def _require_actor(actor: str) -> str:
     return actor
 
 
+class _RepoOps:
+    """One PR-lifecycle call surface, bound to where the project's repo actually is
+    (SOLO-29): cwd-based git/gh for a local checkout, ``gh --repo <slug>`` (API mode)
+    for a remote project — ``github_repo`` set — whose checkout lives on another
+    machine and must never be touched (or assumed) from the backend."""
+
+    def __init__(self, github: GitHubClient, project: Project):
+        self._gh = github
+        self.slug = project.github_repo
+        self.repo = project.repo
+        self.remote = bool(self.slug)
+
+    def ensure_branch_on_origin(self, branch: str) -> None:
+        """Local: push the branch (the backend's checkout has the commits). Remote: the
+        SoloPM client already pushed from the dev machine — verify, never trust."""
+        if not self.remote:
+            self._gh.push_branch(self.repo, branch)
+            return
+        validate_branch_name(branch)
+        if not self._gh.api_branch_exists(self.slug, branch):
+            raise GitHubError(
+                f"Branch {branch!r} is not on origin ({self.slug}). This project's "
+                "checkout lives on another machine, so SoloPM's client half (the HTTP "
+                "MCP or CLI) must push the branch from there before the move — run the "
+                "move through the SoloPM client on that machine, or push the branch "
+                "and retry."
+            )
+
+    def find_pr(self, branch: str):
+        if self.remote:
+            return self._gh.api_find_pr(self.slug, branch)
+        return self._gh.find_pr(self.repo, branch)
+
+    def list_open_prs(self):
+        if self.remote:
+            return self._gh.api_list_open_prs(self.slug)
+        return self._gh.list_open_prs(self.repo)
+
+    def open_or_refresh_pr(self, branch: str, base: str, title: str, body: str):
+        if self.remote:
+            return self._gh.api_open_or_refresh_pr(self.slug, branch, base, title, body)
+        return self._gh.open_or_refresh_pr(self.repo, branch, base, title, body)
+
+    def pr_head(self, number: int):
+        if self.remote:
+            return self._gh.api_pr_head(self.slug, number)
+        return self._gh.pr_head(self.repo, number)
+
+    def merge_pr(self, number: int, branch: str | None):
+        if self.remote:
+            return self._gh.api_merge_pr(self.slug, number, branch)
+        return self._gh.merge_pr(self.repo, number, branch)
+
+    def close_pr(self, number: int, branch: str | None):
+        if self.remote:
+            return self._gh.api_close_pr(self.slug, number, branch)
+        return self._gh.close_pr(self.repo, number, branch)
+
+
 class Service:
     def __init__(self, store: Store, github: GitHubClient | None = None):
         self.store = store
@@ -100,6 +160,7 @@ class Service:
         key: str,
         name: str,
         repo: str | None = None,
+        github_repo: str | None = None,
         master: str = "main",
         branch_convention: str = DEFAULT_BRANCH_CONVENTION,
         default_implementer: str = "claude",
@@ -119,11 +180,13 @@ class Service:
         else:
             raise DuplicateError(f"Project {key!r} already exists.")
         self._require_repo_unclaimed(repo, exclude_key=key)
+        github_repo = self._prepare_github_repo(github_repo, exclude_key=key)
         now = _now()
         project = Project(
             key=key,
             name=name.strip(),
             repo=repo,
+            github_repo=github_repo,
             master_branch=master or "main",
             branch_convention=branch_convention or DEFAULT_BRANCH_CONVENTION,
             default_implementer=default_implementer,
@@ -158,8 +221,41 @@ class Service:
             raise ValidationError("Project name cannot be blank.")
         if "repo" in fields:
             self._require_repo_unclaimed(fields["repo"], exclude_key=key)
+        if "github_repo" in fields:
+            fields = {
+                **fields,
+                "github_repo": self._prepare_github_repo(fields["github_repo"], exclude_key=key),
+            }
         self.store.update_project(key, fields, _now())
         return self.get_project(key)
+
+    def _prepare_github_repo(self, value, *, exclude_key: str) -> str | None:
+        """Validate + claim a ``github_repo`` slug before it is stored (SOLO-29).
+
+        A falsy value clears the field (back to local mode). Otherwise the slug must be
+        a well-formed ``owner/name``, unclaimed by any other project (same 1:1 rule as
+        repo paths — case-insensitive, since GitHub slugs are), and — when a GitHub
+        client is configured — visible to this machine's ``gh``, so an access problem
+        surfaces at config time with a clear fix instead of on the first move."""
+        if not value:
+            return None
+        slug = validate_github_repo(str(value).strip())
+        lowered = slug.lower()
+        for p in self.list_projects():
+            if p.key != exclude_key and p.github_repo and p.github_repo.lower() == lowered:
+                raise ValidationError(
+                    f"GitHub repo {slug!r} is already mapped to project {p.key} — "
+                    "project ↔ repo is 1:1."
+                )
+        if self.github is not None:
+            try:
+                self.github.api_check_repo(slug)
+            except GitHubError as exc:
+                raise ValidationError(
+                    f"The backend's gh cannot access {slug!r} ({exc}) — grant its GitHub "
+                    "account access to the repo (or fix gh auth / the slug) and retry."
+                ) from exc
+        return slug
 
     def _normalized_remote(self, repo: str) -> str | None:
         """The repo's origin identity as ``host/path`` — one comparable form across
@@ -177,6 +273,25 @@ class Service:
         ident = f"{m.group(1)}/{m.group(2)}" if m else url
         ident = ident.strip().lower().rstrip("/")
         return ident[:-4] if ident.endswith(".git") else ident
+
+    def _repo_identities(self, project: Project) -> set[str]:
+        """Comparable identities for a project's repository (the shared-repo guard).
+
+        A remote project (SOLO-29) is identified by its GitHub slug; a local one by its
+        canonical checkout path plus — best-effort — its normalized origin URL, so two
+        checkouts of one repository, or a local clone of a remote project's GitHub repo,
+        compare equal. A remote project's ``repo`` PATH is deliberately NOT an identity:
+        it names a directory on another machine, where an equal string need not be the
+        same repository."""
+        if project.github_repo:
+            return {f"github.com/{project.github_repo.lower()}"}
+        idents: set[str] = set()
+        if project.repo:
+            idents.add(f"path:{_canonical_path(project.repo)}")
+            remote = self._normalized_remote(project.repo)
+            if remote is not None:
+                idents.add(remote)
+        return idents
 
     def _require_repo_unclaimed(self, repo: str | None, *, exclude_key: str | None = None) -> None:
         """Enforce the documented project ↔ repo 1:1 mapping. Every repo-scoped feature
@@ -237,7 +352,9 @@ class Service:
             if t.pr_state == "open"
         )
         unpushed = 0
-        if self.github is not None and project.repo:
+        # A remote project's checkout (SOLO-29) is on another machine — there is no
+        # local repo to count against, so its unpushed signal honestly stays 0.
+        if self.github is not None and project.repo and not project.github_repo:
             try:
                 unpushed = self.github.count_unpushed_commits(project.repo)
             except GitHubError:
@@ -270,6 +387,16 @@ class Service:
         """
         project = self.get_project(key)
         result: dict = {"project": project.key, "applied": apply, "pruned": [], "skipped": []}
+        if project.github_repo:
+            # Remote project (SOLO-29): its checkout — and every local branch prune
+            # would act on — lives on the dev machine, out of the backend's reach.
+            # Decline honestly instead of reporting a clean-looking empty prune.
+            result["note"] = (
+                "remote project (github_repo set): its checkout and local branches live "
+                "on the dev machine — SoloPM cannot prune them from the backend; delete "
+                "merged branches there."
+            )
+            return result
         if self.github is None or not project.repo:
             return result
         repo, master = project.repo, project.master_branch
@@ -643,7 +770,9 @@ class Service:
         state change; ``note`` is an optional confirmation comment to append afterwards
         (the merge/close record), or ``None``.
 
-        A no-op unless GitHub automation is configured and the project has a repo.
+        A no-op unless GitHub automation is configured and the project has a repo
+        (a local checkout path, or a `github_repo` slug for a remote project — the
+        latter runs the whole lifecycle through the GitHub API, never a local cwd).
         → in-ai-review additionally needs a SoloPM branch; → done/cancelled works from
         the recorded PR/branch, falling back to convention-based discovery (SOLO-27).
         Raises on a git/gh failure so the caller aborts the transition — except while
@@ -652,17 +781,18 @@ class Service:
         if self.github is None:
             return {}, None
         project = self.get_project(ticket.project)
-        if not project.repo:
+        if not project.repo and not project.github_repo:
             return {}, None
-        repo, base = project.repo, project.master_branch
+        ops = _RepoOps(self.github, project)
+        base = project.master_branch
         if to_state == "in-ai-review":
             # Git automation is agent-only: a human reaching in-ai-review (or supplying a
             # branch) must not push or open a PR. Without a branch there is nothing to push.
             if actor == "human" or not branch:
                 return {}, None
-            self.github.push_branch(repo, branch)
-            pr = self.github.open_or_refresh_pr(
-                repo, branch, base, f"{ticket.id}: {ticket.title}", ticket.description or ""
+            ops.ensure_branch_on_origin(branch)
+            pr = ops.open_or_refresh_pr(
+                branch, base, f"{ticket.id}: {ticket.title}", ticket.description or ""
             )
             return {"pr_number": pr.number, "pr_url": pr.url, "pr_state": pr.state}, None
         if to_state in ("done", "cancelled"):
@@ -682,7 +812,7 @@ class Service:
             number = ticket.pr_number
             url = ticket.pr_url
             if number is None and branch:
-                found = self.github.find_pr(repo, branch)
+                found = ops.find_pr(branch)
                 if found is None:
                     return {}, self._nothing_note(
                         to_state, f"branch `{branch}` is recorded but has no PR"
@@ -706,7 +836,7 @@ class Service:
                         f"{project.branch_convention!r}, resolve manually",
                     )
                 try:
-                    open_prs = self.github.list_open_prs(repo)
+                    open_prs = ops.list_open_prs()
                 except GitHubError as exc:
                     return {}, self._nothing_note(to_state, f"PR discovery failed ({exc})")
                 # Only same-repo PRs targeting the project's master are candidates: a
@@ -723,20 +853,15 @@ class Service:
                 claimed_heads = {t.branch.lower() for t in siblings if t.branch}
                 # Legacy stores can predate the project ↔ repo 1:1 enforcement, and two
                 # CHECKOUTS (worktrees/clones) of one repository defeat path comparison
-                # entirely — the origin remote URL is the shared-identity signal there
-                # (best-effort: identity checks degrade, they don't block). Either way,
-                # ownership can't be reasoned about per-project — decline discovery.
-                my_remote = self._normalized_remote(repo)
+                # entirely — the origin remote URL / GitHub slug is the shared-identity
+                # signal there (best-effort: identity checks degrade, they don't block).
+                # Either way, ownership can't be reasoned about per-project — decline
+                # discovery.
+                mine = self._repo_identities(project)
                 shared = sorted(
-                    p.key for p in self.list_projects()
-                    if p.key != project.key and p.repo
-                    and (
-                        _canonical_path(p.repo) == _canonical_path(project.repo)
-                        or (
-                            my_remote is not None
-                            and self._normalized_remote(p.repo) == my_remote
-                        )
-                    )
+                    p.key
+                    for p in self.list_projects()
+                    if p.key != project.key and (mine & self._repo_identities(p))
                 )
                 if shared:
                     return {}, self._nothing_note(
@@ -792,19 +917,24 @@ class Service:
             # caller override, or a row from before branch pinning). If the head can't be
             # confirmed, ``cleanup_head`` is None and the client skips deletion rather than
             # risk removing an unrelated branch. ``note_branch`` is display-only.
-            cleanup_head = self.github.pr_head(repo, number)
+            cleanup_head = ops.pr_head(number)
             note_branch = cleanup_head or ticket.branch or branch
             if to_state == "done":
-                result = self.github.merge_pr(repo, number, cleanup_head)
+                result = ops.merge_pr(number, cleanup_head)
                 if result.state == "queued":
                     # On a merge-queue-protected branch the PR was only enqueued, not
                     # landed — record that honestly instead of a false merge confirmation.
                     note = self._queued_note(number, url, base, note_branch)
                     return {**extra, "pr_state": "queued"}, note
-                note = self._merge_note(number, url, base, note_branch, result.sha)
+                note = self._merge_note(
+                    number, url, base, note_branch, result.sha,
+                    remote=ops.remote, remote_branch_deleted=result.branch_deleted,
+                )
                 return {**extra, "pr_state": "merged"}, note
-            result = self.github.close_pr(repo, number, cleanup_head)
-            note = self._close_note(number, url, note_branch, result.branch_deleted)
+            result = ops.close_pr(number, cleanup_head)
+            note = self._close_note(
+                number, url, note_branch, result.branch_deleted, remote=ops.remote
+            )
             return {**extra, "pr_state": "closed"}, note
         return {}, None
 
@@ -838,15 +968,36 @@ class Service:
         return f"Branch `{branch}` retained (checked out in a worktree or cleanup failed)."
 
     @staticmethod
-    def _merge_note(number: int, url: str | None, base: str, branch: str, sha: str | None) -> str:
+    def _merge_note(
+        number: int,
+        url: str | None,
+        base: str,
+        branch: str,
+        sha: str | None,
+        *,
+        remote: bool = False,
+        remote_branch_deleted: bool = False,
+    ) -> str:
         """A self-contained record of a squash-merge for the ticket's activity log.
 
-        The local branch is intentionally retained [SOLO-18]: it's checked out in the
-        developer's worktree, which SoloPM leaves in place, so the note never claims a local
-        deletion. (The remote branch is cleaned up separately, best-effort.)
+        Local mode: the local branch is intentionally retained [SOLO-18] — it's checked
+        out in the developer's worktree, which SoloPM leaves in place, so the note never
+        claims a local deletion. (The remote branch is cleaned up separately, best-effort.)
+        Remote mode (SOLO-29): the checkout is on another machine SoloPM can't touch, so
+        the note reports the origin ref's fate and points the cleanup there.
         """
         where = f" ({url})" if url else ""
         commit = f"squash commit `{sha}`" if sha else "squash-merged"
+        if remote:
+            ref = (
+                f"Origin branch `{branch}` deleted."
+                if remote_branch_deleted
+                else f"Origin branch `{branch}` retained (cleanup failed — remove it manually)."
+            )
+            return (
+                f"Merged PR #{number}{where} into `{base}` — {commit}. {ref} The checkout "
+                f"on the dev machine is untouched — clean up its local branch there."
+            )
         return (
             f"Merged PR #{number}{where} into `{base}` — {commit}. Local branch `{branch}` "
             f"left in place for its worktree — delete it when you remove the worktree."
@@ -869,10 +1020,20 @@ class Service:
         )
 
     @staticmethod
-    def _close_note(number: int, url: str | None, branch: str, branch_deleted: bool) -> str:
+    def _close_note(
+        number: int, url: str | None, branch: str, branch_deleted: bool, *, remote: bool = False
+    ) -> str:
         """A record of a PR closed when a ticket is cancelled."""
         where = f" ({url})" if url else ""
-        cleanup = Service._branch_cleanup_note(branch, branch_deleted)
+        if remote:
+            ref = (
+                f"Origin branch `{branch}` deleted."
+                if branch_deleted
+                else f"Origin branch `{branch}` retained (cleanup failed — remove it manually)."
+            )
+            cleanup = f"{ref} The checkout on the dev machine is untouched."
+        else:
+            cleanup = Service._branch_cleanup_note(branch, branch_deleted)
         return f"Closed PR #{number}{where}. {cleanup}"
 
     def reorder_ticket(self, ticket_id: str, *, after: str | None = None, actor: str = "human") -> Ticket:
@@ -1605,7 +1766,18 @@ class Service:
         """
         projects = [self.get_project(project)] if project else self.list_projects()
         overlaps: list[dict] = []
+        skipped: list[dict] = []
         for proj in projects:
+            if proj.github_repo:
+                # Remote project (SOLO-29): its worktrees are on the dev machine. Say so
+                # instead of silently reporting "no overlaps" for repos never scanned.
+                skipped.append(
+                    {
+                        "project": proj.key,
+                        "reason": "remote project — its worktrees live on the dev machine, not scanned",
+                    }
+                )
+                continue
             if self.github is None or not proj.repo:
                 continue
             # A branch is mapped to its ticket while that ticket's changes are still live.
@@ -1665,7 +1837,7 @@ class Service:
                                 "files": shared,
                             }
                         )
-        return {"overlaps": overlaps}
+        return {"overlaps": overlaps, "skipped": skipped}
 
     # --- review memory (the learning review gate) ---------------------------
 

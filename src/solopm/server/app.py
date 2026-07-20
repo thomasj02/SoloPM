@@ -169,6 +169,7 @@ def create_app(
             key=payload.key,
             name=payload.name,
             repo=payload.repo,
+            github_repo=payload.github_repo,
             master=payload.master,
             branch_convention=payload.branch_convention,
             default_implementer=payload.default_implementer,

@@ -591,7 +591,7 @@ def test_radar_endpoint(client):
     _make_project(client)
     r = client.get("/api/radar?project=SOLO")
     assert r.status_code == 200
-    assert r.json() == {"overlaps": []}  # no GitHub wired in tests → graceful empty
+    assert r.json() == {"overlaps": [], "skipped": []}  # no GitHub wired in tests → graceful empty
 
 
 def test_criteria_crud_via_api(client):

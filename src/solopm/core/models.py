@@ -139,6 +139,11 @@ class Project:
     key: str
     name: str
     repo: str | None = None
+    # "owner/name" GitHub slug for a repo whose checkout lives on ANOTHER machine
+    # (SOLO-29). When set, the backend drives the PR lifecycle via the GitHub API
+    # instead of cwd-based git/gh; `repo` is then the checkout path on the machine
+    # where the SoloPM client (HTTP MCP / CLI) runs, which pushes branches from there.
+    github_repo: str | None = None
     master_branch: str = "main"
     branch_convention: str = DEFAULT_BRANCH_CONVENTION
     default_implementer: str = "claude"
@@ -156,6 +161,7 @@ class Project:
             "key": self.key,
             "name": self.name,
             "repo": self.repo,
+            "github_repo": self.github_repo,
             "master_branch": self.master_branch,
             "branch_convention": self.branch_convention,
             "default_implementer": self.default_implementer,

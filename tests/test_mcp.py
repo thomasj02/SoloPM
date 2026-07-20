@@ -159,7 +159,7 @@ def test_review_memory_via_mcp(service, project):
 
 
 def test_radar_tool(service, project):
-    assert tools_for(service).radar() == {"overlaps": []}  # service fixture has no github
+    assert tools_for(service).radar() == {"overlaps": [], "skipped": []}  # service fixture has no github
 
 
 def test_graph_tool(service, project):

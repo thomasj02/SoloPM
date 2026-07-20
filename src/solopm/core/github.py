@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import quote
 
 from .errors import SoloPMError, ValidationError
 
@@ -52,6 +54,25 @@ def validate_branch_name(branch: str) -> str:
     ):
         raise ValidationError(f"Invalid branch name: {branch!r}.")
     return branch
+
+
+# An "owner/name" GitHub slug (SOLO-29). Deliberately stricter than GitHub itself in the
+# same spirit as _BRANCH_RE: both segments start alphanumeric (except a leading '.' on
+# the name — `.github` is a real repo) so a slug can never read as a gh option, and the
+# charset is URL-path-safe so it can be embedded in `gh api repos/{slug}/…` untouched.
+_GITHUB_REPO_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9-]{0,100}/\.?[A-Za-z0-9_][A-Za-z0-9._-]{0,100}$"
+)
+
+
+def validate_github_repo(slug: str) -> str:
+    """Return ``slug`` if it is a safe ``owner/name`` GitHub slug, else raise
+    ``ValidationError``."""
+    if not slug or not _GITHUB_REPO_RE.match(slug) or ".." in slug:
+        raise ValidationError(
+            f"Invalid github_repo {slug!r}: expected an 'owner/name' GitHub slug."
+        )
+    return slug
 
 
 @dataclass
@@ -156,6 +177,29 @@ class GitHubClient(Protocol):
 
     def branch_tip(self, repo: str, branch: str) -> str | None: ...
 
+    # --- API mode (SOLO-29): remote projects, addressed by "owner/name" slug ---
+    # Clone-independent equivalents of the PR lifecycle above, for projects whose
+    # checkout lives on another machine: every command carries `--repo <slug>` (or an
+    # explicit `gh api repos/{slug}/…` path) and runs without a cwd.
+
+    def api_check_repo(self, slug: str) -> None: ...
+
+    def api_branch_exists(self, slug: str, branch: str) -> bool: ...
+
+    def api_find_pr(self, slug: str, branch: str) -> PR | None: ...
+
+    def api_list_open_prs(self, slug: str) -> list[OpenPR]: ...
+
+    def api_open_or_refresh_pr(
+        self, slug: str, branch: str, base: str, title: str, body: str
+    ) -> PR: ...
+
+    def api_pr_head(self, slug: str, number: int) -> str | None: ...
+
+    def api_merge_pr(self, slug: str, number: int, branch: str | None = None) -> MergeResult: ...
+
+    def api_close_pr(self, slug: str, number: int, branch: str | None = None) -> CloseResult: ...
+
 
 class GitHub:
     """Real client over the local ``git`` and GitHub ``gh`` CLIs."""
@@ -163,12 +207,25 @@ class GitHub:
     def __init__(self, timeout: float = 120.0):
         self.timeout = timeout
 
-    def _run(self, args: list[str], cwd: str, *, check: bool = True) -> subprocess.CompletedProcess:
+    def _run(
+        self, args: list[str], cwd: str | None, *, check: bool = True
+    ) -> subprocess.CompletedProcess:
         try:
             proc = subprocess.run(
                 args, cwd=cwd, capture_output=True, text=True, timeout=self.timeout
             )
         except FileNotFoundError as exc:
+            # subprocess raises FileNotFoundError for a missing executable AND for a
+            # missing `cwd`. Blaming the binary for an absent repo directory sent a user
+            # chasing PATH ghosts (SOLO-29) — the directory is checkable, so attribute
+            # the failure precisely.
+            if cwd is not None and not os.path.isdir(cwd):
+                raise GitHubError(
+                    f"Repo path {cwd!r} does not exist on this machine (git/gh run where "
+                    "the SoloPM backend runs). If this project's checkout lives on "
+                    "another machine, set the project's `github_repo` slug so SoloPM "
+                    "drives its PR lifecycle through the GitHub API instead."
+                ) from exc
             raise GitHubError(f"Command not found: {args[0]} (is it installed?)") from exc
         except subprocess.TimeoutExpired as exc:
             raise GitHubError(f"Command timed out: {' '.join(args)}") from exc
@@ -194,9 +251,59 @@ class GitHub:
         refspec = f"refs/heads/{branch}:refs/heads/{branch}"
         self._run(["git", "push", "-u", "origin", refspec], cwd=repo)
 
+    def api_check_repo(self, slug: str) -> None:
+        """Verify this machine's ``gh`` can see ``slug`` — the config-time preflight for
+        remote projects (SOLO-29), so an access problem surfaces when ``github_repo`` is
+        set instead of on the first move. Raises :class:`GitHubError` with gh's detail."""
+        validate_github_repo(slug)
+        proc = self._run(["gh", "repo", "view", slug, "--json", "name"], cwd=None, check=False)
+        if proc.returncode != 0:
+            raise GitHubError(
+                f"gh cannot access {slug!r}: {(proc.stderr or proc.stdout or '').strip()}"
+            )
+
+    def api_branch_exists(self, slug: str, branch: str) -> bool:
+        """Whether ``branch`` exists on the GitHub repo ``slug``.
+
+        The backend's don't-trust-the-client gate for remote projects: the SoloPM client
+        claims it pushed the branch, this verifies before a PR is opened on it. Three
+        outcomes, kept distinct so the caller's error is honest: the branch is there
+        (True), the branch is genuinely absent (False — GitHub answers "Branch not
+        found"), or the check itself failed — a repo-level 404 (no access / wrong slug)
+        or a network/auth error — which raises rather than masquerading as either."""
+        validate_github_repo(slug)
+        validate_branch_name(branch)
+        # Charsets are pre-validated, so both embed raw; slashes in branch names are
+        # literal path segments in this endpoint.
+        proc = self._run(["gh", "api", f"repos/{slug}/branches/{branch}"], cwd=None, check=False)
+        if proc.returncode == 0:
+            return True
+        detail = f"{proc.stderr or ''} {proc.stdout or ''}"
+        if "Branch not found" in detail:
+            return False
+        if "HTTP 404" in detail:
+            raise GitHubError(
+                f"Repo {slug!r} not found or not accessible to this machine's gh — "
+                "grant the backend's GitHub account access (or fix the slug) and retry."
+            )
+        raise GitHubError(
+            f"Could not verify branch {branch!r} on {slug}: "
+            f"{(proc.stderr or proc.stdout or '').strip()}"
+        )
+
     def find_pr(self, repo: str, branch: str) -> PR | None:
+        return self._find_pr_at([], repo, branch)
+
+    def api_find_pr(self, slug: str, branch: str) -> PR | None:
+        """:meth:`find_pr` addressed by ``owner/name`` slug — no checkout needed."""
+        validate_github_repo(slug)
+        return self._find_pr_at(["--repo", slug], None, branch)
+
+    def _find_pr_at(self, extra: list[str], cwd: str | None, branch: str) -> PR | None:
         proc = self._run(
-            ["gh", "pr", "view", branch, "--json", "number,url,state"], cwd=repo, check=False
+            ["gh", "pr", "view", branch, *extra, "--json", "number,url,state"],
+            cwd=cwd,
+            check=False,
         )
         if proc.returncode != 0:
             stderr = (proc.stderr or "").lower()
@@ -219,11 +326,19 @@ class GitHub:
         """All open PRs with their head branches, for convention-based discovery
         (SOLO-27). Raises :class:`GitHubError` on any gh failure, unparseable output,
         or a possibly-truncated listing — the caller decides whether that's fatal."""
+        return self._list_open_prs_at([], repo)
+
+    def api_list_open_prs(self, slug: str) -> list[OpenPR]:
+        """:meth:`list_open_prs` addressed by ``owner/name`` slug — no checkout needed."""
+        validate_github_repo(slug)
+        return self._list_open_prs_at(["--repo", slug], None)
+
+    def _list_open_prs_at(self, extra: list[str], cwd: str | None) -> list[OpenPR]:
         proc = self._run(
-            ["gh", "pr", "list", "--state", "open",
+            ["gh", "pr", "list", "--state", "open", *extra,
              "--json", "number,url,headRefName,baseRefName,isCrossRepository",
              "--limit", str(self._OPEN_PR_LIMIT)],
-            cwd=repo,
+            cwd=cwd,
         )
         try:
             data = json.loads(proc.stdout or "[]")
@@ -262,16 +377,30 @@ class GitHub:
         return (proc.stdout or "").strip() or None
 
     def open_or_refresh_pr(self, repo: str, branch: str, base: str, title: str, body: str) -> PR:
-        existing = self.find_pr(repo, branch)
+        return self._open_or_refresh_pr_at([], repo, branch, base, title, body)
+
+    def api_open_or_refresh_pr(
+        self, slug: str, branch: str, base: str, title: str, body: str
+    ) -> PR:
+        """:meth:`open_or_refresh_pr` addressed by ``owner/name`` slug — no checkout
+        needed. The head branch must already exist on origin (the SoloPM client pushed
+        it from the machine that has the commits)."""
+        validate_github_repo(slug)
+        return self._open_or_refresh_pr_at(["--repo", slug], None, branch, base, title, body)
+
+    def _open_or_refresh_pr_at(
+        self, extra: list[str], cwd: str | None, branch: str, base: str, title: str, body: str
+    ) -> PR:
+        existing = self._find_pr_at(extra, cwd, branch)
         if existing is not None:
             # The branch push above already refreshed the PR; just return it.
             return existing
         self._run(
-            ["gh", "pr", "create", "--head", branch, "--base", base, "--title", title,
+            ["gh", "pr", "create", *extra, "--head", branch, "--base", base, "--title", title,
              "--body", body or ""],
-            cwd=repo,
+            cwd=cwd,
         )
-        pr = self.find_pr(repo, branch)
+        pr = self._find_pr_at(extra, cwd, branch)
         if pr is None:
             raise GitHubError("PR was created but could not be read back from gh.")
         return pr
@@ -301,20 +430,42 @@ class GitHub:
         A genuinely un-mergeable PR (conflicts, draft, blocked without a queue) makes
         ``gh pr merge`` exit non-zero, which raises and aborts before any state is recorded.
         """
+        # [SOLO-18] Never delete the local branch on a merge — it's checked out in the
+        # developer's worktree, which SoloPM leaves in place. The remote is still cleaned.
+        return self._merge_pr_at(
+            [], repo, number,
+            cleanup=lambda: self._delete_branch_best_effort(repo, branch, delete_local=False),
+        )
+
+    def api_merge_pr(self, slug: str, number: int, branch: str | None = None) -> MergeResult:
+        """:meth:`merge_pr` addressed by ``owner/name`` slug — same gating, idempotency,
+        and merge-queue semantics, with no checkout on this machine. Branch cleanup is
+        the best-effort API ref delete; the dev machine's local branch is untouched (and
+        untouchable) from here, so ``branch_deleted`` reports the REMOTE ref's fate."""
+        validate_github_repo(slug)
+        return self._merge_pr_at(
+            ["--repo", slug], None, number,
+            cleanup=lambda: self._api_delete_remote_branch(slug, branch),
+        )
+
+    def _merge_pr_at(
+        self, extra: list[str], cwd: str | None, number: int, *, cleanup
+    ) -> MergeResult:
+        """The shared merge core; ``cleanup`` is the mode's best-effort branch cleanup,
+        invoked only on a confirmed merge and never allowed to gate it."""
         # Preflight, best-effort. Idempotent: an already-merged PR is a success, not an
         # error — return the recorded sha and (re)attempt branch cleanup. A closed-but-not-
         # merged PR genuinely cannot be merged. If the state can't be read, fall through and
         # let the merge command be the gate.
-        pre_state = self._pr_state(repo, number)
+        pre_state = self._pr_state_at(extra, cwd, number)
         if pre_state == "MERGED":
-            # [SOLO-18] Never delete the local branch on a merge — it's checked out in the
-            # developer's worktree, which SoloPM leaves in place. The remote is still cleaned.
-            deleted = self._delete_branch_best_effort(repo, branch, delete_local=False)
-            return MergeResult("merged", self._merge_commit_oid(repo, number), deleted)
+            deleted = cleanup()
+            oid = (self._pr_json_at(extra, cwd, number, "state,mergeCommit").get("mergeCommit") or {}).get("oid")
+            return MergeResult("merged", str(oid) if oid else None, deleted)
         if pre_state == "CLOSED":
             raise GitHubError(f"PR #{number} is CLOSED, not open — cannot merge.")
 
-        merge = self._run(["gh", "pr", "merge", str(number), "--squash"], cwd=repo)
+        merge = self._run(["gh", "pr", "merge", str(number), "--squash", *extra], cwd=cwd)
         # `gh` prints e.g. "Pull request #N will be added to the merge queue …" when it only
         # enqueues rather than merges. Captured here as the fallback queued signal.
         enqueued = "merge queue" in f"{merge.stdout or ''} {merge.stderr or ''}".lower()
@@ -322,14 +473,13 @@ class GitHub:
         # Read back to confirm the merge and capture the squash sha. Best-effort: a flaky
         # read (timeout / non-zero / bad json) leaves state/oid empty and we fall back to the
         # command's own signal above — never papering a queued merge over as a real one.
-        data = self._pr_json(repo, number, "state,mergeCommit")
+        data = self._pr_json_at(extra, cwd, number, "state,mergeCommit")
         state = str(data.get("state") or "").upper()
         oid = (data.get("mergeCommit") or {}).get("oid")
 
         # A readback that positively shows the PR merged is the strongest signal.
         if oid or state == "MERGED":
-            # [SOLO-18] Local branch kept (held by the worktree); remote still cleaned up.
-            deleted = self._delete_branch_best_effort(repo, branch, delete_local=False)
+            deleted = cleanup()
             return MergeResult("merged", str(oid) if oid else None, deleted)
         # Otherwise trust an explicit "queued" signal — from gh's output or a still-open
         # readback. The branch is left for the queue to delete once the merge lands.
@@ -343,6 +493,9 @@ class GitHub:
         return MergeResult("merged", None)
 
     def _pr_json(self, repo: str, number: int, fields: str) -> dict:
+        return self._pr_json_at([], repo, number, fields)
+
+    def _pr_json_at(self, extra: list[str], cwd: str | None, number: int, fields: str) -> dict:
         """Read ``gh pr view <n> --json <fields>`` as a dict; ``{}`` if it can't be read.
 
         Best-effort by design — every caller treats an empty read as "unknown" and falls
@@ -350,7 +503,9 @@ class GitHub:
         """
         try:
             proc = self._run(
-                ["gh", "pr", "view", str(number), "--json", fields], cwd=repo, check=False
+                ["gh", "pr", "view", str(number), *extra, "--json", fields],
+                cwd=cwd,
+                check=False,
             )
         except GitHubError:
             return {}
@@ -362,8 +517,11 @@ class GitHub:
             return {}
 
     def _pr_state(self, repo: str, number: int) -> str:
+        return self._pr_state_at([], repo, number)
+
+    def _pr_state_at(self, extra: list[str], cwd: str | None, number: int) -> str:
         """The PR's upper-cased state (``OPEN``/``MERGED``/``CLOSED``), or ``""`` if unknown."""
-        return str(self._pr_json(repo, number, "state").get("state") or "").upper()
+        return str(self._pr_json_at(extra, cwd, number, "state").get("state") or "").upper()
 
     def pr_head(self, repo: str, number: int) -> str | None:
         """The PR's head branch name (the ref it was opened from), or ``None`` if unknown.
@@ -374,9 +532,11 @@ class GitHub:
         head = self._pr_json(repo, number, "headRefName").get("headRefName")
         return str(head) if head else None
 
-    def _merge_commit_oid(self, repo: str, number: int) -> str | None:
-        oid = (self._pr_json(repo, number, "state,mergeCommit").get("mergeCommit") or {}).get("oid")
-        return str(oid) if oid else None
+    def api_pr_head(self, slug: str, number: int) -> str | None:
+        """:meth:`pr_head` addressed by ``owner/name`` slug — no checkout needed."""
+        validate_github_repo(slug)
+        head = self._pr_json_at(["--repo", slug], None, number, "headRefName").get("headRefName")
+        return str(head) if head else None
 
     def _delete_branch_best_effort(
         self, repo: str, branch: str | None, *, delete_local: bool = True
@@ -461,7 +621,9 @@ class GitHub:
             return True
         return "remote ref does not exist" in (proc.stderr or proc.stdout or "").lower()
 
-    def _run_cleanup(self, args: list[str], repo: str) -> subprocess.CompletedProcess | None:
+    def _run_cleanup(
+        self, args: list[str], cwd: str | None
+    ) -> subprocess.CompletedProcess | None:
         """Run a best-effort cleanup command, returning ``None`` instead of raising.
 
         Cleanup must never abort a transition, so this swallows the ``GitHubError`` that
@@ -469,7 +631,7 @@ class GitHub:
         already absorbing non-zero exits.
         """
         try:
-            return self._run(args, cwd=repo, check=False)
+            return self._run(args, cwd=cwd, check=False)
         except GitHubError:
             return None
 
@@ -492,6 +654,42 @@ class GitHub:
         if self._pr_state(repo, number) != "CLOSED":
             self._run(["gh", "pr", "close", str(number)], cwd=repo)
         return CloseResult(branch_deleted=self._delete_branch_best_effort(repo, branch))
+
+    def api_close_pr(self, slug: str, number: int, branch: str | None = None) -> CloseResult:
+        """:meth:`close_pr` addressed by ``owner/name`` slug — same idempotency, no
+        checkout on this machine. ``branch_deleted`` reports the REMOTE ref's fate (the
+        dev machine's local branch is out of reach)."""
+        validate_github_repo(slug)
+        if self._pr_state_at(["--repo", slug], None, number) != "CLOSED":
+            self._run(["gh", "pr", "close", str(number), "--repo", slug], cwd=None)
+        return CloseResult(branch_deleted=self._api_delete_remote_branch(slug, branch))
+
+    def _api_delete_remote_branch(self, slug: str, branch: str | None) -> bool:
+        """Best-effort remote branch cleanup for API mode: delete the origin ref via the
+        GitHub API. True when the ref is gone (deleted now, or already absent — a clean
+        state, e.g. the repo's auto-delete-on-merge beat us to it). Never raises: cleanup
+        must not gate a merge/close that already happened."""
+        if not branch:
+            return False
+        try:
+            validate_branch_name(branch)
+        except ValidationError:
+            return False  # never feed an unvalidated name into an API path
+        # The branch charset is pre-validated (no ':', no leading '-', URL-path-safe),
+        # so it can be embedded raw; slashes in branch names are literal in refs paths.
+        proc = self._run_cleanup(
+            ["gh", "api", "-X", "DELETE", f"repos/{slug}/git/refs/heads/{branch}"], None
+        )
+        if proc is None:
+            return False
+        if proc.returncode == 0:
+            return True
+        if "reference does not exist" in f"{proc.stderr or ''} {proc.stdout or ''}".lower():
+            return True
+        logger.warning(
+            "Best-effort delete of remote branch %s on %s failed: %s", branch, slug, _detail(proc)
+        )
+        return False
 
     def list_worktrees(self, repo: str) -> list[Worktree]:
         out = self._run(["git", "worktree", "list", "--porcelain"], cwd=repo).stdout
